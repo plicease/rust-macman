@@ -1,6 +1,7 @@
 //! MacMan: a manager for named classic Macintosh emulation environments.
 
 pub mod app;
+pub mod archive;
 pub mod backend;
 pub mod cli;
 pub mod disk;

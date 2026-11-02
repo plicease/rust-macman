@@ -1,5 +1,6 @@
 //! Command implementations.
 
+use crate::archive::{self, Outcome};
 use crate::backend::minivmac::{MANIFEST, Manifest};
 use crate::backend::{Backends, Check, CheckLevel, LaunchRequest, ResolvedDisk};
 use crate::cli::{
@@ -8,7 +9,7 @@ use crate::cli::{
 use crate::disk::{self, Classification, DiskFormat, ImageLock, LockMode, Session, SessionRecord};
 use crate::fsutil::{atomic_copy, list_dir, read_toml, sha256_file, validate_name};
 use crate::machine::{
-    Config, Disk, Display, EmulatorConfig, Hardware, Machine, SCHEMA_VERSION, SystemInfo,
+    Config, Disk, Display, EmulatorConfig, Hardware, Machine, SCHEMA_VERSION, SystemInfo, new_id,
 };
 use crate::model::{Model, parse_display};
 use crate::paths::Paths;
@@ -75,9 +76,39 @@ impl App {
             Command::Run(args) => return self.run(&args, verbose),
             Command::Config(ConfigCommand::Show { name }) => self.config_show(name)?,
             Command::Clone { source, dest } => self.clone_machine(&source, &dest)?,
+            Command::Export { names, output } => {
+                let count = archive::export(&self.paths, &names, &output)?;
+                println!("Exported {count} machine(s) to {}", output.display());
+            }
+            Command::Import { file, rename } => {
+                return self.import(&file, rename.as_deref());
+            }
             Command::Remove { name, delete_disks } => self.remove(&name, delete_disks)?,
         }
         Ok(0)
+    }
+
+    fn import(&self, file: &Path, rename: Option<&str>) -> Result<u8> {
+        let report = archive::import(&self.paths, &self.backends, file, rename)?;
+        for line in report.roms.values() {
+            println!("{line}");
+        }
+        for result in &report.machines {
+            let name = &result.name;
+            match &result.outcome {
+                Outcome::Imported => println!("imported machine {name}"),
+                Outcome::Unchanged => println!("unchanged machine {name}"),
+                Outcome::Conflict(reason) => println!("conflict machine {name}: {reason}"),
+                Outcome::Failed(reason) => println!("failed machine {name}: {reason}"),
+            }
+        }
+        println!(
+            "{} imported, {} unchanged, {} unresolved",
+            report.imported(),
+            report.unchanged(),
+            report.unresolved()
+        );
+        Ok(u8::from(report.unresolved() > 0))
     }
 
     fn current(&self) -> Result<String> {
@@ -269,6 +300,7 @@ impl App {
         let machine = Machine {
             schema_version: SCHEMA_VERSION,
             name: args.name.clone(),
+            id: Some(new_id()),
             emulator: EmulatorConfig {
                 backend: backend.name().to_string(),
                 revision: backend.revision().to_string(),
@@ -340,6 +372,7 @@ impl App {
         let original = Machine::load(&self.paths, source)?;
         let mut copy = original.clone();
         copy.name = dest.to_string();
+        copy.id = Some(new_id());
 
         self.publish_machine(&copy, |dir| {
             for (from, disk) in original.disk_paths(&self.paths)? {

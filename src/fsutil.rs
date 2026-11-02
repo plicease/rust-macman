@@ -70,7 +70,7 @@ pub fn atomic_copy_range_checked(
 }
 
 /// Move `tmp` to `dst`, failing if `dst` appeared since it was last checked.
-fn publish_new(tmp: &Path, dst: &Path) -> Result<()> {
+pub fn publish_new(tmp: &Path, dst: &Path) -> Result<()> {
     publish_new_with(tmp, dst, |from, to| fs::hard_link(from, to))
 }
 
@@ -98,7 +98,7 @@ fn publish_new_with(
     }
 }
 
-fn temp_sibling(path: &Path) -> Result<PathBuf> {
+pub fn temp_sibling(path: &Path) -> Result<PathBuf> {
     let parent = path.parent().context("path has no parent directory")?;
     fs::create_dir_all(parent)
         .with_context(|| format!("cannot create directory {}", parent.display()))?;
@@ -122,6 +122,10 @@ pub fn sha256_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buffer[..count]);
     }
+}
+
+pub fn hex_digest(hasher: Sha256) -> String {
+    hex(&hasher.finalize())
 }
 
 pub fn sha256_bytes(bytes: &[u8]) -> String {

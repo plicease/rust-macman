@@ -13,6 +13,10 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub struct Machine {
     pub schema_version: u32,
     pub name: String,
+    /// Stable identity across export and import, unlike the name. Machines
+    /// from before this existed get one when first exported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub emulator: EmulatorConfig,
     pub hardware: Hardware,
     pub display: Display,
@@ -110,6 +114,10 @@ impl Machine {
             })
             .collect()
     }
+}
+
+pub fn new_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// `config.toml`: the persistent selection and backend settings.

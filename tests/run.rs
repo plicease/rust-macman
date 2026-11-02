@@ -599,6 +599,28 @@ fn real_adapter() -> Option<(Harness, PathBuf)> {
 }
 
 #[test]
+fn an_imported_machine_builds_on_its_first_run_and_reuses_that_build() {
+    let Some((h, log)) = real_adapter() else {
+        return;
+    };
+    let builds = || {
+        let text = fs::read_to_string(&log).unwrap_or_default();
+        text.lines().filter(|line| *line == "build").count()
+    };
+    h.create("plus-a");
+    let archive = h.dir().join("plus.tar.gz");
+    let archive = archive.to_str().unwrap();
+    h.cmd(&["export", "plus-a", "-o", archive]).unwrap();
+
+    assert_eq!(h.cmd(&["import", archive, "--rename", "copy"]).unwrap(), 0);
+    assert_eq!(builds(), 0);
+    assert_eq!(h.cmd(&["run", "copy"]).unwrap(), 0);
+    assert_eq!(builds(), 1);
+    assert_eq!(h.cmd(&["run", "copy"]).unwrap(), 0);
+    assert_eq!(builds(), 1);
+}
+
+#[test]
 fn real_adapter_builds_once_per_configuration_and_launches() {
     let Some((h, log)) = real_adapter() else {
         return;

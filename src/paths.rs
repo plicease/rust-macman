@@ -53,6 +53,10 @@ impl Paths {
     pub fn sessions(&self) -> PathBuf {
         self.data_dir.join("sessions")
     }
+    /// Working space for `macman import`, on the same filesystem as the data.
+    pub fn staging(&self) -> PathBuf {
+        self.data_dir.join("staging")
+    }
     pub fn builds(&self) -> PathBuf {
         self.cache_dir.join("builds")
     }

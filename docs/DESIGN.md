@@ -71,11 +71,13 @@ macman run wombat-6 --disk ./build/tico68.dsk --readonly
 macman config show wombat-6
 macman clone wombat-6 wombat-test
 macman remove wombat-test
+macman export wombat-6 -o wombat-6.tar.gz
+macman import wombat-6.tar.gz
 ```
 
 `macman create` should **clone** a registered system image into a machine's writable private disk by default, not boot and modify the shared template. A `--disk` argument on `run` attaches an additional temporary disk without updating the saved configuration. The `--readonly` option applies to that temporary attachment; implementation must ensure the emulator genuinely enforces read-only access (see §8).
 
-A later version may add `macman build`, `macman disk attach/detach`, `macman snapshot`, `macman export/import`, and `macman test`.
+A later version may add `macman build`, `macman disk attach/detach`, `macman snapshot`, and `macman test`.
 
 ### Selection semantics
 
@@ -110,6 +112,8 @@ Use XDG paths on Linux, respecting `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_
     <version-or-commit>/
 ```
 
+`macman import` also uses `staging/` under the data directory, and `import.lock` beside it.
+
 Machine files and templates live in the data directory; generated executables and source checkouts can be evicted and rebuilt from the cache. Avoid implicit deletion of user-owned disks. Use atomic writes for configuration and registration metadata.
 
 Example `machine.toml`:
@@ -117,6 +121,7 @@ Example `machine.toml`:
 ```toml
 schema_version = 1
 name = "wombat-6"
+id = "6f1c1f6e-7a3d-4c55-9d0e-3a0f2f6f0a11"  # stable across export and import
 
 [emulator]
 backend = "minivmac"
