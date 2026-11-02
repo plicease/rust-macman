@@ -20,6 +20,8 @@
 //! between hosts. Its `revision` records where it came from, and is checked
 //! against [`INTERCHANGEABLE_REVISIONS`].
 
+pub use super::source::SourcePin;
+use super::source::{self, Source, tool_exists};
 use super::{Check, EmulatorBackend, Executable, LaunchRequest};
 use crate::fsutil::{
     atomic_copy, copy_tree, sha256_bytes, sha256_file, sha256_tree, symlink_file,
@@ -58,14 +60,6 @@ const WINDOWS_MAX_PATH: usize = 260;
 const INTERCHANGEABLE_REVISIONS: &[&str] = &["36.04", "37.03"];
 const UNSUPPORTED_HOST: &str =
     "the Mini vMac backend supports only Linux x86-64, Windows x86-64, and macOS ARM64 hosts";
-
-/// An exact upstream source archive.
-#[derive(Debug, Clone)]
-pub struct SourcePin {
-    pub revision: String,
-    pub url: String,
-    pub sha256: String,
-}
 
 impl Default for SourcePin {
     /// 36.04 has no ARM64 target of any kind, so macOS needs 37.03, a beta,
@@ -144,67 +138,14 @@ impl MiniVmac {
         }
     }
 
-    fn cached_archive(&self) -> PathBuf {
-        self.paths
-            .sources()
-            .join(&self.pin.revision)
-            .join("source.tgz")
-    }
-
-    /// Put the verified source archive in the cache, downloading if needed.
-    fn fetch_source(&self) -> Result<PathBuf> {
-        let cached = self.cached_archive();
-        if cached.exists() {
-            if sha256_file(&cached)? == self.pin.sha256 {
-                return Ok(cached);
-            }
-            eprintln!("warning: cached Mini vMac source is damaged; fetching it again");
-            fs::remove_file(&cached)?;
+    fn source(&self) -> Source<'_> {
+        Source {
+            paths: &self.paths,
+            pin: &self.pin,
+            local: self.source_archive.as_deref(),
+            label: "Mini vMac",
+            config_table: "minivmac",
         }
-
-        if let Some(local) = &self.source_archive {
-            atomic_copy(local, &cached).context("cannot use configured source_archive")?;
-        } else {
-            eprintln!("Downloading Mini vMac {}...", self.pin.revision);
-            let partial = cached.with_extension("partial");
-            let directory = cached.parent().context("no source directory")?;
-            fs::create_dir_all(directory)?;
-            let status = Command::new("curl")
-                .args([
-                    "--fail",
-                    "--location",
-                    "--silent",
-                    "--show-error",
-                    "--output",
-                ])
-                // Relative, so curl needn't cope with the cache's real path.
-                .arg(partial.file_name().context("no source file name")?)
-                .arg(&self.pin.url)
-                .current_dir(directory)
-                .status()
-                .context(
-                    "cannot run curl; install it, or set minivmac.source_archive in config.toml",
-                )?;
-            if !status.success() {
-                let _ = fs::remove_file(&partial);
-                bail!(
-                    "download of {} failed; check the network, or download it yourself and set \
-                     minivmac.source_archive in config.toml",
-                    self.pin.url
-                );
-            }
-            fs::rename(&partial, &cached)?;
-        }
-
-        if sha256_file(&cached)? != self.pin.sha256 {
-            fs::remove_file(&cached)?;
-            bail!(
-                "Mini vMac source archive does not match the pinned SHA-256 {}; refusing to \
-                 build from it",
-                self.pin.sha256
-            );
-        }
-        Ok(cached)
     }
 
     fn build_key(&self, options: &[String], toolchain: &str) -> String {
@@ -220,17 +161,8 @@ impl MiniVmac {
         )
     }
 
-    /// The executable in a published build, provided it matches its manifest.
-    fn cached_build(&self, key: &str) -> Option<PathBuf> {
-        let dir = self.paths.builds().join(key);
-        let manifest: Manifest = crate::fsutil::read_toml(&dir.join(MANIFEST)).ok()?;
-        manifest
-            .is_intact(&dir)
-            .then(|| dir.join(&manifest.executable))
-    }
-
     fn build(&self, key: &str, options: &[String], toolchain: &str, verbose: bool) -> Result<()> {
-        let archive = self.fetch_source()?;
+        let archive = self.source().fetch()?;
         let work = self
             .paths
             .build_work()
@@ -457,15 +389,18 @@ fn run_windows_build(archive: &Path, src: &Path, options: &[String], log: &File)
 /// The 8.3 form of `path` if it has one. MinGW's make uses the narrow Windows
 /// API, and stops at a working directory outside the system code page.
 #[cfg(windows)]
-fn short_path(path: &Path) -> PathBuf {
+pub(super) fn short_path(path: &Path) -> PathBuf {
     use std::ffi::OsString;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
 
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-    let mut short = vec![0u16; wide.len()];
-    // SAFETY: `wide` is NUL-terminated, and the length is that of `short`. A
-    // short form is never longer than the long one, which `short` can hold.
+    // A short form can be the longer one: `日本.dsk` is six units, and its 8.3
+    // name up to twelve. So ask how much room it takes.
+    // SAFETY: `wide` is NUL-terminated, and a null buffer of length 0 is valid.
+    let needed = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    let mut short = vec![0u16; needed as usize];
+    // SAFETY: as above, and the length is that of `short`.
     let length =
         unsafe { GetShortPathNameW(wide.as_ptr(), short.as_mut_ptr(), short.len() as u32) };
     match short.get(..length as usize) {
@@ -475,7 +410,7 @@ fn short_path(path: &Path) -> PathBuf {
 }
 
 #[cfg(not(windows))]
-fn short_path(path: &Path) -> PathBuf {
+pub(super) fn short_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
@@ -511,7 +446,7 @@ fn use_wide_windows_api(makefile: &str) -> Result<String> {
 }
 
 /// MinGW's own make goes by this name; a plain `make` may be something else.
-fn make_tool() -> &'static str {
+pub(super) fn make_tool() -> &'static str {
     if tool_exists("mingw32-make") {
         "mingw32-make"
     } else {
@@ -583,7 +518,7 @@ fn macos_sdk() -> Result<MacosSdk> {
     })
 }
 
-fn macos_toolchain_identity() -> Result<String> {
+pub(super) fn macos_toolchain_identity() -> Result<String> {
     let hint = "cannot run clang; install Apple's command line tools (run `macman doctor`)";
     let target = command_output("clang", &["-dumpmachine"]).context(hint)?;
     if !is_arm64_darwin(&target) {
@@ -618,7 +553,7 @@ fn toolchain_identity() -> Result<String> {
     Ok(format!("{target} {version}"))
 }
 
-fn gcc_target() -> Result<String> {
+pub(super) fn gcc_target() -> Result<String> {
     let output = Command::new("gcc")
         .arg("-dumpmachine")
         .output()
@@ -627,7 +562,7 @@ fn gcc_target() -> Result<String> {
 }
 
 /// Cygwin and MSYS compilers also run on Windows, but need their own runtimes.
-fn is_mingw_x64(target: &str) -> bool {
+pub(super) fn is_mingw_x64(target: &str) -> bool {
     target.starts_with("x86_64-") && target.contains("mingw")
 }
 
@@ -672,7 +607,7 @@ fn check_windows_path_length(path: &Path) -> Result<()> {
 /// Give the run its own emulator and ROM, then start from that directory.
 fn windows_command(request: &LaunchRequest<'_>) -> Result<Command> {
     let workdir = request.workdir;
-    let rom = workdir.join(rom_file_name(request.machine.hardware.model));
+    let rom = workdir.join(rom_file_name(request.machine.hardware.require_model()?));
     let executable = workdir.join(EXECUTABLE);
     check_windows_path_length(&rom)?;
     check_windows_path_length(&executable)?;
@@ -709,7 +644,7 @@ fn macos_command(request: &LaunchRequest<'_>) -> Result<Command> {
     copy_tree(bundle, &workdir.join(BUNDLE))?;
     atomic_copy(
         request.rom,
-        &workdir.join(rom_file_name(request.machine.hardware.model)),
+        &workdir.join(rom_file_name(request.machine.hardware.require_model()?)),
     )?;
     for (index, disk) in request.disks.iter().enumerate() {
         let link = workdir.join(startup_disk_name(index));
@@ -808,14 +743,15 @@ fn validate_display(model: Model, display: &Display) -> Result<()> {
 }
 
 /// Compile-time options for the configuration tool.
-fn build_options(machine: &Machine) -> Vec<String> {
+fn build_options(machine: &Machine) -> Result<Vec<String>> {
     let hardware = &machine.hardware;
+    let model = hardware.require_model()?;
     let display = &machine.display;
     let depth = depth_option(display.depth).unwrap_or(0);
     let mut options: Vec<String> = target_options().iter().map(|s| s.to_string()).collect();
     options.extend(
         [
-            ("-m", model_option(hardware.model).to_string()),
+            ("-m", model_option(model).to_string()),
             ("-mem", hardware.memory.clone()),
             ("-hres", display.width.to_string()),
             ("-vres", display.height.to_string()),
@@ -836,10 +772,10 @@ fn build_options(machine: &Machine) -> Vec<String> {
         options.extend(["-magnify".to_string(), "0".to_string()]);
     }
     // From 37.03 these models slow down automatically, which 36.04's don't.
-    if MACOS && matches!(hardware.model, Model::II | Model::IIx) {
+    if MACOS && matches!(model, Model::II | Model::IIx) {
         options.extend(["-as".to_string(), "0".to_string()]);
     }
-    options
+    Ok(options)
 }
 
 impl EmulatorBackend for MiniVmac {
@@ -866,7 +802,13 @@ impl EmulatorBackend for MiniVmac {
     fn validate(&self, machine: &Machine) -> Result<()> {
         self.resolve_revision(&machine.emulator.revision)
             .with_context(|| format!("machine {:?} can't run here", machine.name))?;
-        let model = machine.hardware.model;
+        if machine.basilisk2.is_some() {
+            bail!(
+                "machine {:?} has Basilisk II settings, but uses Mini vMac",
+                machine.name
+            );
+        }
+        let model = machine.hardware.require_model()?;
         let sizes = memory_sizes(model);
         if !sizes.contains(&machine.hardware.memory.as_str()) {
             bail!(
@@ -879,12 +821,10 @@ impl EmulatorBackend for MiniVmac {
     }
 
     fn validate_disks(&self, machine: &Machine, count: usize) -> Result<()> {
-        let limit = drive_count(machine.hardware.model);
+        let model = machine.hardware.require_model()?;
+        let limit = drive_count(model);
         if count > limit {
-            bail!(
-                "model {} supports {limit} disks at once, but this run attaches {count}",
-                machine.hardware.model
-            );
+            bail!("model {model} supports {limit} disks at once, but this run attaches {count}");
         }
         Ok(())
     }
@@ -894,37 +834,11 @@ impl EmulatorBackend for MiniVmac {
             bail!(UNSUPPORTED_HOST);
         }
         self.validate(machine)?;
-        let options = build_options(machine);
+        let options = build_options(machine)?;
         let toolchain = toolchain_identity()?;
         let key = self.build_key(&options, &toolchain);
-        if let Some(path) = self.cached_build(&key) {
-            return Ok(Executable {
-                path,
-                build_key: key,
-                built: false,
-            });
-        }
-
-        // Two runs of one configuration must not build it twice.
-        fs::create_dir_all(self.paths.build_work())?;
-        let lock_path = self.paths.build_work().join(format!(".{key}.lock"));
-        let lock = File::create(&lock_path).context("cannot create build lock")?;
-        lock.lock().context("cannot lock build")?;
-        if let Some(path) = self.cached_build(&key) {
-            return Ok(Executable {
-                path,
-                build_key: key,
-                built: false,
-            });
-        }
-        self.build(&key, &options, &toolchain, verbose)?;
-        let path = self
-            .cached_build(&key)
-            .context("published Mini vMac build failed validation")?;
-        Ok(Executable {
-            path,
-            build_key: key,
-            built: true,
+        source::cached_or_built(&self.paths, key, "Mini vMac", |key| {
+            self.build(key, &options, &toolchain, verbose)
         })
     }
 
@@ -970,36 +884,7 @@ impl EmulatorBackend for MiniVmac {
             unix_tool_checks(&mut checks);
         }
 
-        let cached = self.cached_archive();
-        match sha256_file(&cached) {
-            Ok(sha) if sha == self.pin.sha256 => checks.push(Check::ok(format!(
-                "Mini vMac {} source cached",
-                self.pin.revision
-            ))),
-            Ok(_) => checks.push(Check::warn(
-                "cached Mini vMac source is damaged",
-                "it will be fetched again on the next build",
-            )),
-            Err(_) => match &self.source_archive {
-                Some(local) if local.is_file() => checks.push(Check::ok(format!(
-                    "Mini vMac {} source available from source_archive",
-                    self.pin.revision
-                ))),
-                Some(_) => checks.push(Check::fail(
-                    "configured minivmac.source_archive is missing",
-                    "fix or remove it in config.toml",
-                )),
-                None if tool_exists("curl") => checks.push(Check::warn(
-                    format!("Mini vMac {} source not downloaded yet", self.pin.revision),
-                    "it will be downloaded on the first build; offline, set \
-                     minivmac.source_archive in config.toml",
-                )),
-                None => checks.push(Check::fail(
-                    "Mini vMac source not cached, and curl not found",
-                    "install curl, or set minivmac.source_archive in config.toml",
-                )),
-            },
-        }
+        checks.push(self.source().check());
 
         if !cfg!(windows) && !MACOS && std::env::var_os("DISPLAY").is_none() {
             checks.push(Check::warn(
@@ -1101,16 +986,6 @@ fn windows_tool_checks(checks: &mut Vec<Check>) {
     }
 }
 
-fn tool_exists(tool: &str) -> bool {
-    Command::new(tool)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok()
-}
-
 /// Ask the compiler, since include paths differ between distributions.
 fn header_exists(header: &str) -> bool {
     Command::new("bash")
@@ -1137,7 +1012,7 @@ mod tests {
                 revision: SourcePin::default().revision,
             },
             hardware: Hardware {
-                model,
+                model: Some(model),
                 rom: "r".into(),
                 memory: memory.into(),
             },
@@ -1149,6 +1024,7 @@ mod tests {
                 fullscreen: false,
             },
             system: Default::default(),
+            basilisk2: None,
             disks: vec![],
         }
     }
@@ -1238,8 +1114,8 @@ mod tests {
 
     #[test]
     fn macos_options_keep_the_guest_as_it_is_on_36_04() {
-        let plus = build_options(&machine(Model::Plus, "4M", (512, 342, 1)));
-        let ii = build_options(&machine(Model::II, "8M", (640, 480, 8)));
+        let plus = build_options(&machine(Model::Plus, "4M", (512, 342, 1))).unwrap();
+        let ii = build_options(&machine(Model::II, "8M", (640, 480, 8))).unwrap();
         let has_pair = |options: &[String], flag: &str, value: &str| {
             options.windows(2).any(|pair| pair == [flag, value])
         };
@@ -1255,7 +1131,7 @@ mod tests {
         let target = target_options().join(" ");
         let slowdown = if MACOS { " -as 0" } else { "" };
         assert_eq!(
-            build_options(&m).join(" "),
+            build_options(&m).unwrap().join(" "),
             format!(
                 "{target} -m II -mem 8M -hres 640 -vres 480 -depth 3 -fullscreen 0 -mf 2 \
                  -magnify 1{slowdown}"
@@ -1265,7 +1141,7 @@ mod tests {
         m.display.scale = 1;
         m.display.fullscreen = true;
         assert_eq!(
-            build_options(&m).join(" "),
+            build_options(&m).unwrap().join(" "),
             format!(
                 "{target} -m Plus -mem 4M -hres 512 -vres 342 -depth 0 -fullscreen 1 -magnify 0"
             )
@@ -1276,7 +1152,7 @@ mod tests {
     fn build_key_tracks_compile_time_inputs_only() {
         let b = backend();
         let plus = machine(Model::Plus, "4M", (512, 342, 1));
-        let key = |m: &Machine, gcc| b.build_key(&build_options(m), gcc);
+        let key = |m: &Machine, gcc| b.build_key(&build_options(m).unwrap(), gcc);
 
         let mut other_disks = plus.clone();
         other_disks.name = "other".into();

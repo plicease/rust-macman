@@ -187,7 +187,7 @@ fn use_current_and_list() {
 
     let list = env.ok(&["list"]);
     assert!(
-        list.contains("* wombat-6  plus 4M 512x342x1 system 6.0.8"),
+        list.contains("* wombat-6  plus  4M  512x342x1  system 6.0.8"),
         "{list}"
     );
     assert!(list.contains("  wombat-7"), "{list}");

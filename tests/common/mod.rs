@@ -28,6 +28,7 @@ pub fn write_disk(dir: &Path, name: &str) -> PathBuf {
     let path = dir.join(name);
     let mut bytes = vec![0u8; 800 * 1024];
     bytes[1024..1026].copy_from_slice(b"BD");
+    bytes[1034] = 0x01; // Cleanly unmounted.
     fs::write(&path, bytes).unwrap();
     path
 }

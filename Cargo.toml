@@ -1,6 +1,6 @@
 [package]
 name = "macman"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.90"
 description = "Mac emulator manager"
@@ -16,6 +16,9 @@ sha2 = "0.11.1"
 tar = "0.4.46"
 toml = "1.1.8"
 uuid = { version = "1.29.0", features = ["v4"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

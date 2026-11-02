@@ -308,9 +308,59 @@ pub fn list_dir(dir: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// A file lock that has been taken, and is released when this is dropped.
+///
+/// Closing the file isn't enough to rely on. A process being spawned, by any
+/// thread, has a copy of the descriptor until it reaches `exec`, and a `flock`
+/// lasts until the last copy closes. That can take long enough on macOS for
+/// the next attempt to find the lock taken. Unlocking applies to every copy.
+#[derive(Debug)]
+pub struct HeldLock(File);
+
+impl HeldLock {
+    /// `file` must already hold its lock.
+    pub fn new(file: File) -> Self {
+        Self(file)
+    }
+}
+
+impl Drop for HeldLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_released_lock_is_free_while_processes_start() {
+        use std::process::{Command, Stdio};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("lock");
+        let done = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    while !done.load(Ordering::Relaxed) {
+                        let _ = Command::new("true").stdin(Stdio::null()).status();
+                    }
+                });
+            }
+            let result = (0..5000).try_for_each(|_| {
+                let file = File::create(&path).unwrap();
+                file.try_lock()?;
+                drop(HeldLock::new(file));
+                Ok::<_, fs::TryLockError>(())
+            });
+            done.store(true, Ordering::Relaxed);
+            result.unwrap();
+        });
+    }
 
     #[test]
     fn names_cannot_escape_their_directory() {

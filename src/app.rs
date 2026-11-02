@@ -1,6 +1,7 @@
 //! Command implementations.
 
 use crate::archive::{self, Outcome};
+use crate::backend::basilisk2;
 use crate::backend::minivmac::{MANIFEST, Manifest};
 use crate::backend::{Backends, Check, CheckLevel, LaunchRequest, ResolvedDisk};
 use crate::cli::{
@@ -11,19 +12,56 @@ use crate::fsutil::{
     atomic_copy, list_dir, read_toml, sha256_file, validate_name, without_verbatim_prefix,
 };
 use crate::machine::{
-    Config, Disk, Display, EmulatorConfig, Hardware, Machine, SCHEMA_VERSION, SystemInfo, new_id,
-    publish_dir,
+    Basilisk2Settings, Config, Disk, Display, EmulatorConfig, Hardware, Machine, SCHEMA_VERSION,
+    SystemInfo, new_id, publish_dir,
 };
 use crate::model::{Model, parse_display};
 use crate::paths::Paths;
 use crate::registry;
 use anyhow::{Context, Result, bail};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
 const SYSTEM_DISK: &str = "system.dsk";
+
+fn print_table(rows: &[Vec<String>], right_aligned: &[usize]) {
+    for line in table(rows, right_aligned) {
+        println!("{line}");
+    }
+}
+
+/// Lays out rows in columns two spaces apart. The columns in `right_aligned` are padded on
+/// the left. A row's last cell runs on, so it neither pads nor widens its column: that keeps
+/// long options or an error from pushing every other row across.
+fn table(rows: &[Vec<String>], right_aligned: &[usize]) -> Vec<String> {
+    let mut widths: Vec<usize> = Vec::new();
+    for row in rows {
+        for (column, cell) in row.iter().enumerate().take(row.len().saturating_sub(1)) {
+            if column == widths.len() {
+                widths.push(0);
+            }
+            widths[column] = widths[column].max(cell.chars().count());
+        }
+    }
+    rows.iter()
+        .map(|row| {
+            let cells = row.iter().enumerate().map(|(column, cell)| {
+                let width = widths.get(column).copied().unwrap_or(0);
+                if column + 1 == row.len() {
+                    cell.clone()
+                } else if right_aligned.contains(&column) {
+                    format!("{cell:>width$}")
+                } else {
+                    format!("{cell:<width$}")
+                }
+            });
+            cells.collect::<Vec<_>>().join("  ").trim_end().to_string()
+        })
+        .collect()
+}
 
 pub struct App {
     pub paths: Paths,
@@ -79,7 +117,15 @@ impl App {
             Command::Run(args) => return self.run(&args, verbose),
             Command::Config(ConfigCommand::Show { name }) => self.config_show(name)?,
             Command::Clone { source, dest } => self.clone_machine(&source, &dest)?,
-            Command::Export { names, output } => {
+            Command::Export { names, all, output } => {
+                let names = if all {
+                    list_dir(&self.paths.machines())?
+                } else {
+                    names
+                };
+                if names.is_empty() {
+                    bail!("there are no machines to export");
+                }
                 let count = archive::export(&self.paths, &names, &output)?;
                 println!("Exported {count} machine(s) to {}", output.display());
             }
@@ -141,77 +187,98 @@ impl App {
 
     fn list_machines(&self) -> Result<()> {
         let current = Config::load(&self.paths)?.current;
+        let mut rows = Vec::new();
         for name in list_dir(&self.paths.machines())? {
             let marker = if current.as_deref() == Some(&name) {
                 '*'
             } else {
                 ' '
             };
-            match Machine::load(&self.paths, &name) {
+            let label = format!("{marker} {name}");
+            rows.push(match Machine::load(&self.paths, &name) {
                 Ok(m) => {
                     let version = m.system.version.as_deref().unwrap_or("-");
-                    println!(
-                        "{marker} {name}  {} {} {}x{}x{} system {version}",
-                        m.hardware.model,
-                        m.hardware.memory,
-                        m.display.width,
-                        m.display.height,
-                        m.display.depth
-                    );
+                    let hardware = m
+                        .hardware
+                        .model
+                        .map_or(m.emulator.backend.clone(), |model| model.to_string());
+                    vec![
+                        label,
+                        hardware,
+                        m.hardware.memory.clone(),
+                        format!(
+                            "{}x{}x{}",
+                            m.display.width, m.display.height, m.display.depth
+                        ),
+                        format!("system {version}"),
+                    ]
                 }
-                Err(e) => println!("{marker} {name}  (unreadable: {e:#})"),
-            }
+                Err(e) => vec![label, format!("(unreadable: {e:#})")],
+            });
         }
+        print_table(&rows, &[2]);
         Ok(())
     }
 
     fn list_builds(&self) -> Result<()> {
+        let mut rows = Vec::new();
         for key in list_dir(&self.paths.builds())? {
-            match read_toml::<Manifest>(&self.paths.builds().join(&key).join(MANIFEST)) {
-                Ok(m) => println!(
-                    "{}  {} {}  {}",
-                    &key[..12.min(key.len())],
-                    m.backend,
-                    m.revision,
-                    m.options.join(" ")
-                ),
-                Err(_) => println!("{key}  (no valid manifest)"),
-            }
+            rows.push(
+                match read_toml::<Manifest>(&self.paths.builds().join(&key).join(MANIFEST)) {
+                    Ok(m) => vec![
+                        key[..12.min(key.len())].to_string(),
+                        m.backend,
+                        m.revision,
+                        m.options.join(" "),
+                    ],
+                    // One cell, as the whole key would widen the column for every other row.
+                    Err(_) => vec![format!("{key}  (no valid manifest)")],
+                },
+            );
         }
+        print_table(&rows, &[]);
         Ok(())
     }
 
     fn list_roms(&self) -> Result<()> {
+        let mut rows = Vec::new();
         for rom in registry::list_roms(&self.paths)? {
             let models: Vec<_> = rom.models.iter().map(|m| m.name()).collect();
-            let models = if models.is_empty() {
-                "unrecognised".to_string()
-            } else {
+            let file = self.paths.roms().join(format!("{}.rom", rom.name));
+            let models = if !models.is_empty() {
                 models.join("/")
+            } else if registry::rom_file_is_32_bit_clean(&file, rom.size)? {
+                "32-bit clean, for Basilisk II".to_string()
+            } else {
+                "unrecognised".to_string()
             };
-            println!(
-                "{}  {}K  {models}  {}",
+            rows.push(vec![
                 rom.name,
-                rom.size / 1024,
-                &rom.sha256[..12]
-            );
+                format!("{}K", rom.size / 1024),
+                models,
+                rom.sha256[..12].to_string(),
+            ]);
         }
+        print_table(&rows, &[1]);
         Ok(())
     }
 
     fn list_systems(&self) -> Result<()> {
+        let mut rows = Vec::new();
         for system in registry::list_systems(&self.paths)? {
             let version = system.version.as_deref().unwrap_or("-");
             let (_, file) = registry::load_system(&self.paths, &system.name)?;
             let format = disk::detect_format(&file)
                 .map(registry::describe_format)
                 .unwrap_or("unknown format");
-            println!(
-                "{}  {version}  {}K  {format}",
-                system.name,
-                system.size / 1024
-            );
+            rows.push(vec![
+                system.name.clone(),
+                version.to_string(),
+                format!("{}K", system.size / 1024),
+                format.to_string(),
+            ]);
         }
+        print_table(&rows, &[2]);
         Ok(())
     }
 
@@ -283,23 +350,43 @@ impl App {
         if self.paths.machine(&args.name).exists() {
             bail!("machine {:?} already exists", args.name);
         }
-        let model: Model = args.model.parse()?;
-        let (rom, _) = registry::load_rom(&self.paths, &args.rom)?;
-        registry::check_rom_for_model(&rom, model)?;
+        let backend = match &args.backend {
+            Some(name) => self.backends.get(name)?,
+            None => self.backends.default_backend(),
+        };
+        let basilisk2 = backend.name() == basilisk2::BACKEND_NAME;
+        let settings = basilisk2_settings(&args, basilisk2)?;
+        let model: Option<Model> = match &args.model {
+            Some(_) if basilisk2 => {
+                bail!("--model is for Mini vMac; Basilisk II has --cpu instead")
+            }
+            Some(model) => Some(model.parse()?),
+            None if basilisk2 => None,
+            None => bail!("--model is required, such as --model plus"),
+        };
+        let (rom, rom_path) = registry::load_rom(&self.paths, &args.rom)?;
         let (system, template) = registry::load_system(&self.paths, &args.system)?;
         let format = disk::detect_format(&template)?;
-        if format == disk::DiskFormat::RawHfs && !model.reads_hfs() {
+        if let Some(model) = model
+            && format == disk::DiskFormat::RawHfs
+            && !model.reads_hfs()
+        {
             eprintln!(
                 "warning: model {model} cannot read HFS, so {} will not boot",
                 system.name
             );
         }
 
-        let (width, height, depth) = match &args.display {
-            Some(display) => parse_display(display)?,
-            None => model.default_display(),
+        let (width, height, depth) = match (&args.display, model) {
+            (Some(display), _) => parse_display(display)?,
+            (None, Some(model)) => model.default_display(),
+            (None, None) => basilisk2::DEFAULT_DISPLAY,
         };
-        let backend = self.backends.default_backend();
+        let memory = match (args.memory, model) {
+            (Some(memory), _) => memory.to_ascii_uppercase(),
+            (None, Some(model)) => model.default_memory().to_string(),
+            (None, None) => basilisk2::DEFAULT_MEMORY.to_string(),
+        };
         let machine = Machine {
             schema_version: SCHEMA_VERSION,
             name: args.name.clone(),
@@ -310,11 +397,8 @@ impl App {
             },
             hardware: Hardware {
                 model,
-                rom: rom.name,
-                memory: args
-                    .memory
-                    .unwrap_or_else(|| model.default_memory().to_string())
-                    .to_ascii_uppercase(),
+                rom: rom.name.clone(),
+                memory,
             },
             display: Display {
                 width,
@@ -326,12 +410,15 @@ impl App {
             system: SystemInfo {
                 version: system.version,
             },
+            basilisk2: settings,
             disks: vec![Disk {
                 path: SYSTEM_DISK.to_string(),
                 readonly: false,
                 boot: true,
             }],
         };
+        backend.check_host()?;
+        backend.check_rom(&machine, &rom, &rom_path)?;
         backend.validate(&machine)?;
 
         self.publish_machine(&machine, |dir| {
@@ -432,7 +519,7 @@ impl App {
 
         let (rom, rom_path) = registry::load_rom(&self.paths, &machine.hardware.rom)?;
         registry::verify(&rom_path, "ROM", &rom.name, &rom.sha256)?;
-        registry::check_rom_for_model(&rom, machine.hardware.model)?;
+        backend.check_rom(&machine, &rom, &rom_path)?;
 
         let saved_disks = machine.disk_paths(&self.paths)?;
         for (path, saved) in &saved_disks {
@@ -441,19 +528,26 @@ impl App {
             }
             // On Windows, a running emulator shuts out even readers.
             drop(disk::lock_image(&self.paths, path, LockMode::Shared)?);
+            backend.check_disk(path, !saved.readonly)?;
             if disk::detect_format(path)? == disk::DiskFormat::DiskCopy42 && !saved.readonly {
                 disk::warn_disk_copy_read_only(path);
             }
         }
         for path in &args.disks {
             drop(disk::lock_image(&self.paths, path, LockMode::Shared)?);
-            disk::check_attachable(path, args.any_format, !args.readonly)?;
+            backend.check_disk(path, !args.readonly)?;
+            let partitioned = matches!(disk::classify(path)?, Classification::Partitioned(_));
+            if !(partitioned && backend.mounts_partitioned_disks()) {
+                disk::check_attachable(path, args.any_format, !args.readonly)?;
+            }
         }
         backend.validate_disks(&machine, saved_disks.len() + args.disks.len())?;
+        self.offer_boot_disk_repair(&machine)?;
 
         if verbose && backend.revision() != machine.emulator.revision {
             println!(
-                "Machine records Mini vMac {}; this host runs it on {}",
+                "Machine records {} {}; this host runs it on {}",
+                backend.name(),
                 machine.emulator.revision,
                 backend.revision()
             );
@@ -518,6 +612,54 @@ impl App {
             }
         }
         Ok(exit_code(status))
+    }
+
+    /// The boot disk of `machine`, if a guest stopped without unmounting it and that can
+    /// keep the machine from starting. A read-only disk is left out, as guests only see
+    /// a copy of it.
+    fn unclean_boot_disk(&self, machine: &Machine) -> Result<Option<PathBuf>> {
+        if !self
+            .backends
+            .get(&machine.emulator.backend)?
+            .needs_unmounted_boot_volume()
+        {
+            return Ok(None);
+        }
+        for (path, disk) in machine.disk_paths(&self.paths)? {
+            if disk.boot && !disk.readonly && disk::left_mounted(&path)? {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Ask before anything is built or started, so the answer is about this run.
+    fn offer_boot_disk_repair(&self, machine: &Machine) -> Result<()> {
+        let Some(path) = self.unclean_boot_disk(machine)? else {
+            return Ok(());
+        };
+        let _lock = disk::lock_image(&self.paths, &path, LockMode::Exclusive)?;
+        let name = &machine.name;
+        let problem = format!(
+            "the boot disk of {name} wasn't shut down cleanly, so it may stop at a flashing \
+             question mark"
+        );
+        if !std::io::stdin().is_terminal() {
+            eprintln!("warning: {problem}; run macman from a terminal to repair it");
+            return Ok(());
+        }
+        print!(
+            "{problem}. This doesn't check or repair the disk. Set the HFS cleanly-unmounted \
+             flag to allow booting? [y/N] "
+        );
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().lock().read_line(&mut answer)?;
+        if accepts_repair(&answer) {
+            disk::mark_unmounted(&path)?;
+            println!("Set the flag, without checking the disk; run Disk First Aid in the guest");
+        }
+        Ok(())
     }
 
     /// Lock one disk and produce the form the emulator should see. Read-only
@@ -587,8 +729,18 @@ impl App {
 
     pub fn doctor_checks(&self, verbose: bool) -> Result<Vec<Check>> {
         let mut checks: Vec<Check> = Vec::new();
+        let in_use = self.backends_in_use()?;
+        let default = self.backends.default_backend().name();
         for backend in self.backends.iter() {
-            checks.extend(backend.doctor());
+            let needed = backend.name() == default || in_use.contains(backend.name());
+            checks.extend(backend.doctor().into_iter().map(|check| match check.level {
+                // What an unused backend lacks is no fault of this host.
+                CheckLevel::Fail if !needed => Check {
+                    level: CheckLevel::Warn,
+                    ..check
+                },
+                _ => check,
+            }));
         }
         self.check_registry(&mut checks)?;
         self.check_cache(&mut checks, verbose)?;
@@ -604,6 +756,15 @@ impl App {
             ));
         }
         Ok(checks)
+    }
+
+    /// The backends of the machines that can be read.
+    fn backends_in_use(&self) -> Result<BTreeSet<String>> {
+        Ok(list_dir(&self.paths.machines())?
+            .iter()
+            .filter_map(|name| Machine::load(&self.paths, name).ok())
+            .map(|machine| machine.emulator.backend)
+            .collect())
     }
 
     fn check_registry(&self, checks: &mut Vec<Check>) -> Result<()> {
@@ -674,7 +835,10 @@ impl App {
     fn check_machines(&self, checks: &mut Vec<Check>) -> Result<()> {
         for name in list_dir(&self.paths.machines())? {
             match self.check_machine(&name) {
-                Ok(()) => checks.push(Check::ok(format!("machine {name} is runnable"))),
+                Ok(()) => {
+                    checks.push(Check::ok(format!("machine {name} is runnable")));
+                    checks.extend(self.check_boot_disk(&name)?);
+                }
                 Err(e) => checks.push(Check::fail(
                     format!("machine {name} cannot run"),
                     format!("{e:#}"),
@@ -684,13 +848,32 @@ impl App {
         Ok(())
     }
 
+    fn check_boot_disk(&self, name: &str) -> Result<Option<Check>> {
+        let machine = Machine::load(&self.paths, name)?;
+        // A machine in use has its volume mounted, as it should.
+        let unclean = self.unclean_boot_disk(&machine).ok().flatten();
+        let Some(path) = unclean else {
+            return Ok(None);
+        };
+        if disk::lock_image(&self.paths, &path, LockMode::Exclusive).is_err() {
+            return Ok(None);
+        }
+        Ok(Some(Check::warn(
+            format!("machine {name} wasn't shut down cleanly, and may not start"),
+            format!(
+                "`macman run {name}` offers to set its boot disk's cleanly-unmounted flag; \
+                 then run Disk First Aid in the guest"
+            ),
+        )))
+    }
+
     fn check_machine(&self, name: &str) -> Result<()> {
         let machine = Machine::load(&self.paths, name)?;
-        self.backends
-            .get(&machine.emulator.backend)?
-            .validate(&machine)?;
-        let (rom, _) = registry::load_rom(&self.paths, &machine.hardware.rom)?;
-        registry::check_rom_for_model(&rom, machine.hardware.model)?;
+        let backend = self.backends.get(&machine.emulator.backend)?;
+        backend.check_host()?;
+        backend.validate(&machine)?;
+        let (rom, file) = registry::load_rom(&self.paths, &machine.hardware.rom)?;
+        backend.check_rom(&machine, &rom, &file)?;
         for (path, _) in machine.disk_paths(&self.paths)? {
             if !path.exists() {
                 let file: PathBuf = path.file_name().map(PathBuf::from).unwrap_or_default();
@@ -703,6 +886,38 @@ impl App {
         }
         Ok(())
     }
+}
+
+/// What `macman create` was asked for under `[basilisk2]`.
+fn basilisk2_settings(args: &CreateArgs, basilisk2: bool) -> Result<Option<Basilisk2Settings>> {
+    if !basilisk2 {
+        let given = [
+            (args.cpu.is_some(), "--cpu"),
+            (args.no_fpu, "--no-fpu"),
+            (args.no_sound, "--no-sound"),
+            (args.network.is_some(), "--network"),
+            (args.shared_folder.is_some(), "--shared-folder"),
+        ];
+        return match given.iter().find(|(set, _)| *set) {
+            Some((_, flag)) => bail!("{flag} needs --backend basilisk2"),
+            None => Ok(None),
+        };
+    }
+    let shared_folder = args
+        .shared_folder
+        .as_ref()
+        .map(|folder| {
+            fs::canonicalize(folder)
+                .with_context(|| format!("cannot use shared folder {}", folder.display()))
+        })
+        .transpose()?;
+    Ok(Some(Basilisk2Settings {
+        cpu: args.cpu.unwrap_or_default(),
+        fpu: !args.no_fpu,
+        sound: !args.no_sound,
+        network: args.network.unwrap_or_default(),
+        shared_folder,
+    }))
 }
 
 fn confirm_delete(name: &str, disks: usize) -> Result<()> {
@@ -719,6 +934,12 @@ fn confirm_delete(name: &str, disks: usize) -> Result<()> {
         bail!("cancelled; nothing was removed");
     }
     Ok(())
+}
+
+/// Only a plain yes writes to the disk. Enter, end of input, and a typo all decline.
+fn accepts_repair(answer: &str) -> bool {
+    let answer = answer.trim();
+    answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
 }
 
 /// Describe a run that didn't end normally, or `None` if it did.
@@ -791,4 +1012,57 @@ fn exit_code(status: ExitStatus) -> u8 {
         }
     }
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{accepts_repair, table};
+
+    fn rows(rows: &[&[&str]]) -> Vec<Vec<String>> {
+        rows.iter()
+            .map(|row| row.iter().map(|cell| cell.to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn only_an_explicit_yes_accepts_a_repair() {
+        for answer in ["y\n", "Y\n", "yes\n", "YES\n", " Yes \n"] {
+            assert!(accepts_repair(answer), "{answer:?}");
+        }
+        // The empty string is what `read_line` leaves at end of input.
+        for answer in ["", "\n", "n\n", "no\n", "maybe\n", "?\n", "ye\n", "yy\n"] {
+            assert!(!accepts_repair(answer), "{answer:?}");
+        }
+    }
+
+    #[test]
+    fn columns_line_up() {
+        let rows = rows(&[&["a", "4M", "x"], &["long-name", "128M", "y"]]);
+        assert_eq!(
+            table(&rows, &[1]),
+            ["a            4M  x", "long-name  128M  y"]
+        );
+    }
+
+    #[test]
+    fn the_last_cell_of_a_row_doesnt_set_a_width() {
+        let rows = rows(&[
+            &["a", "plus", "4M"],
+            &["bb", "(unreadable: a long message)"],
+            &["a whole line in one cell"],
+        ]);
+        assert_eq!(
+            table(&rows, &[]),
+            [
+                "a   plus  4M",
+                "bb  (unreadable: a long message)",
+                "a whole line in one cell",
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_last_cells_leave_no_trailing_space() {
+        assert_eq!(table(&rows(&[&["a", "b", ""]]), &[]), ["a  b"]);
+    }
 }

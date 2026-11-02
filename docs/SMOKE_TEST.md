@@ -81,3 +81,63 @@ macman create iix-71 --model iix --rom maciix --system system-7.1 --memory 8M --
 | `macman import` an archive exported on Linux or Windows, then `macman run NAME --verbose` | Says the machine records 36.04 and runs on 37.03, then boots. |
 | End `macman` with `kill -9` while the emulator runs, then `macman run iix-71` | Warns about the earlier run. Its lock died with `macman`, so the new emulator is the one to refuse the disk, with an "image in use" alert. |
 | Close the emulators. The next `macman run` | Clears the notice left by the abandoned session. |
+
+## Basilisk II
+
+Run this on Linux x86-64, Windows x86-64, or macOS ARM64. It needs a real ROM and system image, and it
+uses separate directories, so it doesn't touch your machines. On Windows, set `$root`
+and the rest as at the top of this file, instead of the `export` line.
+
+```sh
+root="$(mktemp -d)/smoke Zoë"
+export XDG_CONFIG_HOME="$root/config" XDG_DATA_HOME="$root/data" XDG_CACHE_HOME="$root/cache"
+
+macman doctor
+macman rom add Quadra-650.ROM --name quadra650
+macman system add system755.img --name system-7.5.5 --version 7.5.5
+macman create q7 --backend basilisk2 --rom quadra650 --system system-7.5.5 --memory 64M
+macman create q7b --backend basilisk2 --rom quadra650 --system system-7.5.5 --memory 128M
+```
+
+| Step | Expected |
+|---|---|
+| `macman doctor` before installing anything | Names the missing tools, as warnings until a machine needs them. |
+| `macman run q7` | Downloads, builds, opens a window, and boots System 7.5.5 to the Finder. |
+| The same run, with speakers or headphones on | The startup chime plays on the host's real sound device. |
+| While it runs, in a second terminal: `macman run q7` | Refused, because the disk is in use. |
+| While it runs: `macman doctor` | The machine is still reported as runnable. |
+| In the guest, save a file, then choose Shut Down | Exit code 0, the `sessions` directory is empty, and the file is there on the next run. |
+| Close the window instead | The guest asks whether to shut down. |
+| The desktop | Shows the boot disk and Trash, and no `Unix` volume. |
+| `pkill -KILL BasiliskII` | `macman run` warns that it was killed, and fails; `macman doctor` reports the abnormal run. The emulator handles `SIGSEGV` itself and carries on, so that won't do. |
+| `macman run q7b --verbose` | Says it's using the cached emulator, warns once about the earlier run, and boots with 128M. |
+| `macman list --builds` | One Basilisk II build. |
+| Change a byte of the cached `BasiliskII`, then `macman doctor` | Reports the build as damaged. The next run rebuilds it. |
+| `macman run q7 --disk "extra disk.dsk" --readonly` | Mounts the extra disk locked, and its hash stays the same. |
+| Kill `macman` with `kill -9` while the emulator runs | The emulator stops at once, with no alert in the guest. The next `macman run` warns about the earlier run. |
+| `pkill -KILL BasiliskII` while a machine runs, then `macman doctor` | Warns that it wasn't shut down cleanly. |
+| `macman run` that machine, from a terminal, and press Enter | Leaves the flag unset, and starts the machine anyway. |
+| `macman run` that machine again, and answer `y` | Sets the flag, then boots, or shows the "not shut down properly" alert. |
+| `macman create qs --backend basilisk2 ... --shared-folder "a folder"`, then run it | A `Unix` volume holds that folder's files and no others. |
+| `macman create q2 --backend basilisk2 --rom <a IIx ROM> ...` | Refused, naming the ROMs it needs. |
+| Run a ROM macman accepts but the emulator refuses | `macman run` fails, though the emulator exits 0. |
+| `macman run q8 --disk MacOS8_1.iso --readonly`, with `q8` a 7.5.5 machine | The CD mounts in the guest. Its installer upgrades the machine, which then boots Mac OS 8.1 and shuts down with exit code 0. |
+| `macman import` an archive of `q7` into empty directories, then `macman run q7` | No compiling until the run, and then it boots. |
+
+On Windows, these replace the matching steps:
+
+| Step | Expected |
+|---|---|
+| `Stop-Process -Name BasiliskII -Force` | `macman run` reports the exit as abnormal; `macman doctor` does too. |
+| `macman run q7 --disk "extra 日本.dsk" --readonly` | Mounts the extra disk locked, and its hash stays the same. |
+| `Stop-Process -Name macman -Force` while the emulator runs | The emulator carries on, and opening its disk from elsewhere fails, as does `macman run q7`. `macman doctor` warns that macman stopped first. |
+| `macman create qs --backend basilisk2 ... --shared-folder "a folder"` | Refused. |
+| Close the window instead | On System 7.5.5 and Mac OS 8.1, the guest asks whether to shut down. System 7.1 ignores it. |
+
+On macOS, these replace the matching steps:
+
+| Step | Expected |
+|---|---|
+| `macman doctor` before installing anything | Names the missing tools and libraries, including MPFR, as warnings until a machine needs them. |
+| Kill `macman` with `kill -9` while the emulator runs | The emulator carries on. `macman run q7` warns about the earlier run, then refuses, saying the disk is held by a Basilisk II that outlived macman. |
+| Quit that emulator, then `macman run q7` | Boots. |

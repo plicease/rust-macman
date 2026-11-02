@@ -4,6 +4,7 @@ use crate::fsutil::{read_toml, write_toml};
 use crate::model::Model;
 use crate::paths::Paths;
 use anyhow::{Context, Result, bail};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::path::{Component, Path, PathBuf};
@@ -23,6 +24,9 @@ pub struct Machine {
     pub display: Display,
     #[serde(default)]
     pub system: SystemInfo,
+    /// Settings only the Basilisk II backend has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basilisk2: Option<Basilisk2Settings>,
     #[serde(default)]
     pub disks: Vec<Disk>,
 }
@@ -35,9 +39,76 @@ pub struct EmulatorConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hardware {
-    pub model: Model,
+    /// The exact Macintosh, for backends that emulate one. Basilisk II has none:
+    /// its CPU is under `[basilisk2]`, and it's not a particular machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<Model>,
     pub rom: String,
     pub memory: String,
+}
+
+impl Hardware {
+    pub fn require_model(&self) -> Result<Model> {
+        self.model
+            .context("this machine has no [hardware] model, which Mini vMac needs")
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+pub enum Cpu {
+    #[serde(rename = "68020")]
+    #[value(name = "68020")]
+    M68020,
+    #[serde(rename = "68030")]
+    #[value(name = "68030")]
+    M68030,
+    #[default]
+    #[serde(rename = "68040")]
+    #[value(name = "68040")]
+    M68040,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Network {
+    #[default]
+    None,
+    /// User-mode NAT inside the emulator, needing no host setup.
+    Slirp,
+}
+
+/// `[basilisk2]` in `machine.toml`. These are run-time preferences, so none of
+/// them affects the emulator build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Basilisk2Settings {
+    #[serde(default)]
+    pub cpu: Cpu,
+    #[serde(default = "enabled")]
+    pub fpu: bool,
+    #[serde(default = "enabled")]
+    pub sound: bool,
+    #[serde(default)]
+    pub network: Network,
+    /// A host folder the guest sees as a volume. It belongs to this host, so
+    /// it's left out of exports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_folder: Option<PathBuf>,
+}
+
+fn enabled() -> bool {
+    true
+}
+
+impl Default for Basilisk2Settings {
+    fn default() -> Self {
+        Self {
+            cpu: Cpu::default(),
+            fpu: true,
+            sound: true,
+            network: Network::default(),
+            shared_folder: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -158,18 +229,23 @@ pub fn new_id() -> String {
 pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<String>,
-    #[serde(default, skip_serializing_if = "MiniVmacConfig::is_empty")]
-    pub minivmac: MiniVmacConfig,
+    #[serde(default, skip_serializing_if = "SourceConfig::is_empty")]
+    pub minivmac: SourceConfig,
+    #[serde(default, skip_serializing_if = "SourceConfig::is_empty")]
+    pub basilisk2: SourceConfig,
+    /// The SDL package that Basilisk II builds with on Windows.
+    #[serde(default, skip_serializing_if = "SourceConfig::is_empty")]
+    pub sdl: SourceConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct MiniVmacConfig {
+pub struct SourceConfig {
     /// Local copy of the pinned source archive, for machines without network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_archive: Option<PathBuf>,
 }
 
-impl MiniVmacConfig {
+impl SourceConfig {
     fn is_empty(&self) -> bool {
         self.source_archive.is_none()
     }
@@ -280,7 +356,7 @@ readonly = false
     #[test]
     fn design_example_round_trips() {
         let machine: Machine = toml::from_str(EXAMPLE).unwrap();
-        assert_eq!(machine.hardware.model, Model::Plus);
+        assert_eq!(machine.hardware.model, Some(Model::Plus));
         assert_eq!(machine.disks.len(), 2);
         assert!(machine.disks[0].boot && !machine.disks[1].boot);
         let text = toml::to_string_pretty(&machine).unwrap();

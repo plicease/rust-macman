@@ -55,6 +55,65 @@ The 37.03 archive is one GitHub generates from the tag, and the pin is its SHA-2
 GitHub ever changed how it generates archives, downloads would be refused rather than
 trusted, and the pin would need checking against the tag.
 
+## Basilisk II
+
+| Host | Status |
+|---|---|
+| Linux x86-64 | Yes: builds, and boots System 7.5.5 and Mac OS 8.1 from a Quadra 650 ROM |
+| Windows x86-64 | Yes: builds, and boots System 7.5.5 and Mac OS 8.1 from a Quadra 650 ROM |
+| macOS ARM64 | Yes: builds, and boots System 7.5.5 and Mac OS 8.1 from a Quadra 650 ROM |
+
+On any other host macman refuses to create or run such a machine, while still importing
+one for passing on. No host counts as supported until
+[the smoke test](SMOKE_TEST.md#basilisk-ii) has passed there.
+
+Mac OS 8.1 was tried on Linux, with a 68040 setting: a System 7.5.5 machine was
+upgraded from the 8.1 CD image, attached with `--disk`, and it boots and shuts down
+cleanly. There, with `slirp` networking and DHCP, it reached a plain HTTP site by name,
+and still shut down cleanly. Full screen works on Linux too: a machine can start in it,
+and Ctrl+Enter switches it on and off. Writing to a shared folder works there as well, and
+the changes persist. System 7.5.5 was tested on Linux with 68030 and 68040 settings, and
+played its startup chime on a real device.
+
+On Windows, upstream builds only 32-bit MinGW with MSYS2, and macman doesn't follow it. It
+compiles a 64-bit static emulator itself, with MinGW-w64 and the official
+`SDL2-devel-2.32.10-mingw.tar.gz`, whose SHA-256 it pins, so neither Autotools nor MSYS2
+is needed; the changes this takes to the source are explained in
+`src/backend/macemu_windows.rs`.
+
+On Windows, System 7.5.5 and Mac OS 8.1 were each tested with the default 68040 setting,
+and Mac OS 8.1 with `slirp` networking too, and with sound on a real device, played from
+its Sound control panel. On both of those, closing the window opens the shutdown dialog; System
+7.1 ignores it. Ctrl+Enter switches full screen on and off. After ending the
+emulator from Task Manager, the next run offers the repair: declining it leaves the
+machine at the flashing question mark, and accepting it lets the machine boot. System 7.1
+was tested with a 68030 setting; the image at hand stops with an error as a Quadra 900.
+Windows keeps Ctrl-Esc for the Start menu, so that quit key can't be used there.
+
+On macOS ARM64, macman doesn't use upstream's Xcode project, which wants SDL and MPFR
+installed system-wide. It runs the same `autogen.sh`, `configure`, and `make` as on Linux,
+with the JIT left out, as it is in upstream's ARM64 builds. SDL 2, GMP, and MPFR come from
+MacPorts or Homebrew, are found with `pkg-config`, and are linked dynamically, so a change
+in their version or location means a new build. MPFR is the ARM64 FPU core: ARM64 has no
+80-bit `long double`.
+
+On macOS, System 7.5.5 and Mac OS 8.1 were each tested with the default 68040 setting, on
+machines brought in with `macman import`, and sound on a real device and full screen worked. Mac OS 8.1 was tested with `slirp`
+networking too. Closing the window opens the shutdown dialog in the guest. A shared folder
+works in both directions, written from the host and from the guest. System 7.1 was tested
+with a 68030 setting.
+
+The macOS smoke test covered Shut Down from inside the guest, killing the emulator, killing
+macman, and rebuilding a damaged build. Homebrew hasn't been tried, only MacPorts.
+
+The pin is commit `f532be3d3d70` of [kanjitalk755/macemu](https://github.com/kanjitalk755/macemu),
+the maintained fork, and its SHA-256 is that of the archive GitHub generates for it. If
+GitHub changed how it generates archives, downloads would be refused, not trusted.
+
+Upstream documents System 7 and Mac OS 8.0 and 8.1 on 32-bit clean ROMs. macman
+accepts those only: a Classic ROM needs a build with virtual addressing, and it's not
+what this backend is for.
+
 ## Release targets
 
 `.github/workflows/release.yml` lists its targets explicitly instead of using the

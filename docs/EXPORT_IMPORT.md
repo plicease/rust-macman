@@ -135,3 +135,10 @@ lost.
 one clears what it left. A killed import can leave a ROM registered without a machine
 that uses it, which is harmless, and the next import reuses or recovers it. One import
 runs at a time, enforced by `import.lock`. File permissions from the archive are ignored.
+
+## Basilisk II machines
+
+These export like any other, and build lazily on the destination. A machine's shared
+folder is a path on its host, so archives leave it out, and it doesn't count when
+import compares two copies. Importing onto a host that can't run Basilisk II works, and
+`macman doctor` and `macman run` then say why the machine can't start.

@@ -1,5 +1,6 @@
 //! Command-line interface (design §5).
 
+use crate::machine::{Cpu, Network};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -52,8 +53,11 @@ pub enum Command {
     Clone { source: String, dest: String },
     /// Write machines, with their ROMs and disks, to an archive for another host
     Export {
-        #[arg(required = true, value_name = "NAME")]
+        #[arg(required_unless_present = "all", value_name = "NAME")]
         names: Vec<String>,
+        /// Export every machine
+        #[arg(long, conflicts_with = "names")]
+        all: bool,
         /// Archive to create, such as machines.tar.gz
         #[arg(short, long, value_name = "FILE")]
         output: PathBuf,
@@ -124,9 +128,12 @@ pub enum DiskCommand {
 #[derive(Debug, clap::Args)]
 pub struct CreateArgs {
     pub name: String,
-    /// Hardware model, such as plus, se, classic, ii, or iix
+    /// Emulator: minivmac (the default) or basilisk2
     #[arg(long)]
-    pub model: String,
+    pub backend: Option<String>,
+    /// Hardware model, such as plus, se, classic, ii, or iix (Mini vMac only)
+    #[arg(long)]
+    pub model: Option<String>,
     /// Name of an imported ROM
     #[arg(long)]
     pub rom: String,
@@ -145,6 +152,21 @@ pub struct CreateArgs {
     /// Start in full screen
     #[arg(long)]
     pub fullscreen: bool,
+    /// Emulated CPU (Basilisk II only; default 68040)
+    #[arg(long, value_enum)]
+    pub cpu: Option<Cpu>,
+    /// Leave out the FPU (Basilisk II only, and not with a 68040)
+    #[arg(long)]
+    pub no_fpu: bool,
+    /// Turn off sound (Basilisk II only)
+    #[arg(long)]
+    pub no_sound: bool,
+    /// Guest networking (Basilisk II only; default none)
+    #[arg(long, value_enum)]
+    pub network: Option<Network>,
+    /// Host folder to show the guest as a volume (Basilisk II only)
+    #[arg(long, value_name = "DIR")]
+    pub shared_folder: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
