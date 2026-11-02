@@ -70,7 +70,8 @@ one for passing on. No host counts as supported until
 Mac OS 8.1 was tried on Linux only, with a 68040 setting: a System 7.5.5 machine was
 upgraded from the 8.1 CD image, attached with `--disk`, and it boots and shuts down
 cleanly. There, with `slirp` networking and DHCP, it reached a plain HTTP site by name, and still
-shut down cleanly. Full screen hasn't been tried. System 7.5.5 was tested on Linux with
+shut down cleanly. Full screen works on Linux too: a machine can start in it, and Ctrl+Enter
+switches it on and off. System 7.5.5 was tested on Linux with
 68030 and 68040 settings. Sound on a real device has been tried only on Linux,
 where System 7.5.5 played its startup chime.
 
