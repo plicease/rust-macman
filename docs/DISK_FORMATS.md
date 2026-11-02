@@ -44,6 +44,11 @@ volume, confirming that by the volume's signature rather than the partition's ty
 name. If there are several, it lists them and asks for `--partition N`. The source
 file is never changed. The sidecar records `extracted_from` and `source_sha256`.
 
+`macman disk extract` does the same without registering anything, and `macman disk
+info` shows the map. With `--raw --partition N`, it extracts a partition whatever it
+holds, without checking that it's a volume. Partitions that are empty or run past the
+end of the image are always refused.
+
 The result is what you'd get by hand. For a 96 MB Iomega Zip image, whose `Apple_HFS`
 partition starts at block 491:
 
@@ -55,8 +60,7 @@ Only the volume is kept, so the partition map, Zip driver, and any other partiti
 are dropped. A guest doesn't need them, because Mini vMac provides its own driver.
 
 `run --disk` won't do this, because it attaches your actual file, and writes to an
-extracted copy would never reach it. Register the image instead, or extract the
-volume yourself.
+extracted copy would never reach it. Extract the volume first, or register the image.
 
 ## Disk Copy 4.2
 
