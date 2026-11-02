@@ -10,7 +10,7 @@ ROMs or system software. See [docs/DESIGN.md](docs/DESIGN.md) for the full desig
 
 ## Requirements
 
-macman can currently build and run Mini vMac only on Linux x86-64 and Windows x86-64;
+macman can build and run Mini vMac on Linux x86-64, Windows x86-64, and macOS ARM64;
 see [docs/PLATFORMS.md](docs/PLATFORMS.md). Linux needs an X11 session, plus what Mini
 vMac needs to compile: `gcc`, `make`, `bash`, `tar`, and the X11 headers. On Debian or
 Ubuntu:
@@ -26,6 +26,12 @@ winget install BrechtSanders.WinLibs.POSIX.UCRT
 ```
 
 Open a new terminal afterwards so that `gcc` is on your `PATH`.
+
+macOS needs Apple's command line tools, or Xcode with its license accepted:
+
+```sh
+xcode-select --install
+```
 
 Run `macman doctor` to check your setup.
 
@@ -62,12 +68,12 @@ Other commands: `list [--builds]`, `current`, `rom list`, `system list`,
 `config show`, `clone`, `remove`, and `doctor`. Add `--verbose` for build and launch
 logs.
 
-On Linux, files live under the XDG directories: `~/.config/macman`,
-`~/.local/share/macman`, and `~/.cache/macman`. On Windows, configuration is in
+On Linux and macOS, files live under the XDG directories: `~/.config/macman`,
+`~/.local/share/macman`, and `~/.cache/macman`. macman doesn't use `~/Library`. On Windows, configuration is in
 `%APPDATA%\macman`, and machines, ROMs, and images are in `%LOCALAPPDATA%\macman`, with
 builds in `%LOCALAPPDATA%\macman\cache`.
 
-On either system, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_CACHE_HOME` override
+On every system, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_CACHE_HOME` override
 their directory when set to an absolute path, and macman adds `macman` to that path.
 On Windows, an unset override falls back to `%APPDATA%` or `%LOCALAPPDATA%`, and then
 to the folder Windows reports, so `HOME` isn't needed.
@@ -124,9 +130,11 @@ can't identify, ideally with `--readonly`. See
 
 ## Working offline
 
-macman downloads Mini vMac 36.04 on the first build and verifies its SHA-256. For a
-machine without network access, download
-[the source archive](https://www.gryphel.com/d/minivmac/minivmac-36.04/minivmac-36.04.src.tgz)
+macman downloads Mini vMac on the first build and verifies its SHA-256. That's 36.04 on
+Linux and Windows, and 37.03 on macOS, the first version with an ARM64 target. For a
+machine without network access, download the source archive for
+[36.04](https://www.gryphel.com/d/minivmac/minivmac-36.04/minivmac-36.04.src.tgz) or
+[37.03](https://github.com/minivmac/minivmac/archive/refs/tags/37.03.tar.gz)
 yourself and point `config.toml` (in the configuration directory above) at it:
 
 ```toml

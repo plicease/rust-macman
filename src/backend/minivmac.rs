@@ -9,9 +9,18 @@
 //! The Windows glue (`src/OSGLUWIN.c`) differs: it rejects flags, and finds
 //! the ROM only by a fixed name beside its own executable. So each run gets a
 //! private copy of both in the session directory.
+//!
+//! So does the macOS glue (`src/OSGLUCCO.m`), which never reads its arguments.
+//! It looks beside its `.app` bundle for the ROM and for `disk1.dsk`,
+//! `disk2.dsk`, and so on, and only 37.03 onwards can target ARM64. So macOS
+//! has its own source pin, each run gets a private copy of the bundle, and the
+//! disks are symbolic links in the session directory.
 
 use super::{Check, EmulatorBackend, Executable, LaunchRequest};
-use crate::fsutil::{atomic_copy, sha256_bytes, sha256_file, without_verbatim_prefix, write_toml};
+use crate::fsutil::{
+    atomic_copy, copy_tree, sha256_bytes, sha256_file, sha256_tree, symlink_file,
+    without_verbatim_prefix, write_toml,
+};
 use crate::machine::{Display, Machine};
 use crate::model::Model;
 use crate::paths::Paths;
@@ -23,13 +32,22 @@ use std::process::{Command, ExitStatus, Stdio};
 
 pub const BACKEND_NAME: &str = "minivmac";
 pub const MANIFEST: &str = "manifest.toml";
+const MACOS: bool = cfg!(target_os = "macos");
+/// The bundle, within the source tree and the build directory, on macOS.
+const BUNDLE: &str = "minivmac.app";
 const EXECUTABLE: &str = if cfg!(windows) {
     "minivmac.exe"
+} else if MACOS {
+    "minivmac.app/Contents/MacOS/minivmac"
 } else {
     BACKEND_NAME
 };
+/// What a build leaves in the source tree for publishing.
+const BUILD_OUTPUT: &str = if MACOS { BUNDLE } else { EXECUTABLE };
 /// `_MAX_PATH`, which Mini vMac's Windows glue uses for every path buffer.
 const WINDOWS_MAX_PATH: usize = 260;
+const UNSUPPORTED_HOST: &str =
+    "the Mini vMac backend supports only Linux x86-64, Windows x86-64, and macOS ARM64 hosts";
 
 /// An exact upstream source archive.
 #[derive(Debug, Clone)]
@@ -40,11 +58,23 @@ pub struct SourcePin {
 }
 
 impl Default for SourcePin {
+    /// 36.04 has no ARM64 target of any kind, so macOS needs 37.03, a beta,
+    /// with `mcar`. The repository that continues Mini vMac tags it as Paul
+    /// Pratt released it. Other hosts stay on the stable 36.04.
     fn default() -> Self {
-        Self {
-            revision: "36.04".into(),
-            url: "https://www.gryphel.com/d/minivmac/minivmac-36.04/minivmac-36.04.src.tgz".into(),
-            sha256: "9b7343cec87723177a203e69ad3baf20f49b4e8f03619e366c4bf2705167dfa4".into(),
+        if MACOS {
+            Self {
+                revision: "37.03".into(),
+                url: "https://github.com/minivmac/minivmac/archive/refs/tags/37.03.tar.gz".into(),
+                sha256: "26d45e2e6cdab4f9ad290bb4df9890c96e78c50a3c56a561aad15dcf3d942030".into(),
+            }
+        } else {
+            Self {
+                revision: "36.04".into(),
+                url: "https://www.gryphel.com/d/minivmac/minivmac-36.04/minivmac-36.04.src.tgz"
+                    .into(),
+                sha256: "9b7343cec87723177a203e69ad3baf20f49b4e8f03619e366c4bf2705167dfa4".into(),
+            }
         }
     }
 }
@@ -57,14 +87,35 @@ pub struct Manifest {
     pub host: String,
     pub toolchain: String,
     pub options: Vec<String>,
-    /// File name within the build directory.
+    /// Path within the build directory.
     #[serde(default = "default_executable")]
     pub executable: String,
     pub executable_sha256: String,
+    /// The `.app` directory within the build directory, on macOS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<String>,
+    /// [`sha256_tree`] of that bundle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_sha256: Option<String>,
 }
 
 fn default_executable() -> String {
     BACKEND_NAME.into()
+}
+
+impl Manifest {
+    /// Whether the build in `dir` is still what this manifest describes.
+    pub fn is_intact(&self, dir: &Path) -> bool {
+        let matches =
+            |actual: Result<String>, expected: &str| actual.is_ok_and(|actual| actual == expected);
+        let executable = sha256_file(&dir.join(&self.executable));
+        matches(executable, &self.executable_sha256)
+            && match (&self.bundle, &self.bundle_sha256) {
+                (Some(bundle), Some(sha256)) => matches(sha256_tree(&dir.join(bundle)), sha256),
+                (None, None) => true,
+                _ => false,
+            }
+    }
 }
 
 pub struct MiniVmac {
@@ -163,8 +214,9 @@ impl MiniVmac {
     fn cached_build(&self, key: &str) -> Option<PathBuf> {
         let dir = self.paths.builds().join(key);
         let manifest: Manifest = crate::fsutil::read_toml(&dir.join(MANIFEST)).ok()?;
-        let executable = dir.join(&manifest.executable);
-        (sha256_file(&executable).ok()? == manifest.executable_sha256).then_some(executable)
+        manifest
+            .is_intact(&dir)
+            .then(|| dir.join(&manifest.executable))
     }
 
     fn build(&self, key: &str, options: &[String], toolchain: &str, verbose: bool) -> Result<()> {
@@ -194,8 +246,7 @@ impl MiniVmac {
             return Err(error.context(build_failure_hint(&log_path)));
         }
 
-        let executable = work.join("src").join(EXECUTABLE);
-        if !executable.is_file() {
+        if !work.join("src").join(EXECUTABLE).is_file() {
             let _ = fs::remove_dir_all(&work);
             bail!(
                 "build produced no executable; {}",
@@ -206,7 +257,10 @@ impl MiniVmac {
         // Publish by renaming a complete directory into place.
         let publish = work.join("publish");
         fs::create_dir_all(&publish)?;
-        fs::rename(&executable, publish.join(EXECUTABLE))?;
+        fs::rename(
+            work.join("src").join(BUILD_OUTPUT),
+            publish.join(BUILD_OUTPUT),
+        )?;
         fs::copy(&log_path, publish.join("build.log"))?;
         write_toml(
             &publish.join(MANIFEST),
@@ -218,6 +272,10 @@ impl MiniVmac {
                 options: options.to_vec(),
                 executable: EXECUTABLE.into(),
                 executable_sha256: sha256_file(&publish.join(EXECUTABLE))?,
+                bundle: MACOS.then(|| BUNDLE.into()),
+                bundle_sha256: MACOS
+                    .then(|| sha256_tree(&publish.join(BUNDLE)))
+                    .transpose()?,
             },
         )?;
         let dest = self.paths.builds().join(key);
@@ -251,14 +309,14 @@ fn run_build(archive: &Path, work: &Path, options: &[String], log_path: &Path) -
 /// Unpack and compile, per upstream's documented procedure: compile the
 /// configuration tool, have it generate the sources' setup script, then make.
 fn run_unix_build(archive: &Path, src: &Path, options: &[String], log: File) -> Result<()> {
+    let compiler = compiler();
     let tool_args = options.join(" ");
     let script = format!(
         "set -e\n\
          tar xzf \"$1\" --strip-components=1\n\
-         gcc setup/tool.c -o setup_t\n\
+         {compiler} setup/tool.c -o setup_t\n\
          ./setup_t {tool_args} > setup.sh\n\
-         bash ./setup.sh\n\
-         make\n"
+         bash ./setup.sh\n"
     );
     let status = Command::new("bash")
         .arg("-c")
@@ -268,13 +326,44 @@ fn run_unix_build(archive: &Path, src: &Path, options: &[String], log: File) -> 
         .current_dir(src)
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
-        .stderr(log)
+        .stderr(log.try_clone()?)
         .status()
         .context("cannot run bash")?;
     if !status.success() {
         bail!("build script exited with {status}");
     }
+
+    if MACOS {
+        let makefile = src.join("Makefile");
+        let text = fs::read_to_string(&makefile).context("the setup script wrote no Makefile")?;
+        fs::write(&makefile, use_installed_sdk(&text, &macos_sdk()?.path)?)?;
+    }
+    let status = Command::new("make")
+        .current_dir(src)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .status()
+        .context("cannot run make")?;
+    if !status.success() {
+        bail!("make exited with {status}");
+    }
     Ok(())
+}
+
+/// Upstream's Makefile names the 11.1 SDK from one old Command Line Tools
+/// release, which current toolchains don't have. Point it at the installed
+/// one. The path reaches a shell inside make recipes, so quote it there.
+fn use_installed_sdk(makefile: &str, sdk: &str) -> Result<String> {
+    const FIXED_SDK: &str = "/Library/Developer/CommandLineTools/SDKs/MacOSX11.1.sdk";
+    if !makefile.contains(FIXED_SDK) {
+        bail!("the generated Makefile lacks the expected SDK path");
+    }
+    if sdk.contains('$') {
+        bail!("cannot build with the SDK at {sdk}, because of the $ in its path");
+    }
+    let quoted = format!("'{}'", sdk.replace('\'', r"'\''"));
+    Ok(makefile.replace(FIXED_SDK, &quoted))
 }
 
 /// The same procedure with no POSIX shell: `bash` on Windows may well be the
@@ -425,17 +514,82 @@ fn host_triple() -> &'static str {
         "x86_64-unknown-linux-gnu"
     } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         "x86_64-pc-windows-gnu"
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin"
     } else {
         "unsupported"
     }
 }
 
-/// The `-t` option of upstream's configuration tool.
-fn target_option() -> &'static str {
-    if cfg!(windows) { "wx64" } else { "lx64" }
+/// The options of upstream's configuration tool that choose the host. On
+/// macOS, `-cl` asks for a Makefile, as an Xcode project would need all of
+/// Xcode, and `xcd` selects the compiler and bundle.
+fn target_options() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["-t", "wx64"]
+    } else if MACOS {
+        &["-e", "xcd", "-cl", "-t", "mcar"]
+    } else {
+        &["-t", "lx64"]
+    }
+}
+
+fn compiler() -> &'static str {
+    if MACOS { "clang" } else { "gcc" }
+}
+
+/// The trimmed output of a command that must succeed. On a Mac without the
+/// developer tools, `clang` and `make` exist, as stubs that only fail.
+fn command_output(program: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("cannot run {program}"))?;
+    if !output.status.success() {
+        bail!("{program} exited with {}", output.status);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// `clang` must build for this host: Homebrew's `gcc` or an Intel toolchain
+/// wouldn't, and a build must never be mistaken for one that does.
+fn is_arm64_darwin(target: &str) -> bool {
+    target.starts_with("arm64-apple-darwin") || target.starts_with("aarch64-apple-darwin")
+}
+
+struct MacosSdk {
+    path: String,
+    version: String,
+}
+
+fn macos_sdk() -> Result<MacosSdk> {
+    let hint = "cannot find a macOS SDK; run `macman doctor`";
+    Ok(MacosSdk {
+        path: command_output("xcrun", &["--show-sdk-path"]).context(hint)?,
+        version: command_output("xcrun", &["--show-sdk-version"]).context(hint)?,
+    })
+}
+
+fn macos_toolchain_identity() -> Result<String> {
+    let hint = "cannot run clang; install Apple's command line tools (run `macman doctor`)";
+    let target = command_output("clang", &["-dumpmachine"]).context(hint)?;
+    if !is_arm64_darwin(&target) {
+        bail!("clang targets {target}, not ARM64 macOS; run `macman doctor`");
+    }
+    let version = command_output("clang", &["--version"]).context(hint)?;
+    let version = version.lines().next().unwrap_or("unknown");
+    let sdk = macos_sdk()?;
+    Ok(format!(
+        "{target} {version} SDK {} {}",
+        sdk.version, sdk.path
+    ))
 }
 
 fn toolchain_identity() -> Result<String> {
+    if MACOS {
+        return macos_toolchain_identity();
+    }
     let output = Command::new("gcc")
         .arg("--version")
         .output()
@@ -517,6 +671,41 @@ fn windows_command(request: &LaunchRequest<'_>) -> Result<Command> {
     }
     atomic_copy(&request.executable.path, &executable)?;
     atomic_copy(request.rom, &rom)?;
+    Ok(command)
+}
+
+/// The name that makes the emulator insert a disk at startup, boot disk first.
+fn startup_disk_name(index: usize) -> String {
+    format!("disk{}.dsk", index + 1)
+}
+
+/// Give the run its own bundle, and put the ROM beside it. Links, rather than
+/// copies, so that writes reach the disks: the emulator opens a name through
+/// `fopen` and only a Finder alias, never a link, gets special treatment. It
+/// inserts disks only until a name is missing, so these are consecutive.
+///
+/// The bundle's real executable runs directly, unlike with `open`, so macman
+/// is its parent, and sees it exit.
+fn macos_command(request: &LaunchRequest<'_>) -> Result<Command> {
+    let workdir = request.workdir;
+    let bundle = request
+        .executable
+        .path
+        .ancestors()
+        .nth(3)
+        .context("the emulator is not inside an app bundle")?;
+    copy_tree(bundle, &workdir.join(BUNDLE))?;
+    atomic_copy(
+        request.rom,
+        &workdir.join(rom_file_name(request.machine.hardware.model)),
+    )?;
+    for (index, disk) in request.disks.iter().enumerate() {
+        let link = workdir.join(startup_disk_name(index));
+        symlink_file(&disk.path, &link)
+            .with_context(|| format!("cannot create {}", link.display()))?;
+    }
+    let mut command = Command::new(workdir.join(EXECUTABLE));
+    command.current_dir(workdir);
     Ok(command)
 }
 
@@ -611,18 +800,19 @@ fn build_options(machine: &Machine) -> Vec<String> {
     let hardware = &machine.hardware;
     let display = &machine.display;
     let depth = depth_option(display.depth).unwrap_or(0);
-    let mut options: Vec<String> = [
-        ("-t", target_option().to_string()),
-        ("-m", model_option(hardware.model).to_string()),
-        ("-mem", hardware.memory.clone()),
-        ("-hres", display.width.to_string()),
-        ("-vres", display.height.to_string()),
-        ("-depth", depth.to_string()),
-        ("-fullscreen", u8::from(display.fullscreen).to_string()),
-    ]
-    .into_iter()
-    .flat_map(|(flag, value)| [flag.to_string(), value])
-    .collect();
+    let mut options: Vec<String> = target_options().iter().map(|s| s.to_string()).collect();
+    options.extend(
+        [
+            ("-m", model_option(hardware.model).to_string()),
+            ("-mem", hardware.memory.clone()),
+            ("-hres", display.width.to_string()),
+            ("-vres", display.height.to_string()),
+            ("-depth", depth.to_string()),
+            ("-fullscreen", u8::from(display.fullscreen).to_string()),
+        ]
+        .into_iter()
+        .flat_map(|(flag, value)| [flag.to_string(), value]),
+    );
     if display.scale > 1 {
         options.extend([
             "-mf".to_string(),
@@ -680,7 +870,7 @@ impl EmulatorBackend for MiniVmac {
 
     fn prepare(&self, machine: &Machine, verbose: bool) -> Result<Executable> {
         if host_triple() == "unsupported" {
-            bail!("the Mini vMac backend supports only Linux and Windows x86-64 hosts");
+            bail!(UNSUPPORTED_HOST);
         }
         self.validate(machine)?;
         let options = build_options(machine);
@@ -720,6 +910,8 @@ impl EmulatorBackend for MiniVmac {
     fn launch(&self, request: &LaunchRequest<'_>) -> Result<ExitStatus> {
         let mut command = if cfg!(windows) {
             windows_command(request)?
+        } else if MACOS {
+            macos_command(request)?
         } else {
             let mut command = Command::new(&request.executable.path);
             command
@@ -745,12 +937,14 @@ impl EmulatorBackend for MiniVmac {
         let mut checks = Vec::new();
         if host_triple() == "unsupported" {
             checks.push(Check::fail(
-                "host is not x86-64 Linux or Windows",
-                "the Mini vMac backend supports only Linux and Windows x86-64 hosts",
+                "host is not x86-64 Linux or Windows, or ARM64 macOS",
+                UNSUPPORTED_HOST,
             ));
         }
         if cfg!(windows) {
             windows_tool_checks(&mut checks);
+        } else if MACOS {
+            macos_tool_checks(&mut checks);
         } else {
             unix_tool_checks(&mut checks);
         }
@@ -786,7 +980,7 @@ impl EmulatorBackend for MiniVmac {
             },
         }
 
-        if !cfg!(windows) && std::env::var_os("DISPLAY").is_none() {
+        if !cfg!(windows) && !MACOS && std::env::var_os("DISPLAY").is_none() {
             checks.push(Check::warn(
                 "DISPLAY is not set",
                 "Mini vMac is an X11 program; run macman from a graphical session",
@@ -814,6 +1008,40 @@ fn unix_tool_checks(checks: &mut Vec<Check>) {
             "X11 headers not found",
             "install them (Debian/Ubuntu: apt install libx11-dev libxext-dev)",
         ));
+    }
+}
+
+/// Each stage runs something, since the stubs Apple ships all exist, and fail
+/// only once run. Using them also finds an unaccepted Xcode license.
+fn macos_tool_checks(checks: &mut Vec<Check>) {
+    const INSTALL: &str = "install Apple's command line tools with `xcode-select --install`; if \
+                           they are installed, accept the license with `sudo xcodebuild -license`";
+    match command_output("clang", &["-dumpmachine"]) {
+        Ok(target) if is_arm64_darwin(&target) => {
+            checks.push(Check::ok(format!("clang for {target} found")));
+        }
+        Ok(target) => checks.push(Check::fail(
+            format!("clang targets {target}, not ARM64 macOS"),
+            format!("put Apple's clang first on PATH, or {INSTALL}"),
+        )),
+        Err(_) => checks.push(Check::fail("clang not found or not working", INSTALL)),
+    }
+    match macos_sdk() {
+        Ok(sdk) => checks.push(Check::ok(format!("macOS SDK {} found", sdk.version))),
+        Err(_) => checks.push(Check::fail("macOS SDK not found", INSTALL)),
+    }
+    for tool in ["make", "bash", "tar"] {
+        if command_output(tool, &["--version"]).is_ok() {
+            checks.push(Check::ok(format!("{tool} found")));
+        } else {
+            checks.push(Check::fail(format!("{tool} not found"), INSTALL));
+        }
+    }
+    let probe = "echo '#import <Cocoa/Cocoa.h>' | clang -E -x objective-c - >/dev/null 2>&1";
+    if command_output("bash", &["-c", probe]).is_ok() {
+        checks.push(Check::ok("Cocoa headers found"));
+    } else {
+        checks.push(Check::fail("Cocoa headers not found", INSTALL));
     }
 }
 
@@ -884,7 +1112,7 @@ mod tests {
             name: "m".into(),
             emulator: EmulatorConfig {
                 backend: BACKEND_NAME.into(),
-                revision: "36.04".into(),
+                revision: SourcePin::default().revision,
             },
             hardware: Hardware {
                 model,
@@ -949,11 +1177,11 @@ mod tests {
     #[test]
     fn translates_machine_to_upstream_options() {
         let m = machine(Model::II, "8M", (640, 480, 8));
-        let target = target_option();
+        let target = target_options().join(" ");
         assert_eq!(
             build_options(&m).join(" "),
             format!(
-                "-t {target} -m II -mem 8M -hres 640 -vres 480 -depth 3 -fullscreen 0 -mf 2 \
+                "{target} -m II -mem 8M -hres 640 -vres 480 -depth 3 -fullscreen 0 -mf 2 \
                  -magnify 1"
             )
         );
@@ -963,7 +1191,7 @@ mod tests {
         assert_eq!(
             build_options(&m).join(" "),
             format!(
-                "-t {target} -m Plus -mem 4M -hres 512 -vres 342 -depth 0 -fullscreen 1 -magnify 0"
+                "{target} -m Plus -mem 4M -hres 512 -vres 342 -depth 0 -fullscreen 1 -magnify 0"
             )
         );
     }
@@ -1017,6 +1245,116 @@ mod tests {
         );
         assert!(use_wide_windows_api("mk_COptionsCommon = -c -Wall\n").is_err());
         assert!(use_wide_windows_api("\t-mwindows -lwinmm\n").is_err());
+    }
+
+    #[test]
+    fn every_supported_host_has_a_build_target() {
+        if host_triple() != "unsupported" {
+            let options = target_options();
+            let target = options.iter().position(|o| *o == "-t").unwrap() + 1;
+            assert_eq!(options[target].len(), 4, "{options:?}");
+        }
+    }
+
+    #[test]
+    fn macos_is_pinned_to_a_revision_with_an_arm64_target() {
+        if MACOS {
+            assert_eq!(SourcePin::default().revision, "37.03");
+            assert!(target_options().contains(&"mcar"));
+            assert!(target_options().contains(&"-cl"));
+            assert!(EXECUTABLE.starts_with(BUNDLE));
+            assert!(EXECUTABLE.ends_with("/Contents/MacOS/minivmac"));
+        } else {
+            assert_eq!(SourcePin::default().revision, "36.04");
+        }
+    }
+
+    #[test]
+    fn the_makefile_is_pointed_at_the_installed_sdk() {
+        let fixed = "/Library/Developer/CommandLineTools/SDKs/MacOSX11.1.sdk";
+        let makefile = format!("a = -isysroot {fixed} -c\n\tclang -isysroot {fixed} -o b\n");
+        assert_eq!(
+            use_installed_sdk(&makefile, "/Sdks/MacOSX.sdk").unwrap(),
+            "a = -isysroot '/Sdks/MacOSX.sdk' -c\n\tclang -isysroot '/Sdks/MacOSX.sdk' -o b\n"
+        );
+        assert_eq!(
+            use_installed_sdk(fixed, "/Applications/Xcode 16.app/it's.sdk").unwrap(),
+            r"'/Applications/Xcode 16.app/it'\''s.sdk'"
+        );
+        assert!(use_installed_sdk(fixed, "/odd$(path)").is_err());
+        assert!(use_installed_sdk("no sdk here\n", "/Sdks/MacOSX.sdk").is_err());
+    }
+
+    #[test]
+    fn only_clang_for_arm64_macos_counts() {
+        for good in ["arm64-apple-darwin24.6.0", "aarch64-apple-darwin23"] {
+            assert!(is_arm64_darwin(good), "{good}");
+        }
+        for bad in ["x86_64-apple-darwin24.6.0", "aarch64-unknown-linux-gnu"] {
+            assert!(!is_arm64_darwin(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn startup_disks_are_named_as_the_emulator_expects() {
+        assert_eq!(startup_disk_name(0), "disk1.dsk");
+        assert_eq!(startup_disk_name(5), "disk6.dsk");
+    }
+
+    fn manifest(bundle: Option<(&str, String)>) -> Manifest {
+        Manifest {
+            backend: BACKEND_NAME.into(),
+            revision: "r".into(),
+            host: "h".into(),
+            toolchain: "t".into(),
+            options: vec![],
+            executable: "bin".into(),
+            executable_sha256: sha256_bytes(b"binary"),
+            bundle: bundle.as_ref().map(|(path, _)| path.to_string()),
+            bundle_sha256: bundle.map(|(_, sha)| sha),
+        }
+    }
+
+    #[test]
+    fn a_build_is_intact_only_if_its_whole_bundle_is() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("bin"), b"binary").unwrap();
+        let bundle = dir.path().join("x.app");
+        fs::create_dir(&bundle).unwrap();
+        fs::write(bundle.join("Info.plist"), b"plist").unwrap();
+
+        let sha = sha256_tree(&bundle).unwrap();
+        let bundled = manifest(Some(("x.app", sha.clone())));
+        assert!(bundled.is_intact(dir.path()));
+
+        fs::write(bundle.join("Info.plist"), b"other").unwrap();
+        assert!(!bundled.is_intact(dir.path()));
+        fs::write(bundle.join("Info.plist"), b"plist").unwrap();
+        assert!(bundled.is_intact(dir.path()));
+
+        fs::write(dir.path().join("bin"), b"damaged").unwrap();
+        assert!(!bundled.is_intact(dir.path()));
+        fs::write(dir.path().join("bin"), b"binary").unwrap();
+
+        fs::remove_dir_all(&bundle).unwrap();
+        assert!(!bundled.is_intact(dir.path()));
+        assert!(manifest(None).is_intact(dir.path()));
+    }
+
+    #[test]
+    fn manifests_from_before_bundles_still_load() {
+        let text = r#"
+            backend = "minivmac"
+            revision = "36.04"
+            host = "x86_64-unknown-linux-gnu"
+            toolchain = "gcc"
+            options = []
+            executable_sha256 = "0"
+        "#;
+        let manifest: Manifest = toml::from_str(text).unwrap();
+        assert_eq!(manifest.executable, "minivmac");
+        assert_eq!(manifest.bundle, None);
+        assert!(!toml::to_string(&manifest).unwrap().contains("bundle"));
     }
 
     #[test]

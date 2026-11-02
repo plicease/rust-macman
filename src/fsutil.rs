@@ -141,6 +141,85 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
+/// A digest of a directory: every entry's relative path and kind, and each
+/// file's contents and executable bit, or each link's target.
+pub fn sha256_tree(root: &Path) -> Result<String> {
+    let mut listing = String::new();
+    hash_tree_into(root, Path::new(""), &mut listing)?;
+    Ok(sha256_bytes(listing.as_bytes()))
+}
+
+fn hash_tree_into(dir: &Path, relative: &Path, listing: &mut String) -> Result<()> {
+    let mut entries = fs::read_dir(dir)
+        .with_context(|| format!("cannot read {}", dir.display()))?
+        .collect::<io::Result<Vec<_>>>()
+        .with_context(|| format!("cannot read {}", dir.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let name = relative.join(entry.file_name());
+        let meta = fs::symlink_metadata(&path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        let shown = name.to_string_lossy();
+        if meta.is_symlink() {
+            let target = fs::read_link(&path)?;
+            listing.push_str(&format!("link {shown:?} {:?}\n", target.to_string_lossy()));
+        } else if meta.is_dir() {
+            listing.push_str(&format!("dir {shown:?}\n"));
+            hash_tree_into(&path, &name, listing)?;
+        } else {
+            let mode = if is_executable(&meta) { "exec" } else { "file" };
+            let sha = sha256_file(&path)?;
+            listing.push_str(&format!("{mode} {shown:?} {sha}\n"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn is_executable(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(_meta: &fs::Metadata) -> bool {
+    false
+}
+
+/// Copy a directory, keeping permissions and links. Refuses to merge into an
+/// existing `dst`.
+pub fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir(dst).with_context(|| format!("cannot create {}", dst.display()))?;
+    for entry in fs::read_dir(src).with_context(|| format!("cannot read {}", src.display()))? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        let meta = fs::symlink_metadata(&from)
+            .with_context(|| format!("cannot read {}", from.display()))?;
+        if meta.is_symlink() {
+            symlink_file(&fs::read_link(&from)?, &to)
+                .with_context(|| format!("cannot create {}", to.display()))?;
+        } else if meta.is_dir() {
+            copy_tree(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)
+                .with_context(|| format!("cannot copy {} to {}", from.display(), to.display()))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub fn symlink_file(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+pub fn symlink_file(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -306,6 +385,72 @@ mod tests {
 
         assert!(atomic_copy_range(&src, 0, 4, &link).is_err());
         assert!(!dir.path().join("target").exists());
+    }
+
+    #[cfg(unix)]
+    fn fake_bundle(root: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bundle = root.join("fake.app");
+        fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+        fs::write(bundle.join("Contents/Info.plist"), b"plist").unwrap();
+        let executable = bundle.join("Contents/MacOS/fake");
+        fs::write(&executable, b"binary").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        symlink_file(Path::new("MacOS/fake"), &bundle.join("Contents/link")).unwrap();
+        bundle
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copied_tree_is_identical_and_stays_runnable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = fake_bundle(dir.path());
+        let copy = dir.path().join("copy.app");
+
+        copy_tree(&bundle, &copy).unwrap();
+        assert_eq!(sha256_tree(&bundle).unwrap(), sha256_tree(&copy).unwrap());
+        let mode = fs::metadata(copy.join("Contents/MacOS/fake"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111);
+        assert!(copy.join("Contents/link").is_symlink());
+        assert!(copy_tree(&bundle, &copy).is_err(), "never merges");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_tree_digest_notices_any_change_in_the_tree() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = fake_bundle(dir.path());
+        let original = sha256_tree(&bundle).unwrap();
+        let digest = || sha256_tree(&bundle).unwrap();
+
+        let plist = bundle.join("Contents/Info.plist");
+        fs::write(&plist, b"other").unwrap();
+        assert_ne!(digest(), original, "contents");
+        fs::write(&plist, b"plist").unwrap();
+        assert_eq!(digest(), original);
+
+        let executable = bundle.join("Contents/MacOS/fake");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_ne!(digest(), original, "executable bit");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+
+        fs::rename(&plist, bundle.join("Contents/Moved.plist")).unwrap();
+        assert_ne!(digest(), original, "name");
+        fs::rename(bundle.join("Contents/Moved.plist"), &plist).unwrap();
+
+        let link = bundle.join("Contents/link");
+        fs::remove_file(&link).unwrap();
+        assert_ne!(digest(), original, "missing entry");
+        symlink_file(Path::new("elsewhere"), &link).unwrap();
+        assert_ne!(digest(), original, "link target");
+        fs::remove_file(&link).unwrap();
+        symlink_file(Path::new("MacOS/fake"), &link).unwrap();
+        assert_eq!(digest(), original);
     }
 
     #[test]

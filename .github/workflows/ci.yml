@@ -22,3 +22,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: cargo test --locked
+
+  macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --locked

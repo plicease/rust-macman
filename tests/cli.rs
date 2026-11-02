@@ -6,6 +6,7 @@ use common::{
     II_ROM_CHECKSUM, PLUS_ROM_CHECKSUM, write_disk, write_disk_with_volumes,
     write_partitioned_disk, write_rom,
 };
+use macman::backend::minivmac::SourcePin;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -113,6 +114,39 @@ fn registers_files_under_xdg_paths() {
     );
 }
 
+/// macOS shares this layout with Linux, on purpose: see docs/PLATFORMS.md.
+#[cfg(unix)]
+#[test]
+fn with_only_home_set_files_go_to_the_linux_style_directories() {
+    let env = Env::new();
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_macman"))
+            .args(args)
+            .env("HOME", env.path())
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_CACHE_HOME")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+    };
+    let rom = write_rom(env.path(), "plus.bin", PLUS_ROM_CHECKSUM, 128 * 1024);
+    let disk = write_disk(env.path(), "sys.dsk");
+    run(&["rom", "add", rom.to_str().unwrap(), "--name", "plus"]);
+    run(&["system", "add", disk.to_str().unwrap(), "--name", "sys"]);
+    run(&[
+        "create", "m", "--model", "plus", "--rom", "plus", "--system", "sys",
+    ]);
+    run(&["use", "m"]);
+
+    assert!(env.path().join(".config/macman/config.toml").is_file());
+    let data = env.path().join(".local/share/macman");
+    assert!(data.join("roms/plus.rom").is_file());
+    assert!(data.join("machines/m/system.dsk").is_file());
+    assert!(!env.path().join("Library").exists());
+}
+
 #[test]
 fn create_clones_the_template_and_writes_the_design_format() {
     let env = Env::new();
@@ -125,10 +159,11 @@ fn create_clones_the_template_and_writes_the_design_format() {
     assert_eq!(fs::metadata(template).unwrap().len(), 800 * 1024);
 
     let shown = env.ok(&["config", "show", "wombat-6"]);
+    let revision = format!("revision = \"{}\"", SourcePin::default().revision);
     for expected in [
         "schema_version = 1",
         "backend = \"minivmac\"",
-        "revision = \"36.04\"",
+        revision.as_str(),
         "model = \"plus\"",
         "memory = \"4M\"",
         "version = \"6.0.8\"",

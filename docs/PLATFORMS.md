@@ -1,21 +1,46 @@
 # Platform support
 
-The Mini vMac backend currently builds and runs only on Linux x86-64 and Windows
-x86-64. A successful Rust compile doesn't make a platform supported: macman also has to build Mini vMac
-there, launch it, and track it until it exits.
+The Mini vMac backend builds and runs on Linux x86-64, Windows x86-64, and macOS ARM64.
+A successful Rust compile doesn't make a platform supported: macman also has to build
+Mini vMac there, launch it, and track it until it exits.
 
 | Platform | Backend works | Release binary |
 |---|---|---|
 | Linux x86-64 | Yes | Yes |
 | Linux i686 | No | Yes |
 | Linux ARM64 | No | **No, deferred** |
-| macOS ARM64 | No | Yes |
+| macOS ARM64 | Yes | Yes |
 | macOS x86-64 | No | **No, deferred** |
 | Windows x86-64 | Yes | Yes |
 | Windows i686 | No | **No, deferred** |
 
 Where the backend doesn't work, macman still manages ROMs, system images, and machines,
 but `macman run` stops with an error saying the host isn't supported.
+
+## macOS paths
+
+macOS uses the same layout as Linux: `~/.config/macman`, `~/.local/share/macman`, and
+`~/.cache/macman`, with absolute `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_CACHE_HOME`
+honored exactly as on Linux. macman doesn't use `~/Library`, and doesn't migrate anything.
+
+## Mini vMac revisions
+
+The revision is per host, because 36.04 has no ARM64 target of any kind. 37.03 is the
+beta that adds one, as tagged by the repository that continues Mini vMac.
+
+| Host | Revision | Build target | Source |
+|---|---|---|---|
+| Linux x86-64 | 36.04 | `lx64` | gryphel.com |
+| Windows x86-64 | 36.04 | `wx64` | gryphel.com |
+| macOS ARM64 | 37.03 | `mcar` | [minivmac/minivmac](https://github.com/minivmac/minivmac) tag |
+
+Machines record their revision, so a machine made on another host, or by an earlier
+macman on a Mac, says so when it's run. Its disks are unaffected: set `revision` under
+`[emulator]` in its `machine.toml` to the one the error names.
+
+The 37.03 archive is one GitHub generates from the tag, and the pin is its SHA-256. If
+GitHub ever changed how it generates archives, downloads would be refused rather than
+trusted, and the pin would need checking against the tag.
 
 ## Release targets
 
@@ -42,12 +67,9 @@ platform unnoticed.
 
 ### macOS x86-64
 
-- Build Mini vMac with its native macOS target.
-- Handle the `.app` bundle that target produces, rather than a single executable.
-- Track the emulator process until it exits, which `open` on an app bundle wouldn't do.
-- Validate and reuse `.app` builds in the cache.
-- Keep the XDG-style paths, not `~/Library`, as tracked for macOS ARM64 in #7.
-- Test the whole path end to end on real hardware.
+- Map the host to upstream's `mc64` target, and accept a `clang` that targets it.
+- Check that the generated Makefile's flags suit the target. `-no_pie` is one difference.
+- Test the whole path end to end on real hardware, as for macOS ARM64.
 - Add the target to `release.yml` and update the tests in `tests/release_targets.rs`.
 
 ### Windows i686

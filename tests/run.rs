@@ -589,10 +589,45 @@ int main(int argc, char **argv) {
     return 0;
 }
 "#;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const FIXTURE_MAKEFILE: &str = "minivmac:\n\techo build >> LOG\n\tcp fake-emulator minivmac\n";
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const FIXTURE_EMULATOR: &str = "#!/bin/sh\necho \"run $*\" >> LOG\n";
+
+/// Names the SDK as upstream's does, and installs a bundle, not a binary.
+#[cfg(target_os = "macos")]
+const FIXTURE_MAKEFILE: &str = "\
+mk_COptionsCommon = -c -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX11.1.sdk
+
+default:
+\techo build >> LOG
+\techo sdk $(mk_COptionsCommon) >> LOG
+\tmkdir -p minivmac.app/Contents/MacOS minivmac.app/Contents/Resources
+\tcp fake-emulator minivmac.app/Contents/MacOS/minivmac
+\techo plist > minivmac.app/Contents/Info.plist
+\techo icon > minivmac.app/Contents/Resources/Icon.icns
+";
+
+/// Records what the Cocoa glue would find: it ignores its arguments, and looks
+/// beside its bundle for the ROM and `disk1.dsk` onwards, up to the first gap.
+#[cfg(target_os = "macos")]
+const FIXTURE_EMULATOR: &str = r#"#!/bin/sh
+echo "run $*" >> LOG
+echo "exe $0" >> LOG
+echo "cwd $(pwd -P)" >> LOG
+echo "plist $(cat "$(dirname "$0")/../Info.plist")" >> LOG
+for rom in *.ROM; do echo "rom $rom $(wc -c < "$rom" | tr -d ' ')" >> LOG; done
+i=1
+while [ -e "disk$i.dsk" ]; do
+    echo "disk$i $(readlink "disk$i.dsk")" >> LOG
+    if [ -w "disk$i.dsk" ]; then
+        printf written | dd of="disk$i.dsk" bs=1 seek=4096 conv=notrunc 2>/dev/null
+    else
+        echo "readonly$i" >> LOG
+    fi
+    i=$((i + 1))
+done
+"#;
 
 #[cfg(unix)]
 fn has_build_tools() -> bool {
@@ -637,9 +672,9 @@ fn real_adapter() -> Option<(Harness, PathBuf)> {
     assert!(status.success());
 
     let pin = SourcePin {
-        revision: "36.04".into(),
         url: "http://invalid.example/not-used".into(),
         sha256: sha256_file(&archive).unwrap(),
+        ..SourcePin::default()
     };
     let paths = Paths::under(root.path());
     let backend = MiniVmac::new(paths.clone(), pin, Some(archive));
@@ -659,35 +694,24 @@ fn real_adapter_builds_once_per_configuration_and_launches() {
     h.create("plus-a");
     assert_eq!(h.cmd(&["run", "plus-a"]).unwrap(), 0);
     assert_eq!(builds(), 1);
-    assert!(
-        read_log().contains("options: -t lx64 -m Plus -mem 4M -hres 512 -vres 342 -depth 0 -fullscreen 0 -mf 2 -magnify 1"),
-        "{}",
-        read_log()
+    let target = if cfg!(target_os = "macos") {
+        "-e xcd -cl -t mcar"
+    } else {
+        "-t lx64"
+    };
+    let options = format!(
+        "options: {target} -m Plus -mem 4M -hres 512 -vres 342 -depth 0 -fullscreen 0 -mf 2 \
+         -magnify 1"
     );
-
-    // The emulator got the ROM by flag and the private boot disk by path.
-    let run = read_log()
-        .lines()
-        .rfind(|l| l.starts_with("run "))
-        .unwrap()
-        .to_string();
-    let rom = h.paths.roms().join("plus.rom");
-    let boot = fs::canonicalize(h.system_disk("plus-a")).unwrap();
-    assert!(run.contains(&format!("-r {}", rom.display())), "{run}");
-    assert!(run.ends_with(boot.to_str().unwrap()), "{run}");
-    assert!(run.contains("-d "), "{run}");
+    assert!(read_log().contains(&options), "{}", read_log());
+    assert_launched_with_rom_and_boot_disk(&h, "plus-a", &read_log());
 
     // Same hardware shares the build, with separate disks.
     h.create("plus-b");
     h.cmd(&["run", "plus-a"]).unwrap();
     h.cmd(&["run", "plus-b"]).unwrap();
     assert_eq!(builds(), 1);
-    let last = read_log()
-        .lines()
-        .rfind(|l| l.starts_with("run "))
-        .unwrap()
-        .to_string();
-    assert!(last.contains("plus-b/system.dsk"), "{last}");
+    assert_launched_with_rom_and_boot_disk(&h, "plus-b", &read_log());
     assert_eq!(fs::read_dir(h.paths.builds()).unwrap().count(), 1);
 
     // Different hardware gets its own build.
@@ -719,9 +743,169 @@ fn real_adapter_builds_once_per_configuration_and_launches() {
         .unwrap()
         .contains("\"Plus\"");
     let machine = if plus_is_first { "plus-a" } else { "ii" };
-    fs::write(build.join("minivmac"), b"#!/bin/sh\nexit 9\n").unwrap();
+    let executable = if cfg!(target_os = "macos") {
+        "minivmac.app/Contents/MacOS/minivmac"
+    } else {
+        "minivmac"
+    };
+    fs::write(build.join(executable), b"#!/bin/sh\nexit 9\n").unwrap();
     assert_eq!(h.cmd(&["run", machine]).unwrap(), 0);
     assert_eq!(builds(), 3);
 
     assert_eq!(h.cmd(&["list", "--builds"]).unwrap(), 0);
+}
+
+/// The emulator got the ROM by flag and the private boot disk by path.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn assert_launched_with_rom_and_boot_disk(h: &Harness, machine: &str, log: &str) {
+    let run = log.lines().rfind(|l| l.starts_with("run ")).unwrap();
+    let rom = h.paths.roms().join("plus.rom");
+    let boot = fs::canonicalize(h.system_disk(machine)).unwrap();
+    assert!(run.contains(&format!("-r {}", rom.display())), "{run}");
+    assert!(run.ends_with(boot.to_str().unwrap()), "{run}");
+    assert!(run.contains("-d "), "{run}");
+}
+
+/// The last run's lines of each kind.
+#[cfg(target_os = "macos")]
+fn last_line<'a>(log: &'a str, prefix: &str) -> &'a str {
+    log.lines().rfind(|l| l.starts_with(prefix)).unwrap()
+}
+
+/// No arguments, a private bundle, and the ROM and boot disk beside it.
+#[cfg(target_os = "macos")]
+fn assert_launched_with_rom_and_boot_disk(h: &Harness, machine: &str, log: &str) {
+    assert_eq!(last_line(log, "run"), "run ", "the glue ignores arguments");
+    assert_eq!(last_line(log, "plist "), "plist plist");
+    assert_eq!(
+        last_line(log, "rom "),
+        format!("rom vMac.ROM {}", 128 * 1024)
+    );
+
+    let sessions = fs::canonicalize(h.paths.sessions()).unwrap();
+    let cwd = last_line(log, "cwd ").strip_prefix("cwd ").unwrap();
+    assert!(Path::new(cwd).starts_with(&sessions), "{cwd}");
+    let exe = last_line(log, "exe ").strip_prefix("exe ").unwrap();
+    assert!(
+        exe.ends_with("/minivmac.app/Contents/MacOS/minivmac"),
+        "{exe}"
+    );
+    assert!(!exe.contains("/builds/"), "runs a private copy: {exe}");
+
+    let boot = fs::canonicalize(h.system_disk(machine)).unwrap();
+    assert_eq!(
+        last_line(log, "disk1 "),
+        format!("disk1 {}", boot.display())
+    );
+    assert_eq!(fs::read_dir(h.paths.sessions()).unwrap().count(), 0);
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn macos_bundle_build_cache_and_disks() {
+    let Some((h, log)) = real_adapter() else {
+        return;
+    };
+    let read_log = || fs::read_to_string(&log).unwrap_or_default();
+    let builds = || read_log().lines().filter(|l| *l == "build").count();
+    h.create("plus-a");
+    assert_eq!(h.cmd(&["run", "plus-a"]).unwrap(), 0);
+
+    // The Makefile was pointed at the SDK that's really there.
+    let sdk = Command::new("xcrun")
+        .arg("--show-sdk-path")
+        .output()
+        .unwrap();
+    let sdk = String::from_utf8(sdk.stdout).unwrap();
+    assert_eq!(
+        last_line(&read_log(), "sdk "),
+        format!("sdk -c -isysroot {}", sdk.trim())
+    );
+
+    // A write through the link reaches the machine's own disk, and only that.
+    let boot = fs::read(h.system_disk("plus-a")).unwrap();
+    assert_eq!(&boot[4096..4103], b"written");
+    assert_eq!(boot.len(), 800 * 1024);
+
+    // The cached build keeps its whole bundle, and records what it's for.
+    let build = fs::read_dir(h.paths.builds())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let manifest = fs::read_to_string(build.join("manifest.toml")).unwrap();
+    for expected in [
+        "host = \"aarch64-apple-darwin\"",
+        "executable = \"minivmac.app/Contents/MacOS/minivmac\"",
+        "bundle = \"minivmac.app\"",
+        "bundle_sha256 = ",
+        "toolchain = \"arm64-apple-darwin",
+        "\"mcar\"",
+    ] {
+        assert!(manifest.contains(expected), "{expected}: {manifest}");
+    }
+    assert!(build.join("minivmac.app/Contents/Info.plist").is_file());
+    assert!(!build.join("disk1.dsk").exists());
+
+    // Disks follow the boot disk in order, and read-only ones can't be written.
+    let extra = write_disk(h.dir(), "extra disk.dsk");
+    let original = fs::read(&extra).unwrap();
+    let path = extra.to_str().unwrap();
+    assert_eq!(
+        h.cmd(&["run", "plus-a", "--disk", path, "--readonly"])
+            .unwrap(),
+        0
+    );
+    assert_eq!(builds(), 1, "the cached bundle is reused");
+    let text = read_log();
+    let disk2 = last_line(&text, "disk2 ");
+    assert!(disk2.ends_with("/1-extra disk.dsk"), "{disk2}");
+    assert_eq!(last_line(&text, "readonly"), "readonly2");
+    assert_eq!(fs::read(&extra).unwrap(), original);
+
+    // Damage to any part of the bundle, not just the binary, forces a rebuild.
+    fs::write(build.join("minivmac.app/Contents/Info.plist"), b"damaged").unwrap();
+    let checks = h.app.doctor_checks(false).unwrap();
+    assert!(
+        checks
+            .iter()
+            .any(|check| check.level == CheckLevel::Warn && check.message.contains("is damaged")),
+        "{checks:?}"
+    );
+    assert_eq!(h.cmd(&["run", "plus-a"]).unwrap(), 0);
+    assert_eq!(builds(), 2);
+    assert_eq!(
+        fs::read(build.join("minivmac.app/Contents/Info.plist")).unwrap(),
+        b"plist\n"
+    );
+
+    // An emulator's own files never reach the cache: it ran from a copy.
+    let digest_of_cache = sha256_file(&build.join("minivmac.app/Contents/MacOS/minivmac")).unwrap();
+    assert_eq!(h.cmd(&["run", "plus-a"]).unwrap(), 0);
+    assert_eq!(
+        sha256_file(&build.join("minivmac.app/Contents/MacOS/minivmac")).unwrap(),
+        digest_of_cache
+    );
+    assert_eq!(builds(), 2);
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn macos_sigbus_counts_as_a_host_crash() {
+    let (h, mock) = Harness::mock();
+    mock.0.borrow_mut().signal = 10; // SIGBUS, where Linux has SIGUSR1
+    assert_eq!(h.cmd(&["run", "plus-a"]).unwrap(), 138);
+    assert_reported(&h, "crashed on the host (signal 10)");
+    assert_recovers(&h, &mock);
+}
+
+#[test]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_sigbus_counts_as_a_host_crash() {
+    let (h, mock) = Harness::mock();
+    mock.0.borrow_mut().signal = 7; // SIGBUS, where macOS has SIGEMT
+    assert_eq!(h.cmd(&["run", "plus-a"]).unwrap(), 135);
+    assert_reported(&h, "crashed on the host (signal 7)");
+    assert_recovers(&h, &mock);
 }

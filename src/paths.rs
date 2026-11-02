@@ -1,5 +1,5 @@
-//! Per-user directory layout (design §6): XDG directories on Unix, and the
-//! roaming and local application data folders on Windows.
+//! Per-user directory layout (design §6): XDG directories on Unix, macOS
+//! included, and the roaming and local application data folders on Windows.
 
 #[cfg(not(windows))]
 use anyhow::Context;
@@ -18,10 +18,15 @@ impl Paths {
     /// Resolve directories from `XDG_*` variables, falling back to `$HOME`.
     #[cfg(not(windows))]
     pub fn from_env() -> Result<Self> {
+        Self::from_unix_env(|var| env::var_os(var))
+    }
+
+    #[cfg(not(windows))]
+    fn from_unix_env(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<Self> {
         Ok(Self {
-            config_dir: xdg_dir("XDG_CONFIG_HOME", ".config")?,
-            data_dir: xdg_dir("XDG_DATA_HOME", ".local/share")?,
-            cache_dir: xdg_dir("XDG_CACHE_HOME", ".cache")?,
+            config_dir: xdg_dir(&var, "XDG_CONFIG_HOME", ".config")?,
+            data_dir: xdg_dir(&var, "XDG_DATA_HOME", ".local/share")?,
+            cache_dir: xdg_dir(&var, "XDG_CACHE_HOME", ".cache")?,
         })
     }
 
@@ -116,15 +121,19 @@ impl Paths {
 }
 
 #[cfg(not(windows))]
-fn xdg_dir(var: &str, home_relative: &str) -> Result<PathBuf> {
+fn xdg_dir(
+    lookup: &impl Fn(&str) -> Option<std::ffi::OsString>,
+    var: &str,
+    home_relative: &str,
+) -> Result<PathBuf> {
     // The XDG spec says relative values must be ignored.
-    if let Some(value) = env::var_os(var) {
+    if let Some(value) = lookup(var) {
         let path = PathBuf::from(value);
         if path.is_absolute() {
             return Ok(path.join("macman"));
         }
     }
-    let Some(home) = env::var_os("HOME").filter(|h| !h.is_empty()) else {
+    let Some(home) = lookup("HOME").filter(|h| !h.is_empty()) else {
         bail!("neither {var} nor HOME is set; set one so macman can find its files");
     };
     let home = PathBuf::from(home);
@@ -176,6 +185,95 @@ mod windows {
             Some(path) if path.is_absolute() => Ok(path),
             _ => bail!("cannot locate the {folder:?} folder (error {result:#x})"),
         }
+    }
+}
+
+/// These hold on macOS as on Linux: macman deliberately stays out of
+/// `~/Library`, so the same files are found in the same places on both.
+#[cfg(all(test, not(windows)))]
+mod unix_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+
+    fn resolve(vars: &[(&str, &str)]) -> Result<Paths> {
+        let vars: HashMap<_, _> = vars.iter().copied().collect();
+        Paths::from_unix_env(|name| vars.get(name).map(OsString::from))
+    }
+
+    fn dirs(paths: &Paths) -> [&str; 3] {
+        [
+            paths.config_dir.to_str().unwrap(),
+            paths.data_dir.to_str().unwrap(),
+            paths.cache_dir.to_str().unwrap(),
+        ]
+    }
+
+    #[test]
+    fn home_gives_the_linux_style_defaults() {
+        let paths = resolve(&[("HOME", "/Users/zoe")]).unwrap();
+        assert_eq!(
+            dirs(&paths),
+            [
+                "/Users/zoe/.config/macman",
+                "/Users/zoe/.local/share/macman",
+                "/Users/zoe/.cache/macman",
+            ]
+        );
+    }
+
+    #[test]
+    fn absolute_overrides_win_one_directory_at_a_time() {
+        let paths = resolve(&[
+            ("HOME", "/Users/zoe"),
+            ("XDG_CONFIG_HOME", "/etc/xdg"),
+            ("XDG_CACHE_HOME", "/Volumes/Scratch Disk"),
+        ])
+        .unwrap();
+        assert_eq!(
+            dirs(&paths),
+            [
+                "/etc/xdg/macman",
+                "/Users/zoe/.local/share/macman",
+                "/Volumes/Scratch Disk/macman",
+            ]
+        );
+    }
+
+    #[test]
+    fn relative_and_empty_overrides_are_ignored() {
+        let paths = resolve(&[
+            ("HOME", "/Users/zoe"),
+            ("XDG_CONFIG_HOME", "relative"),
+            ("XDG_DATA_HOME", ""),
+            ("XDG_CACHE_HOME", "./also/relative"),
+        ])
+        .unwrap();
+        assert_eq!(dirs(&paths)[0], "/Users/zoe/.config/macman");
+        assert_eq!(dirs(&paths)[1], "/Users/zoe/.local/share/macman");
+        assert_eq!(dirs(&paths)[2], "/Users/zoe/.cache/macman");
+    }
+
+    #[test]
+    fn nothing_lands_in_the_macos_library() {
+        let paths = resolve(&[("HOME", "/Users/zoe")]).unwrap();
+        for dir in dirs(&paths) {
+            assert!(!dir.contains("Library"), "{dir}");
+        }
+    }
+
+    #[test]
+    fn home_is_needed_only_when_an_override_is_missing() {
+        assert!(resolve(&[]).is_err());
+        assert!(resolve(&[("HOME", "")]).is_err());
+        assert!(resolve(&[("HOME", "relative")]).is_err());
+        let paths = resolve(&[
+            ("XDG_CONFIG_HOME", "/c"),
+            ("XDG_DATA_HOME", "/d"),
+            ("XDG_CACHE_HOME", "/e"),
+        ])
+        .unwrap();
+        assert_eq!(dirs(&paths), ["/c/macman", "/d/macman", "/e/macman"]);
     }
 }
 
