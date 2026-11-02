@@ -113,6 +113,11 @@ pub trait EmulatorBackend {
         Ok(())
     }
 
+    /// Whether a boot volume left mounted can stop the guest from starting at all.
+    fn needs_unmounted_boot_volume(&self) -> bool {
+        false
+    }
+
     /// Whether the emulator finds the volume in a partitioned disk by itself.
     fn mounts_partitioned_disks(&self) -> bool {
         false

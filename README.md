@@ -190,6 +190,10 @@ Shut Down, or press Ctrl-Esc to quit at once, which is as abrupt as a power cut.
 macman is killed, it takes the emulator with it, because Basilisk II doesn't lock its
 disks on Linux and macman's locks would go. The guest's disks are then as after a crash.
 
+A boot disk left that way can stop the Mac starting at all, at a flashing question mark.
+`macman doctor` warns about one, and `macman run` offers to mark it as clean. That only
+lets it start, without checking it, so run Disk First Aid in the guest afterwards.
+
 On Windows, there are a few differences:
 
 - There's no shared folder, as Basilisk II can only offer whole drives there, so a machine

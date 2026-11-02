@@ -681,6 +681,10 @@ impl EmulatorBackend for Basilisk2 {
         Ok(())
     }
 
+    fn needs_unmounted_boot_volume(&self) -> bool {
+        true
+    }
+
     fn mounts_partitioned_disks(&self) -> bool {
         true
     }

@@ -8,7 +8,7 @@ use crate::paths::Paths;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +58,11 @@ pub struct Import {
 
 const BLOCK: u64 = 512;
 const MDB_OFFSET: u64 = 1024;
+/// `drAtrb` in an HFS master directory block, and its "cleanly unmounted" bit.
+const MDB_ATTRIBUTES: u64 = MDB_OFFSET + 10;
+const VOLUME_UNMOUNTED: u16 = 0x0100;
+/// `drEmbedSigWord`, which is set in the HFS wrapper of an HFS+ volume.
+const MDB_EMBED_SIGNATURE: u64 = MDB_OFFSET + 124;
 const DC42_HEADER: u64 = 84;
 const MACBINARY_HEADER: usize = 128;
 /// Far beyond any real map; a guard against corrupt counts.
@@ -241,6 +246,44 @@ fn partitioned_hint(path: &Path, partitions: &[Partition]) -> String {
         path.display(),
         partitions.len()
     )
+}
+
+/// Whether an HFS volume was never unmounted, so its guest stopped without shutting down.
+/// This is always so of a running machine's disk, so hold its lock when asking.
+///
+/// A wrapper's flag says nothing about the HFS+ volume inside, so those are left alone.
+pub fn left_mounted(path: &Path) -> Result<bool> {
+    if classify(path)? != Classification::Supported(DiskFormat::RawHfs) {
+        return Ok(false);
+    }
+    let mut file = File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut embedded = [0u8; 2];
+    read_at(&mut file, MDB_EMBED_SIGNATURE, &mut embedded)?;
+    let mut attributes = [0u8; 2];
+    read_at(&mut file, MDB_ATTRIBUTES, &mut attributes)?;
+    Ok(embedded == [0, 0] && u16::from_be_bytes(attributes) & VOLUME_UNMOUNTED == 0)
+}
+
+/// Set the flag that [`left_mounted`] reads, and change nothing else. This doesn't check
+/// the volume, it only lets the Mac start from it.
+pub fn mark_unmounted(path: &Path) -> Result<()> {
+    if !left_mounted(path)? {
+        bail!("{} isn't an HFS volume left mounted", path.display());
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    // An emulator on macOS locks its own disks, and may have outlived its macman.
+    file.try_lock()
+        .map_err(|_| anyhow!("{} is in use by an emulator", path.display()))?;
+    let mut attributes = [0u8; 2];
+    read_at(&mut file, MDB_ATTRIBUTES, &mut attributes)?;
+    let attributes = u16::from_be_bytes(attributes) | VOLUME_UNMOUNTED;
+    file.seek(SeekFrom::Start(MDB_ATTRIBUTES))?;
+    file.write_all(&attributes.to_be_bytes())
+        .with_context(|| format!("cannot write {}", path.display()))
 }
 
 /// The format of a usable volume image; everything else is an error.
@@ -869,6 +912,44 @@ mod tests {
         let mut corrupt = partitioned_image(&[(96, b"BD")]);
         corrupt[512 + 4..512 + 8].copy_from_slice(&u32::MAX.to_be_bytes());
         assert_eq!(classified(&corrupt), Classification::Unrecognized);
+    }
+
+    #[test]
+    fn a_volume_left_mounted_is_found_and_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.dsk");
+        let mut image = vec![0u8; 800 * 1024];
+        image[1024..1026].copy_from_slice(b"BD");
+        // A software lock, to show the other attributes survive.
+        image[1034] = 0x80;
+        fs::write(&file, &image).unwrap();
+        assert!(left_mounted(&file).unwrap());
+
+        mark_unmounted(&file).unwrap();
+        assert!(!left_mounted(&file).unwrap());
+        let mut marked = fs::read(&file).unwrap();
+        assert_eq!(marked[1034], 0x81);
+        marked[1034] = 0x80;
+        assert_eq!(marked, image, "only that bit changes");
+
+        assert!(mark_unmounted(&file).is_err(), "there's nothing to do now");
+    }
+
+    #[test]
+    fn only_plain_hfs_can_be_left_mounted() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.dsk");
+        let mut image = vec![0u8; 800 * 1024];
+        image[1024..1026].copy_from_slice(b"BD");
+        image[1024 + 124..1024 + 126].copy_from_slice(b"H+");
+        fs::write(&file, &image).unwrap();
+        assert!(!left_mounted(&file).unwrap(), "an HFS+ wrapper");
+        assert!(mark_unmounted(&file).is_err());
+
+        image[1024..1026].copy_from_slice(&[0xd2, 0xd7]);
+        image[1024 + 124..1024 + 126].copy_from_slice(&[0, 0]);
+        fs::write(&file, &image).unwrap();
+        assert!(!left_mounted(&file).unwrap(), "an MFS volume");
     }
 
     #[test]

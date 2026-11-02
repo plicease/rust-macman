@@ -373,6 +373,28 @@ fn a_readonly_extra_disk_cannot_change_its_source() {
 }
 
 #[test]
+fn doctor_warns_of_a_boot_disk_left_mounted_unless_it_is_in_use() {
+    let h = harness!();
+    h.create("a");
+    let warning = "wasn't shut down cleanly";
+    assert!(!h.doctor_says(warning), "a fresh disk is clean");
+
+    let disk = h.paths.machine("a").join("system.dsk");
+    let mut image = fs::read(&disk).unwrap();
+    image[1034] = 0;
+    fs::write(&disk, image).unwrap();
+    assert!(h.doctor_says(warning));
+
+    let lock = macman::disk::lock_image(&h.paths, &disk, macman::disk::LockMode::Exclusive);
+    assert!(lock.is_ok());
+    assert!(!h.doctor_says(warning), "a running guest has it mounted");
+    drop(lock);
+
+    macman::disk::mark_unmounted(&disk).unwrap();
+    assert!(!h.doctor_says(warning));
+}
+
+#[test]
 fn a_partitioned_disk_is_left_for_the_emulator_to_mount() {
     let h = harness!();
     h.create("a");

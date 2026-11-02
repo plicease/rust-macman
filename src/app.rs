@@ -534,6 +534,7 @@ impl App {
             }
         }
         backend.validate_disks(&machine, saved_disks.len() + args.disks.len())?;
+        self.offer_boot_disk_repair(&machine)?;
 
         if verbose && backend.revision() != machine.emulator.revision {
             println!(
@@ -603,6 +604,51 @@ impl App {
             }
         }
         Ok(exit_code(status))
+    }
+
+    /// The boot disk of `machine`, if a guest stopped without unmounting it and that can
+    /// keep the machine from starting. A read-only disk is left out, as guests only see
+    /// a copy of it.
+    fn unclean_boot_disk(&self, machine: &Machine) -> Result<Option<PathBuf>> {
+        if !self
+            .backends
+            .get(&machine.emulator.backend)?
+            .needs_unmounted_boot_volume()
+        {
+            return Ok(None);
+        }
+        for (path, disk) in machine.disk_paths(&self.paths)? {
+            if disk.boot && !disk.readonly && disk::left_mounted(&path)? {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Ask before anything is built or started, so the answer is about this run.
+    fn offer_boot_disk_repair(&self, machine: &Machine) -> Result<()> {
+        let Some(path) = self.unclean_boot_disk(machine)? else {
+            return Ok(());
+        };
+        let _lock = disk::lock_image(&self.paths, &path, LockMode::Exclusive)?;
+        let name = &machine.name;
+        let problem = format!(
+            "the boot disk of {name} wasn't shut down cleanly, so it may stop at a flashing \
+             question mark"
+        );
+        if !std::io::stdin().is_terminal() {
+            eprintln!("warning: {problem}; run macman from a terminal to repair it");
+            return Ok(());
+        }
+        print!("{problem}. Mark it as clean? [Y/n] ");
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().lock().read_line(&mut answer)?;
+        if accepts_repair(&answer) {
+            disk::mark_unmounted(&path)?;
+            println!("Marked it as clean, without checking it; run Disk First Aid in the guest");
+        }
+        Ok(())
     }
 
     /// Lock one disk and produce the form the emulator should see. Read-only
@@ -778,7 +824,10 @@ impl App {
     fn check_machines(&self, checks: &mut Vec<Check>) -> Result<()> {
         for name in list_dir(&self.paths.machines())? {
             match self.check_machine(&name) {
-                Ok(()) => checks.push(Check::ok(format!("machine {name} is runnable"))),
+                Ok(()) => {
+                    checks.push(Check::ok(format!("machine {name} is runnable")));
+                    checks.extend(self.check_boot_disk(&name)?);
+                }
                 Err(e) => checks.push(Check::fail(
                     format!("machine {name} cannot run"),
                     format!("{e:#}"),
@@ -786,6 +835,25 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    fn check_boot_disk(&self, name: &str) -> Result<Option<Check>> {
+        let machine = Machine::load(&self.paths, name)?;
+        // A machine in use has its volume mounted, as it should.
+        let unclean = self.unclean_boot_disk(&machine).ok().flatten();
+        let Some(path) = unclean else {
+            return Ok(None);
+        };
+        if disk::lock_image(&self.paths, &path, LockMode::Exclusive).is_err() {
+            return Ok(None);
+        }
+        Ok(Some(Check::warn(
+            format!("machine {name} wasn't shut down cleanly, and may not start"),
+            format!(
+                "`macman run {name}` offers to mark its boot disk as clean; then run Disk \
+                 First Aid in the guest"
+            ),
+        )))
     }
 
     fn check_machine(&self, name: &str) -> Result<()> {
@@ -855,6 +923,11 @@ fn confirm_delete(name: &str, disks: usize) -> Result<()> {
         bail!("cancelled; nothing was removed");
     }
     Ok(())
+}
+
+/// Anything but a refusal is a yes, as the machine may not start without the repair.
+fn accepts_repair(answer: &str) -> bool {
+    !matches!(answer.trim(), "n" | "N" | "no")
 }
 
 /// Describe a run that didn't end normally, or `None` if it did.
@@ -931,12 +1004,22 @@ fn exit_code(status: ExitStatus) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::table;
+    use super::{accepts_repair, table};
 
     fn rows(rows: &[&[&str]]) -> Vec<Vec<String>> {
         rows.iter()
             .map(|row| row.iter().map(|cell| cell.to_string()).collect())
             .collect()
+    }
+
+    #[test]
+    fn only_a_refusal_declines_a_repair() {
+        for answer in ["\n", "y\n", "Y\n", "yes\n"] {
+            assert!(accepts_repair(answer), "{answer:?}");
+        }
+        for answer in ["n\n", "N\n", "no\n"] {
+            assert!(!accepts_repair(answer), "{answer:?}");
+        }
     }
 
     #[test]

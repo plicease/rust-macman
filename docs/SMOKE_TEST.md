@@ -115,6 +115,8 @@ macman create q7b --backend basilisk2 --rom quadra650 --system system-7.5.5 --me
 | Change a byte of the cached `BasiliskII`, then `macman doctor` | Reports the build as damaged. The next run rebuilds it. |
 | `macman run q7 --disk "extra disk.dsk" --readonly` | Mounts the extra disk locked, and its hash stays the same. |
 | Kill `macman` with `kill -9` while the emulator runs | The emulator stops at once, with no alert in the guest. The next `macman run` warns about the earlier run. |
+| `pkill -KILL BasiliskII` while a machine runs, then `macman doctor` | Warns that it wasn't shut down cleanly. |
+| `macman run` that machine, from a terminal, and accept | Offers to mark its boot disk as clean, then boots, or shows the "not shut down properly" alert. |
 | `macman create qs --backend basilisk2 ... --shared-folder "a folder"`, then run it | A `Unix` volume holds that folder's files and no others. |
 | `macman create q2 --backend basilisk2 --rom <a IIx ROM> ...` | Refused, naming the ROMs it needs. |
 | Run a ROM macman accepts but the emulator refuses | `macman run` fails, though the emulator exits 0. |
