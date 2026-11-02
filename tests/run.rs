@@ -1,5 +1,9 @@
 //! `macman run`, against a mock backend and against the real Mini vMac adapter
 //! fed a small fixture source tree, which needs only gcc, make, bash, and tar.
+//!
+//! Unix only for now: the mock builds Unix exit statuses and the fixture is a
+//! shell script. Windows support (#6) will need its own versions of these.
+#![cfg(unix)]
 
 mod common;
 

@@ -70,9 +70,18 @@ pub fn atomic_copy_range_checked(
 }
 
 /// Move `tmp` to `dst`, failing if `dst` appeared since it was last checked.
-/// A hard link can't replace a file, where a rename would.
 fn publish_new(tmp: &Path, dst: &Path) -> Result<()> {
-    match fs::hard_link(tmp, dst) {
+    publish_new_with(tmp, dst, |from, to| fs::hard_link(from, to))
+}
+
+/// A hard link can't replace a file, where a rename would, so `link` is the
+/// only way in: with no hard links available, this fails rather than risk it.
+fn publish_new_with(
+    tmp: &Path,
+    dst: &Path,
+    link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> Result<()> {
+    match link(tmp, dst) {
         Ok(()) => {
             fs::remove_file(tmp)?;
             Ok(())
@@ -80,8 +89,12 @@ fn publish_new(tmp: &Path, dst: &Path) -> Result<()> {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             bail!("{} already exists", dst.display())
         }
-        // Some filesystems have no hard links; the check above must do.
-        Err(_) => Ok(fs::rename(tmp, dst)?),
+        Err(error) => bail!(
+            "cannot safely create {}: {error}. macman needs hard links there so it can't \
+             replace an existing file, which some filesystems (such as FAT and exFAT) lack; \
+             use another location",
+            dst.display()
+        ),
     }
 }
 
@@ -219,14 +232,43 @@ mod tests {
         assert!(format!("{:#}", raced.unwrap_err()).contains("already exists"));
         assert_eq!(fs::read(&dst).unwrap(), b"someone else's");
 
-        // Nor may a dangling symlink be written through.
+        let names: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(names.len(), 2, "no temporary files left: {names:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlinks_are_not_written_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::write(&src, b"data").unwrap();
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(dir.path().join("target"), &link).unwrap();
+
         assert!(atomic_copy_range(&src, 0, 4, &link).is_err());
         assert!(!dir.path().join("target").exists());
+    }
 
-        let names: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
-        assert_eq!(names.len(), 3, "no temporary files left: {names:?}");
+    #[test]
+    fn without_hard_links_publishing_fails_instead_of_renaming() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("tmp");
+        fs::write(&tmp, b"new").unwrap();
+        let no_links = |_: &Path, _: &Path| Err(io::Error::from(io::ErrorKind::Unsupported));
+
+        // Nothing there: still refused, and nothing is created.
+        let dst = dir.path().join("dst");
+        let err = publish_new_with(&tmp, &dst, no_links)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("hard links"), "{err}");
+        assert!(!dst.exists());
+
+        // A file that appeared after the first check, the case a rename would destroy.
+        fs::write(&dst, b"someone else's").unwrap();
+        assert!(publish_new_with(&tmp, &dst, no_links).is_err());
+        assert_eq!(fs::read(&dst).unwrap(), b"someone else's");
+        assert!(tmp.exists(), "the caller decides what to do with it");
     }
 
     #[test]

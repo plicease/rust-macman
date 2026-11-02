@@ -977,6 +977,7 @@ mod tests {
         assert!(detect_format(&file).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn locks_follow_the_file_through_aliases() {
         let dir = tempfile::tempdir().unwrap();
