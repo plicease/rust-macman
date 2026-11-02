@@ -132,7 +132,7 @@ On Windows, these replace the matching steps:
 | `macman run q7 --disk "extra 日本.dsk" --readonly` | Mounts the extra disk locked, and its hash stays the same. |
 | `Stop-Process -Name macman -Force` while the emulator runs | The emulator carries on, and opening its disk from elsewhere fails, as does `macman run q7`. `macman doctor` warns that macman stopped first. |
 | `macman create qs --backend basilisk2 ... --shared-folder "a folder"` | Refused. |
-| Close the window instead | On System 7.1, nothing happens. Later systems should ask whether to shut down. |
+| Close the window instead | On System 7.5.5 and Mac OS 8.1, the guest asks whether to shut down. System 7.1 ignores it. |
 
 On macOS, these replace the matching steps:
 

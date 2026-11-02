@@ -83,7 +83,8 @@ is needed; the changes this takes to the source are explained in
 
 On Windows, System 7.5.5 and Mac OS 8.1 were each tested with the default 68040 setting,
 and Mac OS 8.1 with `slirp` networking too, and with sound on a real device, played from
-its Sound control panel. Ctrl+Enter switches full screen on and off. After ending the
+its Sound control panel. On both of those, closing the window opens the shutdown dialog; System
+7.1 ignores it. Ctrl+Enter switches full screen on and off. After ending the
 emulator from Task Manager, the next run offers the repair: declining it leaves the
 machine at the flashing question mark, and accepting it lets the machine boot. System 7.1
 was tested with a 68030 setting; the image at hand stops with an error as a Quadra 900.

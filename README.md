@@ -203,7 +203,8 @@ On Windows, there are a few differences:
   under 260 bytes.
 - If macman is killed, the emulator keeps running, and Windows itself keeps others off its
   disks until it stops.
-- The window's close button does nothing on System 7.1, and Windows keeps Ctrl-Esc for
+- The window's close button asks to shut down on System 7.5.5 and Mac OS 8.1, as above,
+  but does nothing on System 7.1. Windows keeps Ctrl-Esc for
   the Start menu, so it won't quit the emulator. Choose Shut Down in the guest, or, as a
   last resort, end `BasiliskII.exe` from Task Manager, as abrupt as a power cut.
 
