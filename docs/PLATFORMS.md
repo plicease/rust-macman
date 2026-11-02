@@ -38,8 +38,7 @@ A machine isn't tied to a revision, so it runs on whichever one its host builds.
 `revision` under `[emulator]` records where it came from, and it's never rewritten, so
 there's nothing to migrate or edit: existing machines and archives work as they are,
 in either direction. The build key and build manifest hold the revision really used,
-and `--verbose` says when that differs from the machine's. A Mac Plus machine with System
-7.0.1, recorded at 36.04, has been run on macOS ARM64 this way.
+and `--verbose` says when that differs from the machine's.
 
 36.04 and 37.03 are interchangeable because their sources were compared: the emulated
 models, memory sizes, ROMs, and disk formats match, and 37.03's changes to the emulator
@@ -100,11 +99,12 @@ in their version or location means a new build. MPFR is the ARM64 FPU core: ARM6
 
 On macOS, System 7.5.5 and Mac OS 8.1 were each tested with the default 68040 setting, and
 sound on a real device and full screen worked. Mac OS 8.1 was tested with `slirp`
-networking too. Closing the window opens the shutdown dialog in the guest. System 7.1 was
-tested with a 68030 setting.
+networking too. Closing the window opens the shutdown dialog in the guest. A shared folder
+works in both directions, written from the host and from the guest. System 7.1 was tested
+with a 68030 setting.
 
-The macOS smoke test covered Shut Down from inside the guest, killing the emulator, and
-killing macman, but not a shared folder. Homebrew hasn't been tried, only MacPorts.
+The macOS smoke test covered Shut Down from inside the guest, killing the emulator, killing
+macman, and rebuilding a damaged build. Homebrew hasn't been tried, only MacPorts.
 
 The pin is commit `f532be3d3d70` of [kanjitalk755/macemu](https://github.com/kanjitalk755/macemu),
 the maintained fork, and its SHA-256 is that of the archive GitHub generates for it. If
