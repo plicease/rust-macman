@@ -679,6 +679,33 @@ fn import_does_not_build_anything() {
 }
 
 #[test]
+fn export_all_takes_every_machine() {
+    let source = Host::with_two_machines();
+    let archive = source.archive("all.tar.gz");
+    let output = source.ok(&["export", "--all", "-o", &archive]);
+    assert!(output.contains("Exported 2 machine(s)"), "{output}");
+
+    let target = Host::new();
+    target.ok(&["import", &archive]);
+    let list = target.ok(&["list"]);
+    assert!(list.contains("plus-a") && list.contains("plus-b"), "{list}");
+}
+
+#[test]
+fn export_all_needs_machines_and_excludes_names() {
+    let empty = Host::new();
+    let archive = empty.archive("all.tar.gz");
+    let output = empty.fails(&["export", "--all", "-o", &archive]);
+    assert!(output.contains("no machines"), "{output}");
+    assert!(!Path::new(&archive).exists());
+
+    let both = empty.run(&["export", "--all", "plus-a", "-o", &archive]);
+    assert_eq!(both.status.code(), Some(2), "{both:?}");
+    let neither = empty.run(&["export", "-o", &archive]);
+    assert_eq!(neither.status.code(), Some(2), "{neither:?}");
+}
+
+#[test]
 fn export_refuses_a_disk_in_use() {
     let source = Host::with_two_machines();
     let paths = Paths {

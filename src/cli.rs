@@ -53,8 +53,11 @@ pub enum Command {
     Clone { source: String, dest: String },
     /// Write machines, with their ROMs and disks, to an archive for another host
     Export {
-        #[arg(required = true, value_name = "NAME")]
+        #[arg(required_unless_present = "all", value_name = "NAME")]
         names: Vec<String>,
+        /// Export every machine
+        #[arg(long, conflicts_with = "names")]
+        all: bool,
         /// Archive to create, such as machines.tar.gz
         #[arg(short, long, value_name = "FILE")]
         output: PathBuf,

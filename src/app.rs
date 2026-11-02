@@ -117,7 +117,15 @@ impl App {
             Command::Run(args) => return self.run(&args, verbose),
             Command::Config(ConfigCommand::Show { name }) => self.config_show(name)?,
             Command::Clone { source, dest } => self.clone_machine(&source, &dest)?,
-            Command::Export { names, output } => {
+            Command::Export { names, all, output } => {
+                let names = if all {
+                    list_dir(&self.paths.machines())?
+                } else {
+                    names
+                };
+                if names.is_empty() {
+                    bail!("there are no machines to export");
+                }
                 let count = archive::export(&self.paths, &names, &output)?;
                 println!("Exported {count} machine(s) to {}", output.display());
             }

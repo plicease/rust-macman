@@ -72,6 +72,7 @@ macman config show wombat-6
 macman clone wombat-6 wombat-test
 macman remove wombat-test
 macman export wombat-6 -o wombat-6.tar.gz
+macman export --all -o machines.tar.gz
 macman import wombat-6.tar.gz
 ```
 

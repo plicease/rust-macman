@@ -219,6 +219,8 @@ macman export wombat-6 maciix-7 -o classic-macs.tar.gz
 macman import classic-macs.tar.gz
 ```
 
+`macman export --all -o everything.tar.gz` takes every machine.
+
 Export refuses a machine whose disks are in use, so close the emulator first. Import
 never replaces anything: importing the same archive again reports `unchanged`, and a
 machine or ROM that differs from what's already there is reported as a conflict and
