@@ -103,6 +103,7 @@ macman create q7b --backend basilisk2 --rom quadra650 --system system-7.5.5 --me
 |---|---|
 | `macman doctor` before installing anything | Names the missing tools, as warnings until a machine needs them. |
 | `macman run q7` | Downloads, builds, opens a window, and boots System 7.5.5 to the Finder. |
+| The same run, with speakers or headphones on | The startup chime plays on the host's real sound device. |
 | While it runs, in a second terminal: `macman run q7` | Refused, because the disk is in use. |
 | While it runs: `macman doctor` | The machine is still reported as runnable. |
 | In the guest, save a file, then choose Shut Down | Exit code 0, the `sessions` directory is empty, and the file is there on the next run. |
