@@ -575,3 +575,28 @@ fn doctor_reports_damage_without_leaking_paths() {
     assert!(text.contains("disk system.dsk is missing"), "{text}");
     assert!(!text.contains(env.path().to_str().unwrap()), "{text}");
 }
+
+/// The native folders, reached through a path with a space and non-ASCII
+/// characters, on a system where nothing sets `HOME` or `XDG_*`.
+#[cfg(windows)]
+#[test]
+fn windows_uses_its_native_folders_without_home() {
+    let env = Env::new();
+    let profile = env.path().join("Zoë Q 日本");
+    let (roaming, local) = (profile.join("Roaming"), profile.join("Local"));
+    let rom = write_rom(env.path(), "plus.bin", PLUS_ROM_CHECKSUM, 128 * 1024);
+    let output = Command::new(env!("CARGO_BIN_EXE_macman"))
+        .args(["rom", "add", rom.to_str().unwrap(), "--name", "plus-v3"])
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CACHE_HOME")
+        .env("APPDATA", &roaming)
+        .env("LOCALAPPDATA", &local)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(local.join("macman/roms/plus-v3.rom").is_file());
+    assert!(!roaming.join("macman/roms").exists());
+}

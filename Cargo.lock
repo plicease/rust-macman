@@ -332,6 +332,7 @@ dependencies = [
  "tempfile",
  "toml",
  "uuid",
+ "windows-sys",
 ]
 
 [[package]]

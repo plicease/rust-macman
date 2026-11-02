@@ -17,3 +17,8 @@ jobs:
   ci:
     uses: uperl/action-rust-ci/.github/workflows/ci.yml@v1
 
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --locked

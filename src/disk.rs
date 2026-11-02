@@ -5,7 +5,7 @@ use crate::fsutil::{
     atomic_copy, atomic_copy_range_checked, list_dir, read_toml, sha256_bytes, write_toml,
 };
 use crate::paths::Paths;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{Read, Seek, SeekFrom};
@@ -488,17 +488,29 @@ pub fn lock_image(paths: &Paths, image: &Path, mode: LockMode) -> Result<ImageLo
         LockMode::Exclusive => file.try_lock(),
         LockMode::Shared => file.try_lock_shared(),
     };
-    match result {
-        Ok(()) => Ok(ImageLock { _file: file }),
-        Err(TryLockError::WouldBlock) => bail!(
+    let in_use = || {
+        anyhow!(
             "{} is in use by another macman process or machine; close that emulator first, \
              or work on an explicit copy",
             image.display()
-        ),
+        )
+    };
+    match result {
+        Ok(()) if held_by_emulator(image) => Err(in_use()),
+        Ok(()) => Ok(ImageLock { _file: file }),
+        Err(TryLockError::WouldBlock) => Err(in_use()),
         Err(TryLockError::Error(e)) => {
             Err(e).with_context(|| format!("cannot lock {}", image.display()))
         }
     }
+}
+
+/// Windows emulators open disks with sharing denied, which still protects a
+/// disk if macman dies first and its lock with it. Elsewhere nothing shows it.
+fn held_by_emulator(image: &Path) -> bool {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    cfg!(windows)
+        && File::open(image).is_err_and(|e| e.raw_os_error() == Some(ERROR_SHARING_VIOLATION))
 }
 
 #[cfg(unix)]
@@ -508,7 +520,35 @@ fn file_identity(path: &Path) -> Result<String> {
     Ok(format!("{:x}-{:x}", meta.dev(), meta.ino()))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn file_identity(path: &Path) -> Result<String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        GetFileInformationByHandle,
+    };
+    // Asking for no data access works even while an emulator holds the image
+    // with sharing denied, which would otherwise fail before the lock could.
+    let file = OpenOptions::new()
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    // SAFETY: an all-zero struct is valid, and is only read after success.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: the handle is open for the call, and `info` is writable.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("cannot read {}", path.display()));
+    }
+    Ok(format!(
+        "{:x}-{:x}{:08x}",
+        info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn file_identity(path: &Path) -> Result<String> {
     let path = fs::canonicalize(path).with_context(|| format!("cannot read {}", path.display()))?;
     Ok(sha256_bytes(path.to_string_lossy().as_bytes()))
@@ -977,29 +1017,57 @@ mod tests {
         assert!(detect_format(&file).is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn locks_follow_the_file_through_aliases() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::under(dir.path());
         let image = dir.path().join("a.dsk");
         fs::write(&image, b"x").unwrap();
-        let symlink = dir.path().join("sym.dsk");
         let hardlink = dir.path().join("hard.dsk");
-        std::os::unix::fs::symlink(&image, &symlink).unwrap();
         fs::hard_link(&image, &hardlink).unwrap();
+        #[allow(unused_mut)]
+        let mut aliases = vec![image.clone(), hardlink];
+        // Creating a symlink on Windows takes a privilege most users lack.
+        #[cfg(unix)]
+        {
+            let symlink = dir.path().join("sym.dsk");
+            std::os::unix::fs::symlink(&image, &symlink).unwrap();
+            aliases.push(symlink);
+        }
 
         let held = lock_image(&paths, &image, LockMode::Exclusive).unwrap();
-        for alias in [&image, &symlink, &hardlink] {
+        for alias in &aliases {
             assert!(lock_image(&paths, alias, LockMode::Exclusive).is_err());
             assert!(lock_image(&paths, alias, LockMode::Shared).is_err());
         }
         drop(held);
 
         let reader = lock_image(&paths, &image, LockMode::Shared).unwrap();
-        let _second_reader = lock_image(&paths, &symlink, LockMode::Shared).unwrap();
+        let _second_reader = lock_image(&paths, &aliases[1], LockMode::Shared).unwrap();
         assert!(lock_image(&paths, &image, LockMode::Exclusive).is_err());
         drop(reader);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_emulator_that_outlived_macman_still_counts_as_in_use() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let image = dir.path().join("a.dsk");
+        fs::write(&image, b"x").unwrap();
+
+        // How Mini vMac opens a writable disk.
+        let held = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&image)
+            .unwrap();
+        let error = lock_image(&paths, &image, LockMode::Shared).unwrap_err();
+        assert!(error.to_string().contains("in use"), "{error}");
+        drop(held);
+        lock_image(&paths, &image, LockMode::Shared).unwrap();
     }
 
     #[test]
