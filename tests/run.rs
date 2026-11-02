@@ -5,7 +5,7 @@ mod common;
 
 use anyhow::{Result, bail};
 use clap::Parser;
-use common::{II_ROM_CHECKSUM, PLUS_ROM_CHECKSUM, write_disk, write_rom};
+use common::{II_ROM_CHECKSUM, PLUS_ROM_CHECKSUM, write_disk, write_partitioned_disk, write_rom};
 use macman::app::App;
 use macman::backend::minivmac::{MiniVmac, SourcePin};
 use macman::backend::{
@@ -406,6 +406,47 @@ fn killed_macman_is_reported_and_keeps_disks() {
     h.cmd(&["run", "plus-a"]).unwrap();
     assert_eq!(session_count(&h.paths), 0);
     assert!(h.system_disk("plus-a").exists());
+    assert_eq!(mock.0.borrow().launches.len(), 1);
+}
+
+#[test]
+fn extra_disks_may_be_blank_but_not_partitioned() {
+    let (h, mock) = Harness::mock();
+    let blank = h.dir().join("blank.dsk");
+    fs::write(&blank, vec![0u8; 800 * 1024]).unwrap();
+    h.cmd(&["run", "plus-a", "--disk", blank.to_str().unwrap()])
+        .unwrap();
+    assert_eq!(mock.0.borrow().launches.len(), 1);
+
+    let (partitioned, _) = write_partitioned_disk(h.dir(), "zip.image");
+    let path = partitioned.to_str().unwrap();
+    let error = h.cmd(&["run", "plus-a", "--disk", path]).unwrap_err();
+    assert!(error.to_string().contains("system add"), "{error}");
+    assert!(
+        h.cmd(&["run", "plus-a", "--disk", path, "--any-format"])
+            .is_err()
+    );
+    assert_eq!(mock.0.borrow().launches.len(), 1);
+}
+
+#[test]
+fn any_format_admits_unrecognized_disks() {
+    let (h, mock) = Harness::mock();
+    let odd = h.dir().join("odd.hda");
+    fs::write(&odd, vec![7u8; 8192]).unwrap();
+    let path = odd.to_str().unwrap();
+
+    let error = h.cmd(&["run", "plus-a", "--disk", path]).unwrap_err();
+    assert!(error.to_string().contains("--any-format"), "{error}");
+    h.cmd(&[
+        "run",
+        "plus-a",
+        "--disk",
+        path,
+        "--readonly",
+        "--any-format",
+    ])
+    .unwrap();
     assert_eq!(mock.0.borrow().launches.len(), 1);
 }
 

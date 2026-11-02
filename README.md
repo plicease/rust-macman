@@ -65,9 +65,22 @@ and `~/.cache/macman`.
 
 ## Disk images
 
-macman accepts raw MFS and HFS volumes, and Disk Copy 4.2 images. It identifies them
-by content and rejects anything else, including partitioned hard-disk images. It
-does not convert images.
+macman identifies images by content, never by file name. Mini vMac can attach raw
+MFS and HFS volumes and Disk Copy 4.2 images, but it can't mount a partitioned disk,
+such as a Zip or hard-disk image. `macman system add` handles that for you by
+extracting the volume, leaving your original untouched:
+
+```sh
+macman system add ~/images/system710-zip.image --name system-7.1 --version 7.1
+```
+
+If a disk has several volumes, choose one with `--partition N`. Disk Copy images are
+unwrapped the same way, because Mini vMac attaches them read-only.
+
+`macman run --disk` takes an image as it stands, so a partitioned disk needs
+registering first. Blank images are fine, and `--any-format` attaches an image macman
+can't identify, ideally with `--readonly`. See
+[docs/DISK_FORMATS.md](docs/DISK_FORMATS.md) for the details.
 
 ## Working offline
 

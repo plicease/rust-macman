@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{II_ROM_CHECKSUM, PLUS_ROM_CHECKSUM, write_disk, write_rom};
+use common::{II_ROM_CHECKSUM, PLUS_ROM_CHECKSUM, write_disk, write_partitioned_disk, write_rom};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -248,12 +248,84 @@ fn bad_inputs_get_useful_errors() {
     );
 
     let junk = env.path().join("junk.dsk");
-    fs::write(&junk, vec![0u8; 4096]).unwrap();
+    fs::write(
+        &junk,
+        b"PK\x03\x04 this is really a zip archive............",
+    )
+    .unwrap();
     assert!(
         env.fails(&["system", "add", junk.to_str().unwrap(), "--name", "j"])
             .contains("not a supported disk image")
     );
     assert!(env.fails(&["run", "nope"]).contains("no machine named"));
+}
+
+#[test]
+fn system_add_extracts_the_volume_from_a_partitioned_disk() {
+    let env = Env::new();
+    let (image, volume) = write_partitioned_disk(env.path(), "system-zip.image");
+    let before = fs::read(&image).unwrap();
+
+    let added = env.ok(&["system", "add", image.to_str().unwrap(), "--name", "zip"]);
+    assert!(
+        added.contains("extracted from partition 3 (Apple_HFS)"),
+        "{added}"
+    );
+
+    let stored = env.path().join("data/macman/systems/zip.dsk");
+    assert_eq!(fs::read(stored).unwrap(), volume);
+    assert_eq!(
+        fs::read(&image).unwrap(),
+        before,
+        "the source is left alone"
+    );
+
+    let sidecar = fs::read_to_string(env.path().join("data/macman/systems/zip.toml")).unwrap();
+    assert!(
+        sidecar.contains("extracted_from = \"partition 3 (Apple_HFS)\""),
+        "{sidecar}"
+    );
+    assert!(sidecar.contains("source_sha256"), "{sidecar}");
+    assert!(env.ok(&["system", "list"]).contains("raw HFS"));
+}
+
+#[test]
+fn system_add_unwraps_disk_copy_so_machines_get_a_writable_disk() {
+    let env = Env::new();
+    let mut image = vec![0u8; 84 + 1600 * 512];
+    image[64..68].copy_from_slice(&(1600u32 * 512).to_be_bytes());
+    image[82] = 1;
+    image[84..86].copy_from_slice(b"LK");
+    image[84 + 1024..84 + 1026].copy_from_slice(b"BD");
+    let path = env.path().join("tools.image");
+    fs::write(&path, &image).unwrap();
+
+    let added = env.ok(&["system", "add", path.to_str().unwrap(), "--name", "dc42"]);
+    assert!(
+        added.contains("extracted from Disk Copy 4.2 image"),
+        "{added}"
+    );
+    let stored = fs::read(env.path().join("data/macman/systems/dc42.dsk")).unwrap();
+    assert_eq!(stored, image[84..]);
+}
+
+#[test]
+fn system_add_refuses_blank_and_warns_about_unbootable_volumes() {
+    let env = Env::new();
+    let blank = env.path().join("blank.dsk");
+    fs::write(&blank, vec![0u8; 8192]).unwrap();
+    let error = env.fails(&["system", "add", blank.to_str().unwrap(), "--name", "b"]);
+    assert!(error.contains("is blank"), "{error}");
+    assert!(env.ok(&["system", "list"]).is_empty());
+
+    let data = write_disk(env.path(), "data.dsk");
+    let output = env.run(&["system", "add", data.to_str().unwrap(), "--name", "data"]);
+    assert!(output.status.success());
+    assert!(
+        stderr(&output).contains("no boot blocks"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]

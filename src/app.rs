@@ -45,9 +45,17 @@ impl App {
                 file,
                 name,
                 version,
+                partition,
             }) => {
-                registry::add_system(&self.paths, &file, &name, version.as_deref())?;
-                println!("Registered system image {name}");
+                let image =
+                    registry::add_system(&self.paths, &file, &name, version.as_deref(), partition)?;
+                match image.extracted_from {
+                    Some(from) => println!(
+                        "Registered system image {name}, extracted from {from} ({}K)",
+                        image.size / 1024
+                    ),
+                    None => println!("Registered system image {name}"),
+                }
             }
             Command::System(SystemCommand::List) => self.list_systems()?,
             Command::Create(args) => {
@@ -320,14 +328,16 @@ impl App {
         registry::check_rom_for_model(&rom, machine.hardware.model)?;
 
         let saved_disks = machine.disk_paths(&self.paths)?;
-        for (path, _) in &saved_disks {
+        for (path, saved) in &saved_disks {
             if !path.exists() {
                 bail!("machine {name:?} is missing its disk {}", path.display());
             }
-            disk::detect_format(path)?;
+            if disk::detect_format(path)? == disk::DiskFormat::DiskCopy42 && !saved.readonly {
+                disk::warn_disk_copy_read_only(path);
+            }
         }
         for path in &args.disks {
-            disk::detect_format(path)?;
+            disk::check_attachable(path, args.any_format, !args.readonly)?;
         }
         backend.validate_disks(&machine, saved_disks.len() + args.disks.len())?;
 

@@ -192,7 +192,7 @@ Keep generic model and disk metadata separate from backend extensions. Avoid pre
 - Do not advertise an attachment as read-only unless the backend or an isolated copy *actually prevents writes*. If Mini vMac cannot enforce read-only attachment, use a throwaway copy and discard changes, with explicit CLI messaging.
 - Never delete registered source templates during machine removal; prompt or require an explicit destructive flag to delete private machine disks.
 
-Disk formats and capacity restrictions vary by emulated model and System version. Validate supported formats, reject unknown ones with actionable diagnostics, and avoid data conversion in the first release.
+Disk formats and capacity restrictions vary by emulated model and System version. Validate supported formats and reject unknown ones with actionable diagnostics. Avoid data conversion, except that registering a system image may store just the volume from a container Mini vMac cannot use writably, leaving the source untouched. See [DISK_FORMATS.md](DISK_FORMATS.md).
 
 ## 9. Developer workflow
 

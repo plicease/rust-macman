@@ -1,8 +1,10 @@
 //! Registered ROMs and system images. Each entry is the imported file plus a
 //! TOML sidecar of metadata.
 
-use crate::disk::{self, DiskFormat};
-use crate::fsutil::{atomic_copy, list_dir, read_toml, sha256_file, validate_name, write_toml};
+use crate::disk::{self, DiskFormat, LockMode};
+use crate::fsutil::{
+    atomic_copy, atomic_copy_range, list_dir, read_toml, sha256_file, validate_name, write_toml,
+};
 use crate::model::{ALL_MODELS, Model};
 use crate::paths::Paths;
 use anyhow::{Context, Result, bail};
@@ -28,6 +30,11 @@ pub struct SystemImage {
     pub size: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// What the volume was extracted from, if not stored whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extracted_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_sha256: Option<String>,
 }
 
 const STANDARD_ROM_SIZES: [u64; 4] = [64 * 1024, 128 * 1024, 256 * 1024, 512 * 1024];
@@ -97,23 +104,37 @@ pub fn add_system(
     source: &Path,
     name: &str,
     version: Option<&str>,
+    partition: Option<u32>,
 ) -> Result<SystemImage> {
     validate_name("system", name)?;
     let dest = system_path(paths, name);
     if dest.exists() {
         bail!("a system image named {name:?} is already registered; pick another --name");
     }
-    disk::detect_format(source)?;
-    let size = std::fs::metadata(source)
-        .with_context(|| format!("cannot read {}", source.display()))?
-        .len();
-    let sha256 = sha256_file(source)?;
-    atomic_copy(source, &dest)?;
+    let import = disk::plan_import(source, partition)?;
+    {
+        let _guard = disk::lock_image(paths, source, LockMode::Shared)?;
+        atomic_copy_range(source, import.offset, import.length, &dest)?;
+    }
+    // Check what was stored, not just the plan, before registering it.
+    if let Err(error) = disk::detect_format(&dest) {
+        let _ = std::fs::remove_file(&dest);
+        return Err(error.context("the extracted volume is not usable; nothing was registered"));
+    }
+    if !disk::has_boot_blocks(&dest)? {
+        eprintln!("warning: {name} has no boot blocks, so it cannot start up a machine");
+    }
     let image = SystemImage {
         name: name.to_string(),
-        sha256,
-        size,
+        sha256: sha256_file(&dest)?,
+        size: import.length,
         version: version.map(str::to_string),
+        source_sha256: import
+            .extracted
+            .is_some()
+            .then(|| sha256_file(source))
+            .transpose()?,
+        extracted_from: import.extracted,
     };
     write_toml(&sidecar(&dest), &image)?;
     Ok(image)

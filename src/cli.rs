@@ -78,6 +78,9 @@ pub enum SystemCommand {
         /// System Software version, for display only
         #[arg(long)]
         version: Option<String>,
+        /// Partition to extract from a partitioned disk image, if it has several volumes
+        #[arg(long, value_name = "N")]
+        partition: Option<u32>,
     },
     /// List registered system images
     List,
@@ -118,6 +121,9 @@ pub struct RunArgs {
     /// Give the emulator read-only throwaway copies of the --disk files
     #[arg(long, requires = "disks")]
     pub readonly: bool,
+    /// Attach --disk files whose format macman does not recognize
+    #[arg(long, requires = "disks")]
+    pub any_format: bool,
 }
 
 #[derive(Debug, Subcommand)]

@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Write `contents` so readers see the old file or the new one, never a mix.
@@ -27,17 +27,25 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
 /// Copy `src` to `dst`, publishing `dst` only once the copy is complete.
 /// Refuses to replace an existing file.
 pub fn atomic_copy(src: &Path, dst: &Path) -> Result<()> {
+    let length = fs::metadata(src)
+        .with_context(|| format!("cannot read {}", src.display()))?
+        .len();
+    atomic_copy_range(src, 0, length, dst)
+}
+
+/// As [`atomic_copy`], for `length` bytes of `src` starting at `offset`.
+pub fn atomic_copy_range(src: &Path, offset: u64, length: u64, dst: &Path) -> Result<()> {
     if dst.exists() {
         bail!("{} already exists", dst.display());
     }
     let tmp = temp_sibling(dst)?;
     let result = (|| -> Result<()> {
-        fs::copy(src, &tmp)?;
-        // A read-only source must still yield a writable private copy.
-        let mut perms = fs::metadata(&tmp)?.permissions();
-        #[allow(clippy::permissions_set_readonly_false)]
-        perms.set_readonly(false);
-        fs::set_permissions(&tmp, perms)?;
+        let mut input = File::open(src)?;
+        input.seek(SeekFrom::Start(offset))?;
+        let mut output = File::create(&tmp)?;
+        if io::copy(&mut input.take(length), &mut output)? != length {
+            bail!("source ended early");
+        }
         fs::rename(&tmp, dst)?;
         Ok(())
     })();
@@ -156,5 +164,24 @@ mod tests {
         atomic_copy(&src, &dst).unwrap();
         assert!(!fs::metadata(&dst).unwrap().permissions().readonly());
         assert!(atomic_copy(&src, &dst).is_err());
+    }
+
+    #[test]
+    fn atomic_copy_range_copies_exactly_the_range_or_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::write(&src, b"0123456789").unwrap();
+
+        let dst = dir.path().join("dst");
+        atomic_copy_range(&src, 2, 5, &dst).unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), b"23456");
+
+        let short = dir.path().join("short");
+        assert!(atomic_copy_range(&src, 8, 5, &short).is_err());
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 2, "nothing left behind: {names:?}");
     }
 }
