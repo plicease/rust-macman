@@ -3,7 +3,8 @@
 A [perlbrew](https://perlbrew.pl/)-inspired manager for named classic Macintosh
 emulation environments. It creates machines from your own ROMs and bootable disk
 images, builds the right [Mini vMac](https://www.gryphel.com/c/minivmac/) for each
-one, or [Basilisk II](#basilisk-ii) for later 68k systems, and launches them with
+one, [Basilisk II](#basilisk-ii) for later 68k systems, or a preview of
+[SheepShaver](#sheepshaver) for PowerPC Mac OS, and launches them with
 disk-image safety checks.
 
 macman does not emulate anything itself, and it does not include or download Apple
@@ -211,6 +212,62 @@ On Windows, there are a few differences:
 On macOS, if macman is killed, the emulator keeps running and holds a lock on its disks.
 `macman run` refuses them, saying why, until you quit that emulator.
 
+## SheepShaver
+
+macman can also run [SheepShaver](https://github.com/kanjitalk755/macemu), for classic
+PowerPC Mac OS, generally Mac OS 7.5.2 through 9.0.4, depending on the ROM and the guest.
+It imitates no particular Power Mac, and macman makes no claim for Mac OS 9.1 or later,
+Mac OS X, or G4 and G5 machines.
+
+**This backend hasn't been tried against the real emulator yet.** Its build, launch, and
+limits come from reading the pinned source, and are tested against a stand-in. Treat it
+as a preview until [the smoke test](docs/SMOKE_TEST.md#sheepshaver) has passed; see
+[docs/PLATFORMS.md](docs/PLATFORMS.md#sheepshaver).
+
+It's offered only on Linux x86-64, and compiles with the same packages as Basilisk II:
+
+```sh
+apt install build-essential autoconf automake pkg-config libsdl2-dev
+```
+
+It builds to upstream's defaults, where Mac addresses are host addresses, so it needs to
+map memory at address 0, which most distributions forbid. `macman doctor` says when that
+applies. Allowing it weakens a protection against kernel bugs, for every program, until
+the next reboot:
+
+```sh
+sudo sysctl vm.mmap_min_addr=0
+```
+
+It needs a PowerPC ROM of your own: a 4M dump from a PCI Power Mac, or a `Mac OS ROM` file
+from a System Folder or an installer, which must be under 4M. No 68k ROM will start it.
+
+```sh
+macman rom add "Mac OS ROM" --name newworld
+macman system add Mac-OS-9.0.4.img --name mac-os-9.0.4 --version 9.0.4
+macman create beige --backend sheepshaver --rom newworld --system mac-os-9.0.4 \
+  --memory 256M --display 1024x768x32
+```
+
+| Option | Values | Default |
+|---|---|---|
+| `--no-sound` | | sound on |
+| `--network` | `none`, `slirp` | `none` |
+| `--shared-folder DIR` | a host folder the guest can read and write | none |
+| `--memory` | `16M` to `1024M`, in whole megabytes | `64M` |
+| `--display` | 640x480 to 7680x4320, at depth 32 | `640x480x32` |
+| `--scale` | 1 to 4 | 2 |
+
+There's no `--cpu` or `--model`. Depth has to be 32, because SheepShaver starts at the
+desktop's depth and has no setting for it; pick less in the guest's Monitors control
+panel. A window bigger than the desktop is cut down to it.
+
+`macman run --disk` attaches CD images and partitioned disks, as for Basilisk II. An HFS+
+volume needs its HFS wrapper, which disks formatted by Mac OS have. `--readonly`, locks,
+`doctor`, `list --builds`, and `export` work as they do there, Disk Copy images need
+`--readonly`, the shared folder stays out of exports, and NVRAM lasts one run. If macman
+is killed, it takes the emulator with it.
+
 ## Moving machines between hosts
 
 `macman export` writes machines to an archive, with each one's current disks and the
@@ -255,8 +312,9 @@ source_archive = "/path/to/minivmac-36.04.src.tgz"
 
 Basilisk II is a [macemu commit](https://github.com/kanjitalk755/macemu/archive/f532be3d3d70b70f272b52050ce0889a4025d624.tar.gz),
 set the same way under `[basilisk2]`. On Windows, its SDL 2 package is set under `[sdl]`.
+SheepShaver comes from the same archive, and is set under `[sheepshaver]`.
 
 ## License
 
-macman is MIT licensed. Mini vMac and Basilisk II, which it fetches and compiles but
-does not include, are GPL-2.0.
+macman is MIT licensed. Mini vMac, Basilisk II, and SheepShaver, which it fetches and
+compiles but does not include, are GPL-2.0.

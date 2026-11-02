@@ -3,7 +3,7 @@
 **Status:** Design proposal  
 **Initial implementation:** Rust CLI, Linux x86-64 host  
 **Initial backend:** Mini vMac  
-**Later backends:** Basilisk II, with SheepShaver in future  
+**Later backends:** Basilisk II, and SheepShaver as a preview  
 **Distribution:** GitHub source/releases; no crates.io publication required
 
 ## 1. Summary
@@ -28,7 +28,7 @@ Mini vMac is the first emulator backend. Its build-time configuration variants m
 - Emulating Macintosh hardware directly.
 - Redistributing Apple ROM images or System Software installers.
 - Fully automated installation of classic Mac OS from arbitrary installer media.
-- Basilisk II or SheepShaver integration (future backends only).
+- Basilisk II or SheepShaver integration (later backends).
 - GUI configuration, networking, SCSI device passthrough, advanced snapshots, or automated visual tests.
 - Guaranteeing OS/model compatibility beyond documented and tested combinations.
 - Modifying HFS volumes directly for the initial release.
@@ -229,7 +229,20 @@ On macOS ARM64 it builds as on Linux, and differs in these ways:
 - **FPU:** the core is MPFR's, as ARM64 has no 80-bit `long double`.
 - **Locks:** `Sys_open` takes `O_EXLOCK` on every disk file, and there's no `PR_SET_PDEATHSIG`, so the emulator can outlive macman. A second emulator's warning sits unflushed in its output and it shows no disk, so macman tries that lock before launching, and refuses with a reason.
 
-Shared code is limited to fetching a pinned source and publishing a build, in `src/backend/source.rs`. SheepShaver could use the same, but nothing here assumes so.
+### SheepShaver
+
+Read from the pinned macemu source, and tested only with a stand-in for the emulator; see [PLATFORMS.md](PLATFORMS.md#sheepshaver). The module comment in `src/backend/sheepshaver.rs` has the details. It works as Basilisk II does on Linux, and differs in these ways:
+
+- **Configuration:** a `[sheepshaver]` table holds `sound`, `network`, and `shared_folder`. There's no CPU, FPU, or model to choose.
+- **ROMs:** a 4M dump with a nanokernel it knows, or a compressed `Mac OS ROM` file under 4M.
+- **Limits:** 16M to 1024M of RAM, and at least 640x480. Depth must be 32, as it starts at the desktop's depth, and has no setting.
+- **Addressing:** upstream's default, real addressing, which needs `vm.mmap_min_addr` to be 0. `doctor` and failed starts say so.
+- **JIT:** on, unlike Basilisk II, as the interpreter is too slow for its guests.
+- **Hosts:** only Linux x86-64 is offered. Basilisk II's other hosts don't carry over.
+
+### Shared code
+
+Fetching a pinned source and publishing a build are in `src/backend/source.rs`, for every backend. What the two macemu emulators have in common is in `src/backend/macemu.rs`: the pin, the `configure` build, `doctor` lines, and launching and watching the process. Nothing about CPUs, ROMs, or guests is shared.
 
 ### Backend boundary
 

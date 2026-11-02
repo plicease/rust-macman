@@ -1025,6 +1025,7 @@ mod tests {
             },
             system: Default::default(),
             basilisk2: None,
+            sheepshaver: None,
             disks: vec![],
         }
     }

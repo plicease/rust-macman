@@ -45,22 +45,23 @@
 //!   warning that stays in its buffer, and show no disk, so macman tries the
 //!   lock first, to refuse with a reason.
 
-use super::minivmac::{MANIFEST, Manifest};
+use super::macemu::{
+    self, Build, disk_argument, display_check, first_line, library_checks, megabytes,
+    run_configure_build, supervise, tool_checks,
+};
 use super::minivmac::{gcc_target, is_mingw_x64, macos_toolchain_identity};
 use super::source::{self, Source, SourcePin, tool_exists};
 use super::{Check, EmulatorBackend, Executable, LaunchRequest, macemu_windows};
 use crate::disk::{self, Classification, DiskFormat};
-use crate::fsutil::{atomic_copy, sha256_bytes, sha256_file, without_verbatim_prefix, write_toml};
+use crate::fsutil::{atomic_copy, sha256_bytes, without_verbatim_prefix};
 use crate::machine::{Basilisk2Settings, Cpu, Display, Machine, Network};
 use crate::paths::Paths;
 use crate::registry::{self, Rom};
 use anyhow::{Context, Result, bail};
 use std::ffi::OsString;
 use std::fs::{self, File, TryLockError};
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::thread;
+use std::process::{Command, ExitStatus};
 
 pub const BACKEND_NAME: &str = "basilisk2";
 pub const DEFAULT_MEMORY: &str = "32M";
@@ -84,8 +85,6 @@ const ROM_COPY: &str = "rom";
 /// Windows reads a disk's size as 32 bits (`Sys_open`).
 const WINDOWS_MAX_DISK: u64 = 1 << 32;
 const WINDOWS_MAX_PATH: usize = 260;
-/// How `ErrorAlert` reports without a GUI (`STR_SHELL_ERROR_PREFIX`).
-const ERROR_PREFIX: &str = "ERROR: ";
 /// `modelid` is the Gestalt ID less 6. Mac OS 8 needs a 68040 model, and the
 /// Quadra 900 is upstream's; older systems expect the IIci that's its default.
 const MODEL_ID_IICI: u32 = 5;
@@ -101,14 +100,6 @@ const HOST: Option<&str> = if WINDOWS {
 };
 const UNSUPPORTED_HOST: &str = "the Basilisk II backend supports only Linux x86-64, Windows \
                                 x86-64, and macOS ARM64 hosts; see docs/PLATFORMS.md";
-/// SDL for video and sound, and no GTK, whose dialogs would wait for a click
-/// in place of the `ERROR:` lines macman reads.
-const CONFIGURE_OPTIONS: &[&str] = &[
-    "--enable-sdl-video",
-    "--enable-sdl-audio",
-    "--with-gtk=no",
-    "--with-esd=no",
-];
 const MACOS_CONFIGURE_OPTIONS: &[&str] = &[
     "--enable-sdl-video",
     "--enable-sdl-audio",
@@ -118,17 +109,6 @@ const MACOS_CONFIGURE_OPTIONS: &[&str] = &[
 ];
 /// What an ARM64 macOS build links with, by `pkg-config` name, and for people.
 const MACOS_LIBRARIES: &[(&str, &str)] = &[("sdl2", "SDL"), ("gmp", "GMP"), ("mpfr", "MPFR")];
-
-/// A commit, as macemu's releases are rare. The archive is one GitHub generates
-/// from it, and the fork is the one that's maintained.
-pub fn pin() -> SourcePin {
-    const COMMIT: &str = "f532be3d3d70b70f272b52050ce0889a4025d624";
-    SourcePin {
-        revision: COMMIT[..12].into(),
-        url: format!("https://github.com/kanjitalk755/macemu/archive/{COMMIT}.tar.gz"),
-        sha256: "dc987af49d9664c3c0453ae6480b8c027d064b8881d39dd7b701e35d1399687e".into(),
-    }
-}
 
 pub struct Basilisk2 {
     paths: Paths,
@@ -194,73 +174,26 @@ impl Basilisk2 {
 
     fn build(&self, key: &str, toolchain: &str, verbose: bool) -> Result<()> {
         let archive = self.source().fetch()?;
-        let work = self
-            .paths
-            .build_work()
-            .join(format!("{key}-{}", std::process::id()));
-        // Whatever a prior crash left behind is unusable.
-        let _ = fs::remove_dir_all(&work);
-        let src = work.join("src");
-        fs::create_dir_all(&src)
-            .with_context(|| format!("cannot create build directory {}", src.display()))?;
-        fs::create_dir_all(self.paths.build_logs())?;
-        let log_path = self.paths.build_logs().join(format!("{key}.log"));
-
-        eprintln!("Building {LABEL} {}...", self.pin.revision);
-        let result = if WINDOWS {
-            self.sdl_source().fetch().and_then(|sdl| {
-                let log = File::create(&log_path).context("cannot create build log")?;
-                macemu_windows::build(&archive, &sdl, &src, &log)
-            })
-        } else {
-            run_build(&archive, &src, &log_path)
+        let build = Build {
+            paths: &self.paths,
+            backend: BACKEND_NAME,
+            label: LABEL,
+            revision: &self.pin.revision,
+            host: HOST.context(UNSUPPORTED_HOST)?,
+            toolchain,
+            options: build_options(),
+            directory: BUILD_DIRECTORY,
+            executable: EXECUTABLE,
         };
-        if verbose && let Ok(log) = fs::read_to_string(&log_path) {
-            eprint!("{log}");
-        }
-        let built = src.join(BUILD_DIRECTORY).join(EXECUTABLE);
-        let result = result.and_then(|()| {
-            if built.is_file() {
-                Ok(())
+        build.run(key, verbose, |src, log_path| {
+            if WINDOWS {
+                let sdl = self.sdl_source().fetch()?;
+                let log = File::create(log_path).context("cannot create build log")?;
+                macemu_windows::build(&archive, &sdl, src, &log)
             } else {
-                bail!("the build produced no executable")
+                run_build(&archive, src, log_path)
             }
-        });
-        if let Err(error) = result {
-            let _ = fs::remove_dir_all(&work);
-            return Err(error.context(format!(
-                "{LABEL} build failed; see {} (rerun with --verbose to print it), and run \
-                 `macman doctor`",
-                log_path.display()
-            )));
-        }
-
-        // Publish by renaming a complete directory into place.
-        let publish = work.join("publish");
-        fs::create_dir_all(&publish)?;
-        fs::rename(&built, publish.join(EXECUTABLE))?;
-        fs::copy(&log_path, publish.join("build.log"))?;
-        write_toml(
-            &publish.join(MANIFEST),
-            &Manifest {
-                backend: BACKEND_NAME.into(),
-                revision: self.pin.revision.clone(),
-                host: HOST.context(UNSUPPORTED_HOST)?.into(),
-                toolchain: toolchain.into(),
-                options: build_options().iter().map(|s| s.to_string()).collect(),
-                executable: EXECUTABLE.into(),
-                executable_sha256: sha256_file(&publish.join(EXECUTABLE))?,
-                bundle: None,
-                bundle_sha256: None,
-            },
-        )?;
-        let dest = self.paths.builds().join(key);
-        fs::create_dir_all(self.paths.builds())?;
-        // A damaged earlier build would block the rename.
-        let _ = fs::remove_dir_all(&dest);
-        fs::rename(&publish, &dest).context("cannot publish build")?;
-        let _ = fs::remove_dir_all(&work);
-        Ok(())
+        })
     }
 }
 
@@ -270,7 +203,7 @@ fn build_options() -> &'static [&'static str] {
     } else if MACOS {
         MACOS_CONFIGURE_OPTIONS
     } else {
-        CONFIGURE_OPTIONS
+        macemu::CONFIGURE_OPTIONS
     }
 }
 
@@ -281,60 +214,26 @@ fn macos_library_flags(option: &str) -> String {
     first_line("pkg-config", &args).unwrap_or_default()
 }
 
-/// Unpack and compile, per upstream's README, with `configure` separate from
-/// `autogen.sh` so that it gets macman's options.
+/// On macOS, `gcc` may be a real GCC from a package manager, not Apple's clang.
 fn run_build(archive: &Path, src: &Path, log_path: &Path) -> Result<()> {
-    let log = File::create(log_path).context("cannot create build log")?;
-    let jobs = thread::available_parallelism().map_or(1, |jobs| jobs.get());
-    let script = format!(
-        "set -e\n\
-         tar xzf \"$1\" --strip-components=1\n\
-         cd {BUILD_DIRECTORY}\n\
-         NO_CONFIGURE=1 sh ./autogen.sh\n\
-         sh ./configure {}\n\
-         make -j{jobs}\n",
-        build_options().join(" ")
-    );
     let mut command = Command::new("bash");
     if MACOS {
-        // `gcc` may be a real GCC from a package manager, not Apple's clang.
         command
             .env("CC", "clang")
             .env("CXX", "clang++")
             .env("CPPFLAGS", macos_library_flags("--cflags-only-I"))
             .env("LDFLAGS", macos_library_flags("--libs-only-L"));
     }
-    let status = command
-        .arg("-c")
-        .arg(script)
-        .arg("macman-build")
-        .arg(archive)
-        .current_dir(src)
-        .stdin(Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log)
-        .status()
-        .context("cannot run bash")?;
-    if !status.success() {
-        bail!("build script exited with {status}");
-    }
-    Ok(())
+    run_configure_build(
+        command,
+        archive,
+        src,
+        log_path,
+        BUILD_DIRECTORY,
+        build_options(),
+    )
 }
 
-/// The first line of a command's output, if it runs and succeeds.
-fn first_line(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .ok()
-        .filter(|output| output.status.success())?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    Some(text.lines().next().unwrap_or("").trim().to_string())
-}
-
-/// `g++` compiles most of it, and `gcc` the rest. SDL is linked dynamically,
-/// but a new version may change what `configure` finds.
 fn toolchain_identity(sdl_pin: &SourcePin) -> Result<String> {
     if MACOS {
         return Ok(format!(
@@ -344,9 +243,9 @@ fn toolchain_identity(sdl_pin: &SourcePin) -> Result<String> {
             macos_library_flags("--libs-only-L"),
         ));
     }
-    let hint = "install a C++ compiler (run `macman doctor`)";
-    let compiler = first_line("g++", &["--version"]).context(hint)?;
     if WINDOWS {
+        let hint = "install a C++ compiler (run `macman doctor`)";
+        let compiler = first_line("g++", &["--version"]).context(hint)?;
         let target = gcc_target()?;
         if !is_mingw_x64(&target) {
             bail!("gcc targets {target}, not 64-bit Windows; run `macman doctor`");
@@ -357,8 +256,7 @@ fn toolchain_identity(sdl_pin: &SourcePin) -> Result<String> {
             sdl_pin.sha256
         ));
     }
-    let sdl = first_line("pkg-config", &["--modversion", "sdl2"]);
-    Ok(format!("{compiler} SDL {}", sdl.as_deref().unwrap_or("?")))
+    macemu::linux_toolchain_identity()
 }
 
 /// A build links these dynamically, so it's only good for the ones it saw.
@@ -371,10 +269,6 @@ fn macos_library_versions() -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn megabytes(memory: &str) -> Option<u32> {
-    memory.strip_suffix('M')?.parse().ok()
 }
 
 /// `main_unix.cpp` caps RAM at 1023M, and rounds down to whole megabytes.
@@ -476,8 +370,7 @@ fn preferences(machine: &Machine) -> String {
     text
 }
 
-/// The emulator's arguments. A `*` before a disk asks for read-only, on top of
-/// the throwaway copy already being a read-only file.
+/// The emulator's arguments.
 fn arguments(request: &LaunchRequest<'_>, preferences: &Path) -> Vec<OsString> {
     let mut arguments: Vec<OsString> = vec![
         "--config".into(),
@@ -486,9 +379,7 @@ fn arguments(request: &LaunchRequest<'_>, preferences: &Path) -> Vec<OsString> {
         request.rom.into(),
     ];
     for disk in request.disks {
-        let mut value = OsString::from(if disk.writable { "" } else { "*" });
-        value.push(&disk.path);
-        arguments.extend(["--disk".into(), value]);
+        arguments.extend(["--disk".into(), disk_argument(disk)]);
     }
     if let Some(folder) = settings(request.machine).shared_folder {
         arguments.extend(["--extfs".into(), folder.into()]);
@@ -543,57 +434,6 @@ fn refuse_held_disk(disk: &Path) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// Have the kernel stop the emulator if macman dies, because the locks on its
-/// disks are about to go too. It has to be `SIGKILL`: SDL turns `SIGTERM` into
-/// the window closing, which only asks the guest whether to shut down.
-#[cfg(target_os = "linux")]
-fn die_with_macman(command: &mut Command) {
-    die_with_parent(command, std::process::id());
-}
-
-/// The signal is only armed once `prctl` runs, and a parent that dies sooner
-/// never sends it. So the child compares its parent with `parent`, as noted
-/// before spawning, and goes no further if macman has already gone.
-#[cfg(target_os = "linux")]
-fn die_with_parent(command: &mut Command, parent: u32) {
-    use std::os::unix::process::CommandExt;
-    // SAFETY: `prctl` and `getppid` are async-signal-safe, and nothing else
-    // runs in the child.
-    unsafe {
-        command.pre_exec(move || {
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::getppid() as u32 != parent {
-                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
-            }
-            Ok(())
-        });
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn die_with_macman(_command: &mut Command) {}
-
-/// Read the emulator's output until it closes, returning its error lines.
-fn watch_output(child: &mut Child, verbose: bool) -> Result<Vec<String>> {
-    let mut errors = Vec::new();
-    let mut output = BufReader::new(child.stdout.take().context("no emulator output")?);
-    let mut line = Vec::new();
-    while output.read_until(b'\n', &mut line)? != 0 {
-        let text = String::from_utf8_lossy(&line);
-        let text = text.trim_end();
-        if verbose {
-            println!("{text}");
-        }
-        if let Some(error) = text.strip_prefix(ERROR_PREFIX) {
-            errors.push(error.to_string());
-        }
-        line.clear();
-    }
-    Ok(errors)
 }
 
 impl EmulatorBackend for Basilisk2 {
@@ -720,30 +560,8 @@ impl EmulatorBackend for Basilisk2 {
             arguments(request, &file)
         };
         let mut command = Command::new(&request.executable.path);
-        command
-            .args(arguments)
-            .current_dir(request.workdir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped());
-        die_with_macman(&mut command);
-        if request.verbose {
-            eprintln!("Launching {command:?}");
-        }
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("cannot start {}", request.executable.path.display()))?;
-        let errors = watch_output(&mut child, request.verbose);
-        let status = child.wait().context("cannot wait for the emulator")?;
-        match errors?.as_slice() {
-            [] => Ok(status),
-            errors if status.success() => {
-                bail!("Basilisk II refused to run: {}", errors.join("; "))
-            }
-            errors => {
-                eprintln!("Basilisk II reported: {}", errors.join("; "));
-                Ok(status)
-            }
-        }
+        command.args(arguments).current_dir(request.workdir);
+        supervise(command, LABEL, request.verbose)
     }
 
     fn doctor(&self) -> Vec<Check> {
@@ -792,34 +610,11 @@ impl EmulatorBackend for Basilisk2 {
         } else {
             (LINUX_TOOLS, &MACOS_LIBRARIES[..1], LINUX_INSTALL)
         };
-        for tool in tools {
-            if tool_exists(tool) {
-                checks.push(Check::ok(format!("{tool} found, for Basilisk II")));
-            } else {
-                checks.push(Check::fail(
-                    format!("{tool} not found, which Basilisk II needs"),
-                    install,
-                ));
-            }
-        }
-        for (package, name) in libraries {
-            match first_line("pkg-config", &["--modversion", package]) {
-                Some(version) => checks.push(Check::ok(format!("{name} {version} found"))),
-                None => checks.push(Check::fail(
-                    format!("{name} headers not found, which Basilisk II needs"),
-                    install,
-                )),
-            }
-        }
+        checks.extend(tool_checks(tools, LABEL, install));
+        checks.extend(library_checks(libraries, LABEL, install));
         checks.push(self.source().check());
-        if !MACOS
-            && std::env::var_os("DISPLAY").is_none()
-            && std::env::var_os("WAYLAND_DISPLAY").is_none()
-        {
-            checks.push(Check::warn(
-                "neither DISPLAY nor WAYLAND_DISPLAY is set",
-                "Basilisk II opens a window; run macman from a graphical session",
-            ));
+        if !MACOS {
+            checks.extend(display_check(LABEL));
         }
         checks
     }
@@ -832,7 +627,7 @@ mod tests {
     use crate::machine::{EmulatorConfig, Hardware};
 
     fn backend() -> Basilisk2 {
-        Basilisk2::new(Paths::under(Path::new("/nonexistent")), pin(), None)
+        Basilisk2::new(Paths::under(Path::new("/nonexistent")), macemu::pin(), None)
     }
 
     fn machine() -> Machine {
@@ -842,7 +637,7 @@ mod tests {
             id: None,
             emulator: EmulatorConfig {
                 backend: BACKEND_NAME.into(),
-                revision: pin().revision,
+                revision: macemu::pin().revision,
             },
             hardware: Hardware {
                 model: None,
@@ -858,6 +653,7 @@ mod tests {
             },
             system: Default::default(),
             basilisk2: Some(Basilisk2Settings::default()),
+            sheepshaver: None,
             disks: vec![],
         }
     }
@@ -1021,39 +817,6 @@ mod tests {
         assert_ne!(backend().build_key("gcc 1"), backend().build_key("gcc 2"));
     }
 
-    /// The signal goes out when the spawning thread ends, which is what macman
-    /// dying looks like from here, without killing the tests.
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn the_emulator_does_not_outlive_macman() {
-        use std::os::unix::process::ExitStatusExt;
-        let mut child = thread::spawn(|| {
-            let mut command = Command::new("sleep");
-            command.arg("60");
-            die_with_macman(&mut command);
-            command.spawn().unwrap()
-        })
-        .join()
-        .unwrap();
-        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
-    }
-
-    /// The race itself can't be staged, but its outcome can: the child sees a
-    /// parent other than the one noted, as it would if macman had just died.
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn an_emulator_whose_parent_has_already_gone_never_starts() {
-        let dir = tempfile::tempdir().unwrap();
-        let ran = dir.path().join("ran");
-        let mut command = Command::new("touch");
-        command.arg(&ran);
-        die_with_parent(&mut command, std::process::id() + 1);
-
-        let error = command.spawn().unwrap_err();
-        assert_eq!(error.raw_os_error(), Some(libc::ESRCH));
-        assert!(!ran.exists(), "it stopped before exec");
-    }
-
     #[test]
     fn a_disk_copy_image_is_only_attached_read_only() {
         let dir = tempfile::tempdir().unwrap();
@@ -1123,13 +886,5 @@ mod tests {
     #[test]
     fn only_macos_configures_the_jit_out() {
         assert_eq!(build_options().contains(&"--disable-jit-compiler"), MACOS);
-    }
-
-    #[test]
-    fn the_pin_names_a_whole_commit() {
-        let pin = pin();
-        assert_eq!(pin.revision.len(), 12);
-        assert!(pin.url.contains(&pin.revision));
-        assert_eq!(pin.sha256.len(), 64);
     }
 }

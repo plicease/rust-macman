@@ -1,9 +1,9 @@
 //! Command implementations.
 
 use crate::archive::{self, Outcome};
-use crate::backend::basilisk2;
 use crate::backend::minivmac::{MANIFEST, Manifest};
 use crate::backend::{Backends, Check, CheckLevel, LaunchRequest, ResolvedDisk};
+use crate::backend::{basilisk2, sheepshaver};
 use crate::cli::{
     Cli, Command, ConfigCommand, CreateArgs, DiskCommand, RomCommand, RunArgs, SystemCommand,
 };
@@ -13,7 +13,7 @@ use crate::fsutil::{
 };
 use crate::machine::{
     Basilisk2Settings, Config, Disk, Display, EmulatorConfig, Hardware, Machine, SCHEMA_VERSION,
-    SystemInfo, new_id, publish_dir,
+    SheepShaverSettings, SystemInfo, new_id, publish_dir,
 };
 use crate::model::{Model, parse_display};
 use crate::paths::Paths;
@@ -249,6 +249,8 @@ impl App {
                 models.join("/")
             } else if registry::rom_file_is_32_bit_clean(&file, rom.size)? {
                 "32-bit clean, for Basilisk II".to_string()
+            } else if registry::rom_file_is_powerpc(&file, rom.size)? {
+                "PowerPC, for SheepShaver".to_string()
             } else {
                 "unrecognised".to_string()
             };
@@ -354,14 +356,19 @@ impl App {
             Some(name) => self.backends.get(name)?,
             None => self.backends.default_backend(),
         };
-        let basilisk2 = backend.name() == basilisk2::BACKEND_NAME;
-        let settings = basilisk2_settings(&args, basilisk2)?;
+        let is_basilisk2 = backend.name() == basilisk2::BACKEND_NAME;
+        let is_sheepshaver = backend.name() == sheepshaver::BACKEND_NAME;
+        let (basilisk2_settings, sheepshaver_settings) =
+            backend_settings(&args, is_basilisk2, is_sheepshaver)?;
         let model: Option<Model> = match &args.model {
-            Some(_) if basilisk2 => {
+            Some(_) if is_basilisk2 => {
                 bail!("--model is for Mini vMac; Basilisk II has --cpu instead")
             }
+            Some(_) if is_sheepshaver => {
+                bail!("--model is for Mini vMac; SheepShaver is a generic PowerPC Mac")
+            }
             Some(model) => Some(model.parse()?),
-            None if basilisk2 => None,
+            None if is_basilisk2 || is_sheepshaver => None,
             None => bail!("--model is required, such as --model plus"),
         };
         let (rom, rom_path) = registry::load_rom(&self.paths, &args.rom)?;
@@ -380,11 +387,13 @@ impl App {
         let (width, height, depth) = match (&args.display, model) {
             (Some(display), _) => parse_display(display)?,
             (None, Some(model)) => model.default_display(),
+            (None, None) if is_sheepshaver => sheepshaver::DEFAULT_DISPLAY,
             (None, None) => basilisk2::DEFAULT_DISPLAY,
         };
         let memory = match (args.memory, model) {
             (Some(memory), _) => memory.to_ascii_uppercase(),
             (None, Some(model)) => model.default_memory().to_string(),
+            (None, None) if is_sheepshaver => sheepshaver::DEFAULT_MEMORY.to_string(),
             (None, None) => basilisk2::DEFAULT_MEMORY.to_string(),
         };
         let machine = Machine {
@@ -410,7 +419,8 @@ impl App {
             system: SystemInfo {
                 version: system.version,
             },
-            basilisk2: settings,
+            basilisk2: basilisk2_settings,
+            sheepshaver: sheepshaver_settings,
             disks: vec![Disk {
                 path: SYSTEM_DISK.to_string(),
                 readonly: false,
@@ -888,19 +898,25 @@ impl App {
     }
 }
 
-/// What `macman create` was asked for under `[basilisk2]`.
-fn basilisk2_settings(args: &CreateArgs, basilisk2: bool) -> Result<Option<Basilisk2Settings>> {
-    if !basilisk2 {
-        let given = [
-            (args.cpu.is_some(), "--cpu"),
-            (args.no_fpu, "--no-fpu"),
-            (args.no_sound, "--no-sound"),
-            (args.network.is_some(), "--network"),
-            (args.shared_folder.is_some(), "--shared-folder"),
-        ];
-        return match given.iter().find(|(set, _)| *set) {
-            Some((_, flag)) => bail!("{flag} needs --backend basilisk2"),
-            None => Ok(None),
+/// What `macman create` was asked for under `[basilisk2]` or `[sheepshaver]`.
+fn backend_settings(
+    args: &CreateArgs,
+    basilisk2: bool,
+    sheepshaver: bool,
+) -> Result<(Option<Basilisk2Settings>, Option<SheepShaverSettings>)> {
+    let cpu_flags = [(args.cpu.is_some(), "--cpu"), (args.no_fpu, "--no-fpu")];
+    if !basilisk2 && let Some((_, flag)) = cpu_flags.iter().find(|(set, _)| *set) {
+        bail!("{flag} needs --backend basilisk2");
+    }
+    let flags = [
+        (args.no_sound, "--no-sound"),
+        (args.network.is_some(), "--network"),
+        (args.shared_folder.is_some(), "--shared-folder"),
+    ];
+    if !(basilisk2 || sheepshaver) {
+        return match flags.iter().find(|(set, _)| *set) {
+            Some((_, flag)) => bail!("{flag} needs --backend basilisk2 or sheepshaver"),
+            None => Ok((None, None)),
         };
     }
     let shared_folder = args
@@ -911,13 +927,24 @@ fn basilisk2_settings(args: &CreateArgs, basilisk2: bool) -> Result<Option<Basil
                 .with_context(|| format!("cannot use shared folder {}", folder.display()))
         })
         .transpose()?;
-    Ok(Some(Basilisk2Settings {
+    let sound = !args.no_sound;
+    let network = args.network.unwrap_or_default();
+    if sheepshaver {
+        let settings = SheepShaverSettings {
+            sound,
+            network,
+            shared_folder,
+        };
+        return Ok((None, Some(settings)));
+    }
+    let settings = Basilisk2Settings {
         cpu: args.cpu.unwrap_or_default(),
         fpu: !args.no_fpu,
-        sound: !args.no_sound,
-        network: args.network.unwrap_or_default(),
+        sound,
+        network,
         shared_folder,
-    }))
+    };
+    Ok((Some(settings), None))
 }
 
 fn confirm_delete(name: &str, disks: usize) -> Result<()> {

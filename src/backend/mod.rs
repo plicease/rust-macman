@@ -1,8 +1,10 @@
 //! The narrow boundary between MacMan and an emulator (design §7).
 
 pub mod basilisk2;
+pub mod macemu;
 pub mod macemu_windows;
 pub mod minivmac;
+pub mod sheepshaver;
 pub mod source;
 
 use crate::machine::Machine;

@@ -128,7 +128,7 @@ pub enum DiskCommand {
 #[derive(Debug, clap::Args)]
 pub struct CreateArgs {
     pub name: String,
-    /// Emulator: minivmac (the default) or basilisk2
+    /// Emulator: minivmac (the default), basilisk2, or sheepshaver
     #[arg(long)]
     pub backend: Option<String>,
     /// Hardware model, such as plus, se, classic, ii, or iix (Mini vMac only)
@@ -158,13 +158,13 @@ pub struct CreateArgs {
     /// Leave out the FPU (Basilisk II only, and not with a 68040)
     #[arg(long)]
     pub no_fpu: bool,
-    /// Turn off sound (Basilisk II only)
+    /// Turn off sound (Basilisk II and SheepShaver only)
     #[arg(long)]
     pub no_sound: bool,
-    /// Guest networking (Basilisk II only; default none)
+    /// Guest networking (Basilisk II and SheepShaver only; default none)
     #[arg(long, value_enum)]
     pub network: Option<Network>,
-    /// Host folder to show the guest as a volume (Basilisk II only)
+    /// Host folder to show the guest as a volume (Basilisk II and SheepShaver only)
     #[arg(long, value_name = "DIR")]
     pub shared_folder: Option<PathBuf>,
 }

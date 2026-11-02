@@ -114,6 +114,55 @@ Upstream documents System 7 and Mac OS 8.0 and 8.1 on 32-bit clean ROMs. macman
 accepts those only: a Classic ROM needs a build with virtual addressing, and it's not
 what this backend is for.
 
+## SheepShaver
+
+| Host | Status |
+|---|---|
+| Linux x86-64 | Candidate: **not yet built or booted for real** |
+| Windows x86-64 | No: refused |
+| macOS ARM64 | No: refused |
+
+On Linux x86-64 macman offers the backend, so that it can be tested, and that's all this
+table claims. The build recipe, preferences, and limits were read from the pinned source,
+and exercised with a stand-in for the emulator. Nothing has been compiled from
+`SheepShaver/src`, and no guest has booted. No host counts as supported until
+[the smoke test](SMOKE_TEST.md#sheepshaver) has passed there, and release targets don't
+depend on this backend.
+
+Windows and macOS are refused, whatever Basilisk II does there. Upstream's Windows build
+is 32-bit, and macman's 64-bit recipe is for Basilisk II, whose memory and JIT
+arrangements differ. On macOS ARM64 there's no JIT, and upstream goes through Xcode. Either
+would need a recipe of its own, and real tests.
+
+| Guest | ROM | Status |
+|---|---|---|
+| Mac OS 7.5.2 to 9.0.4 | One that suits the guest | Untested |
+| Mac OS 9.1, 9.2.x, Mac OS X | Any | Not claimed. The emulator decodes such ROMs, but macman makes no promise |
+
+macman accepts a 4M dump with a nanokernel the emulator knows (TNT, Alchemy, Zanzibar,
+Gazelle, Gossamer, or NewWorld), or a compressed `Mac OS ROM` file under 4M, and refuses
+everything else. That says it can be decoded, not that a given guest will boot from it.
+
+It's a generic PowerPC Mac: the emulator patches the ROM to look like a Power Mac 9500,
+and models no particular machine. No Power Mac's own hardware or timing is represented.
+
+The pin is the same macemu commit as Basilisk II's, so the two share one download.
+
+### Low memory
+
+x86-64 builds default to real addressing, where Mac addresses are host addresses, so
+`main_unix.cpp` has to map memory at address 0. Linux refuses that unless
+`vm.mmap_min_addr` is 0, and it's 65536 on most distributions. `macman doctor` reports
+this, and a failed start repeats the fix. Setting it to 0 allows every program on the
+host to map address 0, which makes some kernel bugs easier to exploit, so it's for you to
+decide, and macman never changes it.
+
+`configure` also has a direct addressing mode that avoids this. macman doesn't use it,
+because the precompiled JIT operations may assume real addressing. It's worth trying if
+the smoke test goes badly.
+
+For the same reason, the emulator forces SDL onto X11, so a Wayland desktop needs XWayland.
+
 ## Release targets
 
 `.github/workflows/release.yml` lists its targets explicitly instead of using the
