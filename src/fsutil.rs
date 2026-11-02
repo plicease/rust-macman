@@ -109,6 +109,19 @@ fn temp_sibling(path: &Path) -> Result<PathBuf> {
     Ok(parent.join(format!(".{name}.tmp-{}", std::process::id())))
 }
 
+/// Undo the `\\?\` form that `fs::canonicalize` gives on Windows, which
+/// neither people nor Mini vMac need to see.
+pub fn without_verbatim_prefix(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 pub fn sha256_file(path: &Path) -> Result<String> {
     let mut file = File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
     let mut hasher = Sha256::new();
@@ -159,7 +172,21 @@ pub fn validate_name(kind: &str, name: &str) -> Result<()> {
              starting with a letter or digit"
         );
     }
+    if cfg!(windows) && !windows_can_name(name) {
+        bail!("invalid {kind} name {name:?}: Windows reserves it for a device or trims it");
+    }
     Ok(())
+}
+
+/// Device names are reserved whatever follows the first dot, and a trailing
+/// dot is silently dropped, which would make two names one directory.
+fn windows_can_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.ends_with(|c: char| c.is_ascii_digit()));
+    !device && !name.ends_with('.')
 }
 
 /// Sorted names of the non-hidden entries of `dir`; empty if it doesn't exist.
@@ -191,6 +218,38 @@ mod tests {
         }
         for good in ["wombat-6", "system-6.0.8", "plus_v3", "6"] {
             validate_name("machine", good).unwrap();
+        }
+    }
+
+    #[test]
+    fn verbatim_prefixes_are_removed() {
+        for (path, expected) in [
+            (r"\\?\C:\Users\Zoë Q\a.dsk", r"C:\Users\Zoë Q\a.dsk"),
+            (r"\\?\UNC\server\share\a.dsk", r"\\server\share\a.dsk"),
+            (r"C:\plain.dsk", r"C:\plain.dsk"),
+        ] {
+            assert_eq!(
+                without_verbatim_prefix(Path::new(path)),
+                Path::new(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn windows_reserved_names_are_recognized() {
+        for bad in [
+            "con",
+            "CON",
+            "nul.dsk",
+            "aux.1",
+            "com1",
+            "LPT9.rom",
+            "trailing.",
+        ] {
+            assert!(!windows_can_name(bad), "{bad:?}");
+        }
+        for good in ["console", "com", "com10", "lpt", "null", "mac.ii", "comx"] {
+            assert!(windows_can_name(good), "{good:?}");
         }
     }
 

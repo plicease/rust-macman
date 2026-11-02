@@ -10,14 +10,22 @@ ROMs or system software. See [docs/DESIGN.md](docs/DESIGN.md) for the full desig
 
 ## Requirements
 
-macman can currently build and run Mini vMac only on Linux x86-64; see
-[docs/PLATFORMS.md](docs/PLATFORMS.md). That needs an X11 session, plus what Mini
+macman can currently build and run Mini vMac only on Linux x86-64 and Windows x86-64;
+see [docs/PLATFORMS.md](docs/PLATFORMS.md). Linux needs an X11 session, plus what Mini
 vMac needs to compile: `gcc`, `make`, `bash`, `tar`, and the X11 headers. On Debian or
 Ubuntu:
 
 ```sh
 apt install build-essential libx11-dev libxext-dev curl
 ```
+
+Windows needs a native MinGW-w64 toolchain. WSL, Cygwin, and MSVC aren't used. `tar` and `curl` come with Windows, and this provides the rest:
+
+```powershell
+winget install BrechtSanders.WinLibs.POSIX.UCRT
+```
+
+Open a new terminal afterwards so that `gcc` is on your `PATH`.
 
 Run `macman doctor` to check your setup.
 
@@ -54,8 +62,23 @@ Other commands: `list [--builds]`, `current`, `rom list`, `system list`,
 `config show`, `clone`, `remove`, and `doctor`. Add `--verbose` for build and launch
 logs.
 
-Files live under the XDG directories: `~/.config/macman`, `~/.local/share/macman`,
-and `~/.cache/macman`.
+On Linux, files live under the XDG directories: `~/.config/macman`,
+`~/.local/share/macman`, and `~/.cache/macman`. On Windows, configuration is in
+`%APPDATA%\macman`, and machines, ROMs, and images are in `%LOCALAPPDATA%\macman`, with
+builds in `%LOCALAPPDATA%\macman\cache`.
+
+On either system, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_CACHE_HOME` override
+their directory when set to an absolute path, and macman adds `macman` to that path.
+On Windows, an unset override falls back to `%APPDATA%` or `%LOCALAPPDATA%`, and then
+to the folder Windows reports, so `HOME` isn't needed.
+
+On Windows, your cache path must either be plain ASCII or have an 8.3 short name,
+because MinGW's `make` can't work in a folder with characters outside your code page.
+Short names are normally on for the system drive. If a build says otherwise, set
+`XDG_CACHE_HOME` to a plain ASCII path. Disk paths need to be under 260 characters.
+
+Mini vMac refuses to quit from its window while disks are mounted, so shut down the
+Mac first, or use Control Mode: hold Ctrl and press Q, then Y.
 
 ## Supported hardware
 
@@ -104,7 +127,7 @@ can't identify, ideally with `--readonly`. See
 macman downloads Mini vMac 36.04 on the first build and verifies its SHA-256. For a
 machine without network access, download
 [the source archive](https://www.gryphel.com/d/minivmac/minivmac-36.04/minivmac-36.04.src.tgz)
-yourself and point `~/.config/macman/config.toml` at it:
+yourself and point `config.toml` (in the configuration directory above) at it:
 
 ```toml
 [minivmac]

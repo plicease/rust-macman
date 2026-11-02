@@ -83,6 +83,8 @@ A later version may add `macman build`, `macman disk attach/detach`, `macman sna
 
 ## 6. Filesystem layout
 
+On Windows, configuration lives in `%APPDATA%macman`, data in `%LOCALAPPDATA%macman`, and the cache in `%LOCALAPPDATA%macmanche`. An absolute `XDG_*` variable overrides its directory on both systems; otherwise Windows uses the environment variable, then the shell's known folder, so `HOME` is never needed.
+
 Use XDG paths on Linux, respecting `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_CACHE_HOME`:
 
 ```text
@@ -164,6 +166,19 @@ A cache key must include source revision, host triple, build toolchain identity 
 
 Mini vMac model/ROM compatibility, build option spellings, host build prerequisites, supported color depths, and launch behavior must be checked against a pinned upstream version during implementation. Sample command lines in discussion are illustrative, not a substitute for validation.
 
+### Windows x86-64
+
+Checked against the Mini vMac 36.04 source and real builds. The Windows backend differs from the Linux one in these ways:
+
+- **Build:** `-t wx64` with a native MinGW-w64 `gcc`. `setup/tool.c` selects its compiler and script language at compile time, so it is built with `-Dcur_ide=gbk_ide_mgw -Dgbo_script=gbk_script_xp -DUseCmndLine=1`, producing a batch file that needs `my_project_d` set. No POSIX shell is involved, and `bash` is avoided because it may be the WSL launcher.
+- **Generated script:** upstream writes `echo TEXT>>"%DestFile%"`, which loses a trailing digit to `cmd`'s handle redirection (`6>>`), so macman moves each redirect to the front of its line.
+- **Unicode:** the default build uses the narrow API, which can't name paths outside the system code page, so macman adds `-DUNICODE -D_UNICODE` and `-municode` to the generated Makefile. Upstream enables this only for Windows CE. The one side effect is that `GetProcAddress` gets a wide name and fails, disabling the `%APPDATA%\Gryphel` ROM fallback, which macman doesn't use.
+- **Short paths:** MinGW `make` is a narrow program too, and stops with `readdir .: Invalid argument` in a directory outside the code page, so builds run from the 8.3 form of the build directory.
+- **Launch:** `OSGLUWIN.c` rejects every flag and treats every argument as a disk. It finds the ROM only by a per-model name beside its own executable, so each run copies the verified executable and ROM into the session directory and starts them there. Disks are positional, and throwaway copies are named relative to the session.
+- **Path limit:** arguments of 260 characters or more are silently skipped by the emulator, so macman refuses them.
+- **Exit status:** a process ended by an exception or Ctrl-C exits with an NTSTATUS code rather than a signal, and these are reported as abnormal. A Windows exit code is 32 bits, and a failure must not round to success.
+- **Locks and sharing:** Mini vMac opens writable disks with sharing denied. That shuts out macman's own reads, so disks are probed through the lock first. It also means a disk stays protected if macman dies and leaves its emulator running, and macman reports such a disk as in use.
+
 ### Backend boundary
 
 Expose a narrow internal trait/interface, conceptually:
@@ -238,7 +253,7 @@ Use clear exit codes, human-friendly messages by default, and a `--verbose` opti
 - Snapshot/copy-on-write support where feasible.
 - HFS file injection/extraction through safe external tooling.
 - Scripted guest test automation and CI smoke-testing.
-- macOS and ARM64 hosts as supported by individual backends.
+- macOS and ARM64 hosts as supported by individual backends. Windows x86-64 is supported; see §7 and [SMOKE_TEST.md](SMOKE_TEST.md).
 
 ## 12. Open questions
 

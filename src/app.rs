@@ -6,7 +6,9 @@ use crate::cli::{
     Cli, Command, ConfigCommand, CreateArgs, DiskCommand, RomCommand, RunArgs, SystemCommand,
 };
 use crate::disk::{self, Classification, DiskFormat, ImageLock, LockMode, Session, SessionRecord};
-use crate::fsutil::{atomic_copy, list_dir, read_toml, sha256_file, validate_name};
+use crate::fsutil::{
+    atomic_copy, list_dir, read_toml, sha256_file, validate_name, without_verbatim_prefix,
+};
 use crate::machine::{
     Config, Disk, Display, EmulatorConfig, Hardware, Machine, SCHEMA_VERSION, SystemInfo,
 };
@@ -404,11 +406,14 @@ impl App {
             if !path.exists() {
                 bail!("machine {name:?} is missing its disk {}", path.display());
             }
+            // On Windows, a running emulator shuts out even readers.
+            drop(disk::lock_image(&self.paths, path, LockMode::Shared)?);
             if disk::detect_format(path)? == disk::DiskFormat::DiskCopy42 && !saved.readonly {
                 disk::warn_disk_copy_read_only(path);
             }
         }
         for path in &args.disks {
+            drop(disk::lock_image(&self.paths, path, LockMode::Shared)?);
             disk::check_attachable(path, args.any_format, !args.readonly)?;
         }
         backend.validate_disks(&machine, saved_disks.len() + args.disks.len())?;
@@ -512,9 +517,13 @@ impl App {
                 stale.record.describe()
             );
             for path in &stale.record.writable_disks {
-                eprintln!("  {}", path.display());
+                eprintln!("  {}", without_verbatim_prefix(path).display());
             }
-            stale.clear()?;
+            // An emulator that outlived macman keeps its running files from
+            // being removed on Windows; that shouldn't stop this run.
+            if let Err(error) = stale.clear() {
+                eprintln!("warning: {error:#}");
+            }
         }
         Ok(())
     }
@@ -604,7 +613,7 @@ impl App {
             let dir = self.paths.builds().join(&key);
             let short = &key[..12.min(key.len())];
             let intact = read_toml::<Manifest>(&dir.join(MANIFEST)).is_ok_and(|manifest| {
-                sha256_file(&dir.join(&manifest.backend))
+                sha256_file(&dir.join(&manifest.executable))
                     .is_ok_and(|sha| sha == manifest.executable_sha256)
             });
             if intact {
@@ -649,7 +658,10 @@ impl App {
                 let file: PathBuf = path.file_name().map(PathBuf::from).unwrap_or_default();
                 bail!("disk {} is missing", file.display());
             }
-            disk::detect_format(&path)?;
+            // A disk in use belongs to a running machine, and may be unreadable.
+            if disk::lock_image(&self.paths, &path, LockMode::Shared).is_ok() {
+                disk::detect_format(&path)?;
+            }
         }
         Ok(())
     }
@@ -681,6 +693,10 @@ fn abnormal_outcome(status: ExitStatus) -> Option<String> {
         return None;
     }
     if let Some(code) = status.code() {
+        #[cfg(windows)]
+        if let Some(outcome) = windows_abnormal_outcome(code as u32) {
+            return Some(outcome);
+        }
         return Some(format!("the emulator exited with code {code}"));
     }
     #[cfg(unix)]
@@ -698,9 +714,29 @@ fn abnormal_outcome(status: ExitStatus) -> Option<String> {
     Some(format!("the emulator ended abnormally ({status})"))
 }
 
+/// Windows has no signals: a process killed by an exception or Ctrl-C exits
+/// with an error-severity NTSTATUS as its code.
+#[cfg(windows)]
+fn windows_abnormal_outcome(status: u32) -> Option<String> {
+    const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
+    match status {
+        STATUS_CONTROL_C_EXIT => Some(format!("the emulator was interrupted ({status:#X})")),
+        // Above this are codes like -1, which come from a program, not NT.
+        0xC000_0000..=0xCFFF_FFFF => Some(format!(
+            "the emulator crashed on the host (status {status:#X})"
+        )),
+        _ => None,
+    }
+}
+
 fn exit_code(status: ExitStatus) -> u8 {
     if let Some(code) = status.code() {
-        return code.clamp(0, 255) as u8;
+        // Windows codes span 32 bits; failure must not round to success.
+        return if code == 0 {
+            0
+        } else {
+            code.clamp(1, 255) as u8
+        };
     }
     #[cfg(unix)]
     {
