@@ -12,7 +12,7 @@ there, launch it, and track it until it exits.
 | macOS ARM64 | No | Yes |
 | macOS x86-64 | No | **No, deferred** |
 | Windows x86-64 | Yes | Yes |
-| Windows i686 | No | Yes |
+| Windows i686 | No | **No, deferred** |
 
 Where the backend doesn't work, macman still manages ROMs, system images, and machines,
 but `macman run` stops with an error saying the host isn't supported.
@@ -27,6 +27,8 @@ platform unnoticed.
   left out.
 - **macOS x86-64** (`x86_64-apple-darwin`) was never in the default matrix, so no such
   artifact has been published. The explicit list keeps it that way.
+- **Windows i686** (`i686-pc-windows-msvc`) was in the default matrix, and is now left
+  out. It compiles, but the backend refuses the host, so it would only mislead.
 
 ## Before enabling a deferred target
 
@@ -46,4 +48,10 @@ platform unnoticed.
 - Validate and reuse `.app` builds in the cache.
 - Keep the XDG-style paths, not `~/Library`, as tracked for macOS ARM64 in #7.
 - Test the whole path end to end on real hardware.
+- Add the target to `release.yml` and update the tests in `tests/release_targets.rs`.
+
+### Windows i686
+
+- Map the host to upstream's `wx86` target, and accept a 32-bit MinGW `gcc`.
+- Test build, cache reuse, launch, and exit tracking on a 32-bit toolchain.
 - Add the target to `release.yml` and update the tests in `tests/release_targets.rs`.

@@ -21,14 +21,17 @@ fn release_matrix_is_explicit() {
             "i686-unknown-linux-gnu",
             "aarch64-apple-darwin",
             "x86_64-pc-windows-msvc",
-            "i686-pc-windows-msvc",
         ]
     );
 }
 
 #[test]
 fn deferred_targets_are_not_released() {
-    for deferred in ["aarch64-unknown-linux-gnu", "x86_64-apple-darwin"] {
+    for deferred in [
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "i686-pc-windows-msvc",
+    ] {
         assert!(!targets().contains(&deferred), "{deferred}");
     }
 }
@@ -41,6 +44,7 @@ fn deferred_targets_stay_documented() {
         "| Windows x86-64 | Yes | Yes |",
         "| Linux ARM64 | No | **No, deferred** |",
         "| macOS x86-64 | No | **No, deferred** |",
+        "| Windows i686 | No | **No, deferred** |",
     ] {
         assert!(docs.contains(row), "{row}");
     }

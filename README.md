@@ -25,8 +25,7 @@ Windows needs a native MinGW-w64 toolchain. WSL, Cygwin, and MSVC aren't used. `
 winget install BrechtSanders.WinLibs.POSIX.UCRT
 ```
 
-Open a new terminal afterwards so that `gcc` is on your `PATH`. Use a 64-bit macman;
-the 32-bit Windows build can't run the Mini vMac backend.
+Open a new terminal afterwards so that `gcc` is on your `PATH`.
 
 Run `macman doctor` to check your setup.
 
