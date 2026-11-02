@@ -2,12 +2,20 @@
 name = "macman"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.90"
 description = "Mac emulator manager"
 repository = "https://github.com/plicease/macman"
 license = "MIT"
 
 [dependencies]
 anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+sha2 = "0.11.1"
+toml = "1.1.8"
+
+[dev-dependencies]
+tempfile = "3.27.0"
 
 
 [package.metadata.deb]

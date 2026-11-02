@@ -1,0 +1,134 @@
+//! The narrow boundary between MacMan and an emulator (design §7).
+
+pub mod minivmac;
+
+use crate::machine::Machine;
+use anyhow::Result;
+use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
+
+/// A ready-to-run emulator binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Executable {
+    pub path: PathBuf,
+    pub build_key: String,
+    /// False when an existing cached build was reused.
+    pub built: bool,
+}
+
+/// A disk as presented to the emulator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedDisk {
+    pub path: PathBuf,
+    pub writable: bool,
+}
+
+pub struct LaunchRequest<'a> {
+    pub machine: &'a Machine,
+    pub executable: &'a Executable,
+    pub rom: &'a Path,
+    /// Boot disk first.
+    pub disks: &'a [ResolvedDisk],
+    /// Private working directory for this run.
+    pub workdir: &'a Path,
+    pub verbose: bool,
+}
+
+/// One line of `macman doctor` output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Check {
+    pub level: CheckLevel,
+    pub message: String,
+    /// What the user should do about it.
+    pub fix: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckLevel {
+    Ok,
+    Warn,
+    Fail,
+}
+
+impl Check {
+    pub fn ok(message: impl Into<String>) -> Self {
+        Self {
+            level: CheckLevel::Ok,
+            message: message.into(),
+            fix: None,
+        }
+    }
+
+    pub fn warn(message: impl Into<String>, fix: impl Into<String>) -> Self {
+        Self {
+            level: CheckLevel::Warn,
+            message: message.into(),
+            fix: Some(fix.into()),
+        }
+    }
+
+    pub fn fail(message: impl Into<String>, fix: impl Into<String>) -> Self {
+        Self {
+            level: CheckLevel::Fail,
+            message: message.into(),
+            fix: Some(fix.into()),
+        }
+    }
+}
+
+pub trait EmulatorBackend {
+    fn name(&self) -> &str;
+
+    /// The revision recorded in new machines.
+    fn revision(&self) -> &str;
+
+    /// Reject configurations the backend cannot honour, without side effects.
+    fn validate(&self, machine: &Machine) -> Result<()>;
+
+    /// Reject a disk list the backend cannot attach.
+    fn validate_disks(&self, machine: &Machine, count: usize) -> Result<()>;
+
+    /// Build or reuse the emulator for `machine`.
+    fn prepare(&self, machine: &Machine, verbose: bool) -> Result<Executable>;
+
+    fn launch(&self, request: &LaunchRequest<'_>) -> Result<ExitStatus>;
+
+    /// Host-level checks for `macman doctor`.
+    fn doctor(&self) -> Vec<Check>;
+}
+
+/// The machines' `[emulator] backend` values this binary can run.
+pub struct Backends {
+    backends: Vec<Box<dyn EmulatorBackend>>,
+}
+
+impl Backends {
+    pub fn new(backends: Vec<Box<dyn EmulatorBackend>>) -> Self {
+        Self { backends }
+    }
+
+    pub fn default_backend(&self) -> &dyn EmulatorBackend {
+        self.backends[0].as_ref()
+    }
+
+    pub fn get(&self, name: &str) -> Result<&dyn EmulatorBackend> {
+        self.backends
+            .iter()
+            .find(|backend| backend.name() == name)
+            .map(|backend| backend.as_ref())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown emulator backend {name:?}; this macman supports: {}",
+                    self.names().join(", ")
+                )
+            })
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &dyn EmulatorBackend> {
+        self.backends.iter().map(|backend| backend.as_ref())
+    }
+
+    fn names(&self) -> Vec<&str> {
+        self.backends.iter().map(|backend| backend.name()).collect()
+    }
+}
