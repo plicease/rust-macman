@@ -38,7 +38,8 @@ A machine isn't tied to a revision, so it runs on whichever one its host builds.
 `revision` under `[emulator]` records where it came from, and it's never rewritten, so
 there's nothing to migrate or edit: existing machines and archives work as they are,
 in either direction. The build key and build manifest hold the revision really used,
-and `--verbose` says when that differs from the machine's.
+and `--verbose` says when that differs from the machine's. A Mac Plus machine with System
+7.0.1, recorded at 36.04, has been run on macOS ARM64 this way.
 
 36.04 and 37.03 are interchangeable because their sources were compared: the emulated
 models, memory sizes, ROMs, and disk formats match, and 37.03's changes to the emulator
@@ -61,7 +62,7 @@ trusted, and the pin would need checking against the tag.
 |---|---|
 | Linux x86-64 | Yes: builds, and boots System 7.5.5 and Mac OS 8.1 from a Quadra 650 ROM |
 | Windows x86-64 | Yes: builds, and boots System 7.5.5 and Mac OS 8.1 from a Quadra 650 ROM |
-| macOS ARM64 | Yes: builds, and boots System 7.1 from a Quadra 650 ROM with a 68030 setting |
+| macOS ARM64 | Yes: builds, and boots System 7.5.5 and Mac OS 8.1 from a Quadra 650 ROM, but `slirp` networking doesn't work on Mac OS 8.1 |
 
 On any other host macman refuses to create or run such a machine, while still importing
 one for passing on. No host counts as supported until
@@ -97,9 +98,14 @@ MacPorts or Homebrew, are found with `pkg-config`, and are linked dynamically, s
 in their version or location means a new build. MPFR is the ARM64 FPU core: ARM64 has no
 80-bit `long double`.
 
+On macOS, System 7.5.5 and Mac OS 8.1 were each tested with the default 68040 setting, and
+sound worked on a real device. System 7.1 was tested with a 68030 setting. `slirp`
+networking didn't work on Mac OS 8.1, the only system it was tried on there, and the cause
+hasn't been looked into.
+
 The macOS smoke test covered Shut Down from inside the guest, killing the emulator, and
-killing macman, but not the default `--cpu 68040`, full screen, sound, `slirp` networking,
-closing the window, or a shared folder. Homebrew hasn't been tried, only MacPorts.
+killing macman, but not full screen, closing the window, or a shared folder. Homebrew
+hasn't been tried, only MacPorts.
 
 The pin is commit `f532be3d3d70` of [kanjitalk755/macemu](https://github.com/kanjitalk755/macemu),
 the maintained fork, and its SHA-256 is that of the archive GitHub generates for it. If
