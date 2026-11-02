@@ -134,8 +134,8 @@ can't identify, ideally with `--readonly`. See
 macman can also run [Basilisk II](https://github.com/kanjitalk755/macemu), for later 68k
 software, generally System 7 through Mac OS 8.1. Keep Mini vMac for early Macs and for
 exact models: Basilisk II imitates no particular Macintosh, and has no PowerPC, no Mac
-OS 8.5 or later, and no exact Quadra hardware. It has been tested with System 7.5.5, and
-not yet with Mac OS 8; see [docs/PLATFORMS.md](docs/PLATFORMS.md#basilisk-ii).
+OS 8.5 or later, and no exact Quadra hardware. It has been tested with System 7.5.5 and
+Mac OS 8.1; see [docs/PLATFORMS.md](docs/PLATFORMS.md#basilisk-ii).
 
 It's for Linux x86-64, Windows x86-64, and macOS ARM64. On Linux, besides what Mini vMac
 needs, it compiles with:

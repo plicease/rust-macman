@@ -60,21 +60,20 @@ trusted, and the pin would need checking against the tag.
 | Host | Status |
 |---|---|
 | Linux x86-64 | Yes: builds, and boots System 7.5.5 and Mac OS 8.1 from a Quadra 650 ROM |
-| Windows x86-64 | Yes: builds, and boots System 7.1 from a Quadra 650 ROM with a 68030 setting |
+| Windows x86-64 | Yes: builds, and boots System 7.5.5 and Mac OS 8.1 from a Quadra 650 ROM |
 | macOS ARM64 | Yes: builds, and boots System 7.1 from a Quadra 650 ROM with a 68030 setting |
 
 On any other host macman refuses to create or run such a machine, while still importing
 one for passing on. No host counts as supported until
 [the smoke test](SMOKE_TEST.md#basilisk-ii) has passed there.
 
-Mac OS 8.1 was tried on Linux only, with a 68040 setting: a System 7.5.5 machine was
+Mac OS 8.1 was tried on Linux, with a 68040 setting: a System 7.5.5 machine was
 upgraded from the 8.1 CD image, attached with `--disk`, and it boots and shuts down
 cleanly. There, with `slirp` networking and DHCP, it reached a plain HTTP site by name,
 and still shut down cleanly. Full screen works on Linux too: a machine can start in it,
 and Ctrl+Enter switches it on and off. Writing to a shared folder works there as well, and
-the changes persist. System 7.5.5 was tested on Linux with 68030 and 68040 settings. Sound
-on a real device has been tried only on Linux, where System 7.5.5 played its startup
-chime.
+the changes persist. System 7.5.5 was tested on Linux with 68030 and 68040 settings, and
+played its startup chime on a real device.
 
 On Windows, upstream builds only 32-bit MinGW with MSYS2, and macman doesn't follow it. It
 compiles a 64-bit static emulator itself, with MinGW-w64 and the official
@@ -82,10 +81,10 @@ compiles a 64-bit static emulator itself, with MinGW-w64 and the official
 is needed; the changes this takes to the source are explained in
 `src/backend/macemu_windows.rs`.
 
-The Windows smoke test hasn't covered a Shut Down from inside the guest, as Windows kept
-scripted input from reaching the emulator's menus; only the fixture test sees a clean exit
-there. A 68040 boots with a IIci's model, but the System 7.1 image at hand stops with an
-error as a Quadra 900, so the default `--cpu` is yet to be tried, on System 7.5.5 or later.
+On Windows, System 7.5.5 and Mac OS 8.1 were each tested with the default 68040 setting,
+and Mac OS 8.1 with `slirp` networking too, and with sound on a real device, played from
+its Sound control panel. System 7.1 was tested with a 68030 setting; the
+image at hand stops with an error as a Quadra 900.
 
 On macOS ARM64, macman doesn't use upstream's Xcode project, which wants SDL and MPFR
 installed system-wide. It runs the same `autogen.sh`, `configure`, and `make` as on Linux,
