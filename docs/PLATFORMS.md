@@ -83,8 +83,11 @@ is needed; the changes this takes to the source are explained in
 
 On Windows, System 7.5.5 and Mac OS 8.1 were each tested with the default 68040 setting,
 and Mac OS 8.1 with `slirp` networking too, and with sound on a real device, played from
-its Sound control panel. System 7.1 was tested with a 68030 setting; the
-image at hand stops with an error as a Quadra 900.
+its Sound control panel. Ctrl+Enter switches full screen on and off. After ending the
+emulator from Task Manager, the next run offers the repair: declining it leaves the
+machine at the flashing question mark, and accepting it lets the machine boot. System 7.1
+was tested with a 68030 setting; the image at hand stops with an error as a Quadra 900.
+Windows keeps Ctrl-Esc for the Start menu, so that quit key can't be used there.
 
 On macOS ARM64, macman doesn't use upstream's Xcode project, which wants SDL and MPFR
 installed system-wide. It runs the same `autogen.sh`, `configure`, and `make` as on Linux,
