@@ -7,6 +7,7 @@ use common::{II_ROM_CHECKSUM, IIX_ROM_CHECKSUM, PLUS_ROM_CHECKSUM, write_disk, w
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
+use macman::backend::minivmac::SourcePin;
 use macman::disk::{LockMode, lock_image};
 use macman::fsutil::{sha256_bytes, sha256_file};
 use macman::machine::Machine;
@@ -535,9 +536,10 @@ fn a_conflict_does_not_stop_the_other_machines() {
 #[test]
 fn an_incompatible_machine_fails_with_advice_and_others_continue() {
     let source = Host::with_two_machines();
+    let revision = format!("revision = \"{}\"", SourcePin::default().revision);
     let definition = source
         .definition("plus-b")
-        .replace("revision = \"36.04\"", "revision = \"99.0\"");
+        .replace(&revision, "revision = \"99.0\"");
     source.write_definition("plus-b", &definition);
     let archive = source.export(&["plus-a", "plus-b"], "both.tar.gz");
 

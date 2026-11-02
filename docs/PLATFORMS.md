@@ -38,6 +38,9 @@ Machines record their revision, so a machine made on another host, or by an earl
 macman on a Mac, says so when it's run. Its disks are unaffected: set `revision` under
 `[emulator]` in its `machine.toml` to the one the error names.
 
+`macman import` fails such a machine, as it does any revision this host can't build, so
+for now an archive can't move a machine between macOS and the other hosts.
+
 The 37.03 archive is one GitHub generates from the tag, and the pin is its SHA-256. If
 GitHub ever changed how it generates archives, downloads would be refused rather than
 trusted, and the pin would need checking against the tag.
