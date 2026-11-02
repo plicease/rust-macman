@@ -3,7 +3,8 @@
 
 use crate::disk::{self, DiskFormat, LockMode};
 use crate::fsutil::{
-    atomic_copy_range, list_dir, read_toml, sha256_file, validate_name, write_toml,
+    atomic_copy_range, atomic_copy_range_checked, list_dir, read_toml, sha256_file, validate_name,
+    write_toml, write_toml_new,
 };
 use crate::model::{ALL_MODELS, Model};
 use crate::paths::Paths;
@@ -57,6 +58,74 @@ fn system_path(paths: &Paths, name: &str) -> PathBuf {
 
 fn sidecar(file: &Path) -> PathBuf {
     file.with_extension("toml")
+}
+
+/// Whether anything at all occupies this ROM name.
+pub fn rom_exists(paths: &Paths, name: &str) -> bool {
+    let file = rom_path(paths, name);
+    file.symlink_metadata().is_ok() || sidecar(&file).symlink_metadata().is_ok()
+}
+
+/// Whether this ROM name has its ROM file, as opposed to only metadata.
+pub fn rom_file_exists(paths: &Paths, name: &str) -> bool {
+    rom_path(paths, name).is_file()
+}
+
+/// Describe the ROM at `blob`, which came from an archive, without storing it.
+pub fn rom_from_blob(blob: &Path, name: &str, sha256: &str) -> Result<Rom> {
+    validate_name("ROM", name)?;
+    Ok(Rom {
+        name: name.to_string(),
+        sha256: sha256.to_string(),
+        size: std::fs::metadata(blob)?.len(),
+        models: genuine_models(&read_rom_prefix(blob)?),
+        trailing_bytes: 0,
+        source_sha256: None,
+    })
+}
+
+/// Register `rom`, as described by [`rom_from_blob`].
+pub fn add_rom_blob(paths: &Paths, blob: &Path, rom: &Rom) -> Result<()> {
+    let dest = rom_path(paths, &rom.name);
+    atomic_copy_range_checked(blob, 0, rom.size, &dest, |copy| {
+        if sha256_file(copy)? != rom.sha256 {
+            bail!("ROM {} failed its digest after copying", rom.name);
+        }
+        Ok(())
+    })?;
+    if let Err(error) = write_toml(&sidecar(&dest), rom) {
+        let _ = std::fs::remove_file(&dest);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Finish a registration that stopped between the ROM file and its metadata,
+/// if `rom`, as described by [`rom_from_blob`], is certainly what was stored.
+/// Returns false, having changed nothing, for anything less clear-cut.
+pub fn recover_rom(paths: &Paths, rom: &Rom) -> Result<bool> {
+    let file = rom_path(paths, &rom.name);
+    let metadata = sidecar(&file);
+    let is_plain_file = file
+        .symlink_metadata()
+        .is_ok_and(|found| found.file_type().is_file());
+    if !is_plain_file || metadata.symlink_metadata().is_ok() || sha256_file(&file)? != rom.sha256 {
+        return Ok(false);
+    }
+    match write_toml_new(&metadata, rom) {
+        Ok(()) => Ok(true),
+        // Whatever else was registering this name finished first.
+        Err(_) if metadata.symlink_metadata().is_ok() => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Undo [`add_rom_blob`].
+pub fn remove_rom(paths: &Paths, name: &str) -> Result<()> {
+    let file = rom_path(paths, name);
+    std::fs::remove_file(sidecar(&file))?;
+    std::fs::remove_file(file)?;
+    Ok(())
 }
 
 /// The largest ROM macman knows, which is all it needs to read of a file.

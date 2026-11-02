@@ -5,6 +5,7 @@ use crate::model::Model;
 use crate::paths::Paths;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::fs::{self, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -13,6 +14,10 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub struct Machine {
     pub schema_version: u32,
     pub name: String,
+    /// Stable identity across export and import, unlike the name. Machines
+    /// from before this existed get one when first exported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub emulator: EmulatorConfig,
     pub hardware: Hardware,
     pub display: Display,
@@ -112,6 +117,42 @@ impl Machine {
     }
 }
 
+/// Move the finished machine directory `staged` into place as `name`, which
+/// must not exist. A rename can replace an empty directory, so everything that
+/// makes a machine comes through here, and the lock makes the check and the
+/// rename one step.
+pub fn publish_dir(paths: &Paths, staged: &Path, name: &str) -> Result<()> {
+    publish_dir_checked(paths, staged, name, || {})
+}
+
+/// [`publish_dir`], with `before_rename` running after the check.
+fn publish_dir_checked(
+    paths: &Paths,
+    staged: &Path,
+    name: &str,
+    before_rename: impl FnOnce(),
+) -> Result<()> {
+    fs::create_dir_all(paths.locks()).context("cannot create lock directory")?;
+    fs::create_dir_all(paths.machines()).context("cannot create the machines directory")?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(paths.machines_lock())
+        .context("cannot open the machine lock")?;
+    lock.lock().context("cannot take the machine lock")?;
+
+    if paths.machine(name).symlink_metadata().is_ok() {
+        bail!("machine {name:?} already exists");
+    }
+    before_rename();
+    fs::rename(staged, paths.machine(name)).context("cannot publish machine")
+}
+
+pub fn new_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 /// `config.toml`: the persistent selection and backend settings.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -151,6 +192,57 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
+    use std::time::Duration;
+
+    fn staged(root: &Path, name: &str) -> PathBuf {
+        let dir = root.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(name), "contents").unwrap();
+        dir
+    }
+
+    #[test]
+    fn publishing_refuses_an_existing_empty_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        fs::create_dir_all(paths.machine("m")).unwrap();
+        let dir = staged(root.path(), "new");
+
+        let error = publish_dir(&paths, &dir, "m").unwrap_err();
+        assert!(error.to_string().contains("already exists"), "{error}");
+        assert_eq!(fs::read_dir(paths.machine("m")).unwrap().count(), 0);
+        assert!(dir.join("new").exists());
+    }
+
+    #[test]
+    fn publishing_is_one_step_against_other_publishers() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        let first = staged(root.path(), "first");
+        // The rival's directory is empty, which a bare rename would replace.
+        let second = root.path().join("second");
+        fs::create_dir_all(&second).unwrap();
+
+        let rival_paths = paths.clone();
+        let rival_dir = second.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        publish_dir_checked(&paths, &first, "m", || {
+            thread::spawn(move || {
+                sender
+                    .send(publish_dir(&rival_paths, &rival_dir, "m"))
+                    .unwrap();
+            });
+            // Long enough for an unlocked rival to finish.
+            thread::sleep(Duration::from_millis(300));
+        })
+        .unwrap();
+
+        assert!(paths.machine("m").join("first").exists());
+        let rival = receiver.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert!(rival.is_err());
+        assert!(second.exists());
+    }
 
     const EXAMPLE: &str = r#"
 schema_version = 1

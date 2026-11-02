@@ -1110,6 +1110,7 @@ mod tests {
         Machine {
             schema_version: 1,
             name: "m".into(),
+            id: None,
             emulator: EmulatorConfig {
                 backend: BACKEND_NAME.into(),
                 revision: SourcePin::default().revision,

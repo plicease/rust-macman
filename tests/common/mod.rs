@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 pub const PLUS_ROM_CHECKSUM: u32 = 0x4D1F_8172;
 pub const II_ROM_CHECKSUM: u32 = 0x9779_D2C4;
+pub const IIX_ROM_CHECKSUM: u32 = 0x9722_1136;
 
 /// A synthetic ROM that passes the real checksum test, with no Apple code.
 pub fn write_rom(dir: &Path, name: &str, checksum: u32, size: usize) -> PathBuf {
