@@ -18,7 +18,6 @@ fn release_matrix_is_explicit() {
         targets(),
         [
             "x86_64-unknown-linux-gnu",
-            "i686-unknown-linux-gnu",
             "aarch64-apple-darwin",
             "x86_64-pc-windows-msvc",
         ]
@@ -29,6 +28,7 @@ fn release_matrix_is_explicit() {
 fn deferred_targets_are_not_released() {
     for deferred in [
         "aarch64-unknown-linux-gnu",
+        "i686-unknown-linux-gnu",
         "x86_64-apple-darwin",
         "i686-pc-windows-msvc",
     ] {
@@ -43,6 +43,7 @@ fn deferred_targets_stay_documented() {
         "| Linux x86-64 | Yes | Yes |",
         "| Windows x86-64 | Yes | Yes |",
         "| macOS ARM64 | Yes | Yes |",
+        "| Linux i686 | No | **No, deferred** |",
         "| Linux ARM64 | No | **No, deferred** |",
         "| macOS x86-64 | No | **No, deferred** |",
         "| Windows i686 | No | **No, deferred** |",
