@@ -648,13 +648,16 @@ impl App {
             eprintln!("warning: {problem}; run macman from a terminal to repair it");
             return Ok(());
         }
-        print!("{problem}. Mark it as clean? [Y/n] ");
+        print!(
+            "{problem}. This doesn't check or repair the disk. Set the HFS cleanly-unmounted \
+             flag to allow booting? [y/N] "
+        );
         std::io::stdout().flush()?;
         let mut answer = String::new();
         std::io::stdin().lock().read_line(&mut answer)?;
         if accepts_repair(&answer) {
             disk::mark_unmounted(&path)?;
-            println!("Marked it as clean, without checking it; run Disk First Aid in the guest");
+            println!("Set the flag, without checking the disk; run Disk First Aid in the guest");
         }
         Ok(())
     }
@@ -858,8 +861,8 @@ impl App {
         Ok(Some(Check::warn(
             format!("machine {name} wasn't shut down cleanly, and may not start"),
             format!(
-                "`macman run {name}` offers to mark its boot disk as clean; then run Disk \
-                 First Aid in the guest"
+                "`macman run {name}` offers to set its boot disk's cleanly-unmounted flag; \
+                 then run Disk First Aid in the guest"
             ),
         )))
     }
@@ -933,9 +936,10 @@ fn confirm_delete(name: &str, disks: usize) -> Result<()> {
     Ok(())
 }
 
-/// Anything but a refusal is a yes, as the machine may not start without the repair.
+/// Only a plain yes writes to the disk. Enter, end of input, and a typo all decline.
 fn accepts_repair(answer: &str) -> bool {
-    !matches!(answer.trim(), "n" | "N" | "no")
+    let answer = answer.trim();
+    answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
 }
 
 /// Describe a run that didn't end normally, or `None` if it did.
@@ -1021,11 +1025,12 @@ mod tests {
     }
 
     #[test]
-    fn only_a_refusal_declines_a_repair() {
-        for answer in ["\n", "y\n", "Y\n", "yes\n"] {
+    fn only_an_explicit_yes_accepts_a_repair() {
+        for answer in ["y\n", "Y\n", "yes\n", "YES\n", " Yes \n"] {
             assert!(accepts_repair(answer), "{answer:?}");
         }
-        for answer in ["n\n", "N\n", "no\n"] {
+        // The empty string is what `read_line` leaves at end of input.
+        for answer in ["", "\n", "n\n", "no\n", "maybe\n", "?\n", "ye\n", "yy\n"] {
             assert!(!accepts_repair(answer), "{answer:?}");
         }
     }

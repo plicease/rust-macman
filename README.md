@@ -191,8 +191,9 @@ macman is killed, it takes the emulator with it, because Basilisk II doesn't loc
 disks on Linux and macman's locks would go. The guest's disks are then as after a crash.
 
 A boot disk left that way can stop the Mac starting at all, at a flashing question mark.
-`macman doctor` warns about one, and `macman run` offers to mark it as clean. That only
-lets it start, without checking it, so run Disk First Aid in the guest afterwards.
+`macman doctor` warns about one, and `macman run` asks whether to set its HFS
+cleanly-unmounted flag. That only lets it start, and doesn't check or repair the disk, so
+run Disk First Aid in the guest afterwards.
 
 On Windows, there are a few differences:
 
