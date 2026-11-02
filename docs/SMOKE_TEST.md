@@ -84,7 +84,7 @@ macman create iix-71 --model iix --rom maciix --system system-7.1 --memory 8M --
 
 ## Basilisk II
 
-Run this on Linux x86-64 or Windows x86-64. It needs a real ROM and system image, and it
+Run this on Linux x86-64, Windows x86-64, or macOS ARM64. It needs a real ROM and system image, and it
 uses separate directories, so it doesn't touch your machines. On Windows, set `$root`
 and the rest as at the top of this file, instead of the `export` line.
 
@@ -129,3 +129,11 @@ On Windows, these replace the matching steps:
 | `Stop-Process -Name macman -Force` while the emulator runs | The emulator carries on, and opening its disk from elsewhere fails, as does `macman run q7`. `macman doctor` warns that macman stopped first. |
 | `macman create qs --backend basilisk2 ... --shared-folder "a folder"` | Refused. |
 | Close the window instead | On System 7.1, nothing happens. Later systems should ask whether to shut down. |
+
+On macOS, these replace the matching steps:
+
+| Step | Expected |
+|---|---|
+| `macman doctor` before installing anything | Names the missing tools and libraries, including MPFR, as warnings until a machine needs them. |
+| Kill `macman` with `kill -9` while the emulator runs | The emulator carries on. `macman run q7` warns about the earlier run, then refuses, saying the disk is held by a Basilisk II that outlived macman. |
+| Quit that emulator, then `macman run q7` | Boots. |

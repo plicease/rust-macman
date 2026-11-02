@@ -31,9 +31,22 @@
 //! - `extfs` is ignored. `enableextfs` instead shows the guest whole drives, so
 //!   this backend can't honor a shared folder here, and refuses one.
 //! - `GetFileSize` reads only the low 32 bits of a disk's size.
+//!
+//! macOS builds as Linux does, not with upstream's Xcode project, which wants
+//! SDL and its math libraries installed system-wide. It differs in that:
+//!
+//! - ARM64 has no 80-bit `long double`, so the FPU core is MPFR's, which needs
+//!   MPFR and GMP. `configure` doesn't look for them or say where they are, so
+//!   `pkg-config` does, as they aren't where Apple's compiler looks.
+//! - Upstream's ARM64 macOS builds have no JIT, so it's configured out, where
+//!   elsewhere it's only switched off in the preferences.
+//! - `Sys_open` takes `O_EXLOCK` on every disk file, so the emulator guards its
+//!   own disks, and needn't die with macman. A second one would only print a
+//!   warning that stays in its buffer, and show no disk, so macman tries the
+//!   lock first, to refuse with a reason.
 
 use super::minivmac::{MANIFEST, Manifest};
-use super::minivmac::{gcc_target, is_mingw_x64};
+use super::minivmac::{gcc_target, is_mingw_x64, macos_toolchain_identity};
 use super::source::{self, Source, SourcePin, tool_exists};
 use super::{Check, EmulatorBackend, Executable, LaunchRequest, macemu_windows};
 use crate::disk::{self, Classification, DiskFormat};
@@ -43,7 +56,7 @@ use crate::paths::Paths;
 use crate::registry::{self, Rom};
 use anyhow::{Context, Result, bail};
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::{self, File, TryLockError};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -54,6 +67,7 @@ pub const DEFAULT_MEMORY: &str = "32M";
 pub const DEFAULT_DISPLAY: (u32, u32, u32) = (640, 480, 8);
 const LABEL: &str = "Basilisk II";
 const WINDOWS: bool = cfg!(all(windows, target_arch = "x86_64"));
+const MACOS: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 const EXECUTABLE: &str = if WINDOWS {
     macemu_windows::EXECUTABLE
 } else {
@@ -76,9 +90,17 @@ const ERROR_PREFIX: &str = "ERROR: ";
 /// Quadra 900 is upstream's; older systems expect the IIci that's its default.
 const MODEL_ID_IICI: u32 = 5;
 const MODEL_ID_QUADRA_900: u32 = 14;
-const HOST_SUPPORTED: bool = WINDOWS || cfg!(all(target_os = "linux", target_arch = "x86_64"));
-const UNSUPPORTED_HOST: &str = "the Basilisk II backend supports only Linux x86-64 and Windows \
-                                x86-64 hosts; see docs/PLATFORMS.md";
+const HOST: Option<&str> = if WINDOWS {
+    Some("x86_64-pc-windows-gnu")
+} else if MACOS {
+    Some("aarch64-apple-darwin")
+} else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+    Some("x86_64-unknown-linux-gnu")
+} else {
+    None
+};
+const UNSUPPORTED_HOST: &str = "the Basilisk II backend supports only Linux x86-64, Windows \
+                                x86-64, and macOS ARM64 hosts; see docs/PLATFORMS.md";
 /// SDL for video and sound, and no GTK, whose dialogs would wait for a click
 /// in place of the `ERROR:` lines macman reads.
 const CONFIGURE_OPTIONS: &[&str] = &[
@@ -87,6 +109,15 @@ const CONFIGURE_OPTIONS: &[&str] = &[
     "--with-gtk=no",
     "--with-esd=no",
 ];
+const MACOS_CONFIGURE_OPTIONS: &[&str] = &[
+    "--enable-sdl-video",
+    "--enable-sdl-audio",
+    "--with-gtk=no",
+    "--with-esd=no",
+    "--disable-jit-compiler",
+];
+/// What an ARM64 macOS build links with, by `pkg-config` name, and for people.
+const MACOS_LIBRARIES: &[(&str, &str)] = &[("sdl2", "SDL"), ("gmp", "GMP"), ("mpfr", "MPFR")];
 
 /// A commit, as macemu's releases are rare. The archive is one GitHub generates
 /// from it, and the fork is the one that's maintained.
@@ -214,12 +245,7 @@ impl Basilisk2 {
             &Manifest {
                 backend: BACKEND_NAME.into(),
                 revision: self.pin.revision.clone(),
-                host: if WINDOWS {
-                    "x86_64-pc-windows-gnu"
-                } else {
-                    "x86_64-unknown-linux-gnu"
-                }
-                .into(),
+                host: HOST.context(UNSUPPORTED_HOST)?.into(),
                 toolchain: toolchain.into(),
                 options: build_options().iter().map(|s| s.to_string()).collect(),
                 executable: EXECUTABLE.into(),
@@ -241,9 +267,18 @@ impl Basilisk2 {
 fn build_options() -> &'static [&'static str] {
     if WINDOWS {
         macemu_windows::DEFINES
+    } else if MACOS {
+        MACOS_CONFIGURE_OPTIONS
     } else {
         CONFIGURE_OPTIONS
     }
+}
+
+/// What the compiler needs to be told to find the libraries, on macOS.
+fn macos_library_flags(option: &str) -> String {
+    let packages = MACOS_LIBRARIES.iter().map(|(package, _)| *package);
+    let args: Vec<&str> = std::iter::once(option).chain(packages).collect();
+    first_line("pkg-config", &args).unwrap_or_default()
 }
 
 /// Unpack and compile, per upstream's README, with `configure` separate from
@@ -258,9 +293,18 @@ fn run_build(archive: &Path, src: &Path, log_path: &Path) -> Result<()> {
          NO_CONFIGURE=1 sh ./autogen.sh\n\
          sh ./configure {}\n\
          make -j{jobs}\n",
-        CONFIGURE_OPTIONS.join(" ")
+        build_options().join(" ")
     );
-    let status = Command::new("bash")
+    let mut command = Command::new("bash");
+    if MACOS {
+        // `gcc` may be a real GCC from a package manager, not Apple's clang.
+        command
+            .env("CC", "clang")
+            .env("CXX", "clang++")
+            .env("CPPFLAGS", macos_library_flags("--cflags-only-I"))
+            .env("LDFLAGS", macos_library_flags("--libs-only-L"));
+    }
+    let status = command
         .arg("-c")
         .arg(script)
         .arg("macman-build")
@@ -292,6 +336,14 @@ fn first_line(program: &str, args: &[&str]) -> Option<String> {
 /// `g++` compiles most of it, and `gcc` the rest. SDL is linked dynamically,
 /// but a new version may change what `configure` finds.
 fn toolchain_identity(sdl_pin: &SourcePin) -> Result<String> {
+    if MACOS {
+        return Ok(format!(
+            "{} {} {}",
+            macos_toolchain_identity()?,
+            macos_library_versions(),
+            macos_library_flags("--libs-only-L"),
+        ));
+    }
     let hint = "install a C++ compiler (run `macman doctor`)";
     let compiler = first_line("g++", &["--version"]).context(hint)?;
     if WINDOWS {
@@ -307,6 +359,18 @@ fn toolchain_identity(sdl_pin: &SourcePin) -> Result<String> {
     }
     let sdl = first_line("pkg-config", &["--modversion", "sdl2"]);
     Ok(format!("{compiler} SDL {}", sdl.as_deref().unwrap_or("?")))
+}
+
+/// A build links these dynamically, so it's only good for the ones it saw.
+fn macos_library_versions() -> String {
+    MACOS_LIBRARIES
+        .iter()
+        .map(|(package, name)| {
+            let version = first_line("pkg-config", &["--modversion", package]);
+            format!("{name} {}", version.as_deref().unwrap_or("?"))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn megabytes(memory: &str) -> Option<u32> {
@@ -467,6 +531,20 @@ fn windows_arguments(request: &LaunchRequest<'_>) -> Result<Vec<OsString>> {
     Ok(arguments)
 }
 
+/// Refuse a disk that an emulator holds, which macman's own locks can't show
+/// once the macman that started it has gone. A file system without locks can't
+/// be held, and the emulator goes on without them there too.
+fn refuse_held_disk(disk: &Path) -> Result<()> {
+    let file = File::open(disk).with_context(|| format!("cannot open {}", disk.display()))?;
+    if let Err(TryLockError::WouldBlock) = file.try_lock() {
+        bail!(
+            "{} is held by a Basilisk II that outlived macman; quit that emulator first",
+            disk.display()
+        );
+    }
+    Ok(())
+}
+
 /// Have the kernel stop the emulator if macman dies, because the locks on its
 /// disks are about to go too. It has to be `SIGKILL`: SDL turns `SIGTERM` into
 /// the window closing, which only asks the guest whether to shut down.
@@ -568,7 +646,7 @@ impl EmulatorBackend for Basilisk2 {
     }
 
     fn check_host(&self) -> Result<()> {
-        if !HOST_SUPPORTED {
+        if HOST.is_none() {
             bail!(UNSUPPORTED_HOST);
         }
         Ok(())
@@ -619,6 +697,11 @@ impl EmulatorBackend for Basilisk2 {
         {
             bail!("the shared folder {} is missing", folder.display());
         }
+        if MACOS {
+            for disk in request.disks {
+                refuse_held_disk(&disk.path)?;
+            }
+        }
         let file = request.workdir.join(PREFERENCES);
         fs::write(&file, preferences(request.machine))
             .with_context(|| format!("cannot write {}", file.display()))?;
@@ -656,7 +739,7 @@ impl EmulatorBackend for Basilisk2 {
     }
 
     fn doctor(&self) -> Vec<Check> {
-        if !HOST_SUPPORTED {
+        if HOST.is_none() {
             return vec![Check::warn(
                 "Basilisk II isn't available on this host",
                 UNSUPPORTED_HOST,
@@ -678,9 +761,13 @@ impl EmulatorBackend for Basilisk2 {
             checks.push(self.sdl_source().check());
             return checks;
         }
-        const INSTALL: &str = "install what Basilisk II builds with (Debian/Ubuntu: apt install \
-                               build-essential autoconf automake pkg-config libsdl2-dev)";
-        for tool in [
+        const LINUX_INSTALL: &str = "install what Basilisk II builds with (Debian/Ubuntu: apt \
+                                     install build-essential autoconf automake pkg-config \
+                                     libsdl2-dev)";
+        const MACOS_INSTALL: &str = "install what Basilisk II builds with (MacPorts: port install \
+                                     autoconf automake pkgconfig libsdl2 mpfr; Homebrew: brew \
+                                     install autoconf automake pkg-config sdl2 mpfr)";
+        const LINUX_TOOLS: &[&str] = &[
             "gcc",
             "g++",
             "make",
@@ -689,25 +776,38 @@ impl EmulatorBackend for Basilisk2 {
             "autoconf",
             "aclocal",
             "pkg-config",
-        ] {
+        ];
+        // Mini vMac's checks already cover Apple's tools.
+        const MACOS_TOOLS: &[&str] = &["autoconf", "aclocal", "pkg-config"];
+        let (tools, libraries, install) = if MACOS {
+            (MACOS_TOOLS, MACOS_LIBRARIES, MACOS_INSTALL)
+        } else {
+            (LINUX_TOOLS, &MACOS_LIBRARIES[..1], LINUX_INSTALL)
+        };
+        for tool in tools {
             if tool_exists(tool) {
                 checks.push(Check::ok(format!("{tool} found, for Basilisk II")));
             } else {
                 checks.push(Check::fail(
                     format!("{tool} not found, which Basilisk II needs"),
-                    INSTALL,
+                    install,
                 ));
             }
         }
-        match first_line("pkg-config", &["--modversion", "sdl2"]) {
-            Some(version) => checks.push(Check::ok(format!("SDL {version} found"))),
-            None => checks.push(Check::fail(
-                "SDL 2 headers not found, which Basilisk II needs",
-                INSTALL,
-            )),
+        for (package, name) in libraries {
+            match first_line("pkg-config", &["--modversion", package]) {
+                Some(version) => checks.push(Check::ok(format!("{name} {version} found"))),
+                None => checks.push(Check::fail(
+                    format!("{name} headers not found, which Basilisk II needs"),
+                    install,
+                )),
+            }
         }
         checks.push(self.source().check());
-        if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        if !MACOS
+            && std::env::var_os("DISPLAY").is_none()
+            && std::env::var_os("WAYLAND_DISPLAY").is_none()
+        {
             checks.push(Check::warn(
                 "neither DISPLAY nor WAYLAND_DISPLAY is set",
                 "Basilisk II opens a window; run macman from a graphical session",
@@ -1010,6 +1110,11 @@ mod tests {
             .unwrap();
         let error = backend().check_disk(&path, true).unwrap_err().to_string();
         assert!(error.contains("under 4G"), "{error}");
+    }
+
+    #[test]
+    fn only_macos_configures_the_jit_out() {
+        assert_eq!(build_options().contains(&"--disable-jit-compiler"), MACOS);
     }
 
     #[test]

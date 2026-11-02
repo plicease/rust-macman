@@ -518,7 +518,7 @@ fn macos_sdk() -> Result<MacosSdk> {
     })
 }
 
-fn macos_toolchain_identity() -> Result<String> {
+pub(super) fn macos_toolchain_identity() -> Result<String> {
     let hint = "cannot run clang; install Apple's command line tools (run `macman doctor`)";
     let target = command_output("clang", &["-dumpmachine"]).context(hint)?;
     if !is_arm64_darwin(&target) {

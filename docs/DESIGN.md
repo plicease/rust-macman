@@ -222,6 +222,12 @@ On Windows it also differs from its Linux self. `src/backend/macemu_windows.rs` 
 - **Locks:** `CreateFile` opens disks with no sharing, so Windows protects them itself, and the emulator can outlive macman.
 - **Disks:** `GetFileSize` is read as 32 bits, so disks of 4G or more are refused.
 
+On macOS ARM64 it builds as on Linux, and differs in these ways:
+
+- **Build:** upstream's Xcode project wants SDL and MPFR installed system-wide, so macman runs `configure` under `BasiliskII/src/Unix` with clang, without the JIT. `pkg-config` finds SDL, GMP, and MPFR, and the key covers their versions and library directories, as they're linked dynamically.
+- **FPU:** the core is MPFR's, as ARM64 has no 80-bit `long double`.
+- **Locks:** `Sys_open` takes `O_EXLOCK` on every disk file, and there's no `PR_SET_PDEATHSIG`, so the emulator can outlive macman. A second emulator's warning sits unflushed in its output and it shows no disk, so macman tries that lock before launching, and refuses with a reason.
+
 Shared code is limited to fetching a pinned source and publishing a build, in `src/backend/source.rs`. SheepShaver could use the same, but nothing here assumes so.
 
 ### Backend boundary

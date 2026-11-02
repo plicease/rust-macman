@@ -137,8 +137,8 @@ exact models: Basilisk II imitates no particular Macintosh, and has no PowerPC, 
 OS 8.5 or later, and no exact Quadra hardware. It has been tested with System 7.5.5, and
 not yet with Mac OS 8; see [docs/PLATFORMS.md](docs/PLATFORMS.md#basilisk-ii).
 
-It's for Linux x86-64 and Windows x86-64. On Linux, besides what Mini vMac needs, it
-compiles with:
+It's for Linux x86-64, Windows x86-64, and macOS ARM64. On Linux, besides what Mini vMac
+needs, it compiles with:
 
 ```sh
 apt install build-essential autoconf automake pkg-config libsdl2-dev
@@ -147,6 +147,13 @@ apt install build-essential autoconf automake pkg-config libsdl2-dev
 On Windows it needs only the same MinGW-w64 toolchain, with `g++`, and Windows 10 version
 1903 or later. macman builds it without Autotools or MSYS2, and downloads a pinned copy
 of SDL 2 for the purpose.
+
+On macOS, besides Apple's command line tools, it compiles with either of these:
+
+```sh
+port install autoconf automake pkgconfig libsdl2 mpfr
+brew install autoconf automake pkg-config sdl2 mpfr
+```
 
 It needs a 512K or 1M 32-bit clean ROM of your own, such as from a IIci, a Centris, or a
 Quadra. The Plus, SE, II, and IIx ROMs that suit Mini vMac won't start it, and neither
@@ -193,6 +200,9 @@ On Windows, there are a few differences:
   disks until it stops.
 - The window's close button does nothing on System 7.1, and Ctrl-Esc, which Windows uses
   for the Start menu, hasn't been tested. Choose Shut Down in the guest.
+
+On macOS, if macman is killed, the emulator keeps running and holds a lock on its disks.
+`macman run` refuses them, saying why, until you quit that emulator.
 
 ## Moving machines between hosts
 

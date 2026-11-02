@@ -1,7 +1,10 @@
 //! The Basilisk II adapter, fed a fixture source tree in place of macemu. The
 //! fixture follows upstream's build steps and stands in for the emulator with a
 //! script, which records how it was called and acts out what the real one does.
-#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#![cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64"),
+))]
 
 mod common;
 
@@ -122,7 +125,8 @@ impl Harness {
             sha256: sha256_file(&archive).unwrap(),
             ..pin()
         };
-        let paths = Paths::under(root.path());
+        // Whole, as macOS's temporary directory is behind a symbolic link.
+        let paths = Paths::under(&fs::canonicalize(root.path()).unwrap());
         let app = App::new(paths.clone(), Self::backends(&paths, &pin, &archive));
         let harness = Self {
             root,
@@ -447,6 +451,24 @@ fn a_shared_folder_goes_to_the_emulator_and_must_exist() {
     fs::remove_dir(&shared).unwrap();
     let error = h.cmd(&["run", "a"]).unwrap_err();
     assert!(error.to_string().contains("shared folder"), "{error}");
+}
+
+/// macman's own locks go with it, so only the emulator's show one left behind.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_disk_held_by_an_emulator_that_outlived_macman_is_refused() {
+    let h = harness!();
+    h.create("a");
+    let held = fs::File::open(h.paths.machine("a").join("system.dsk")).unwrap();
+    held.lock().unwrap();
+
+    let error = h.cmd(&["run", "a"]).unwrap_err();
+    assert!(error.to_string().contains("outlived macman"), "{error}");
+    assert_eq!(h.count("build"), 1);
+    assert!(!h.log().contains("run --config"), "{}", h.log());
+
+    drop(held);
+    assert_eq!(h.cmd(&["run", "a"]).unwrap(), 0);
 }
 
 /// Stands in for a backend whose host checks fail.
