@@ -111,11 +111,11 @@ pub fn add_system(
     if dest.exists() {
         bail!("a system image named {name:?} is already registered; pick another --name");
     }
+    // Held throughout, so the map, the copied volume, and the recorded source
+    // hash all describe one state of the source, for cooperating processes.
+    let _guard = disk::lock_image(paths, source, LockMode::Shared)?;
     let import = disk::plan_import(source, partition)?;
-    {
-        let _guard = disk::lock_image(paths, source, LockMode::Shared)?;
-        atomic_copy_range(source, import.offset, import.length, &dest)?;
-    }
+    atomic_copy_range(source, import.offset, import.length, &dest)?;
     // Check what was stored, not just the plan, before registering it.
     if let Err(error) = disk::detect_format(&dest) {
         let _ = std::fs::remove_file(&dest);
@@ -251,6 +251,24 @@ mod tests {
         assert!(err.to_string().contains("is for se"), "{err}");
         // Wrong size.
         assert!(check_rom_for_model(&rom(128 * 1024, vec![]), Model::II).is_err());
+    }
+
+    #[test]
+    fn add_system_locks_the_source_before_reading_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        // Unusable as a system, so planning first would report that instead.
+        let source = dir.path().join("blank.dsk");
+        std::fs::write(&source, vec![0u8; 4096]).unwrap();
+
+        let held = disk::lock_image(&paths, &source, LockMode::Exclusive).unwrap();
+        let err = add_system(&paths, &source, "s", None, None).unwrap_err();
+        assert!(err.to_string().contains("in use"), "{err}");
+        drop(held);
+
+        let err = add_system(&paths, &source, "s", None, None).unwrap_err();
+        assert!(err.to_string().contains("blank"), "{err}");
+        assert!(list_systems(&paths).unwrap().is_empty());
     }
 
     #[test]

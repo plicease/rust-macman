@@ -73,9 +73,10 @@ fn be32(bytes: &[u8]) -> u64 {
     u64::from(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
-/// The classic volume starting at `offset`, if there is one.
-fn volume_at(file: &mut File, offset: u64, size: u64) -> Result<Option<DiskFormat>> {
-    if offset + MDB_OFFSET + 2 > size {
+/// The classic volume starting at `offset`, if there is one. Reads nothing at
+/// or past `end`, so a short partition can't borrow its neighbour's bytes.
+fn volume_at(file: &mut File, offset: u64, end: u64) -> Result<Option<DiskFormat>> {
+    if offset + MDB_OFFSET + 2 > end {
         return Ok(None);
     }
     let mut signature = [0u8; 2];
@@ -127,7 +128,7 @@ fn partition_map(file: &mut File, block_size: u64, size: u64) -> Result<Option<V
         let offset = be32(&entry[8..]) * block_size;
         let length = be32(&entry[12..]) * block_size;
         let volume = if offset + length <= size {
-            volume_at(file, offset, size)?
+            volume_at(file, offset, offset + length)?
         } else {
             None
         };
@@ -746,6 +747,32 @@ mod tests {
         let mut corrupt = partitioned_image(&[(96, b"BD")]);
         corrupt[512 + 4..512 + 8].copy_from_slice(&u32::MAX.to_be_bytes());
         assert_eq!(classified(&corrupt), Classification::Unrecognized);
+    }
+
+    #[test]
+    fn volume_detection_stays_inside_the_partition() {
+        let with_blocks = |blocks: u32| {
+            // Partition 3 starts at block 96, and block 98 holds a signature.
+            let mut image = partitioned_image(&[(96, b"BD")]);
+            let entry = 3 * 512;
+            image[entry + 12..entry + 16].copy_from_slice(&blocks.to_be_bytes());
+            image
+        };
+        let volume_of = |image: &[u8]| match classified(image) {
+            Classification::Partitioned(partitions) => partitions[2].volume,
+            other => panic!("expected a partitioned image: {other:?}"),
+        };
+
+        // 1024 bytes: the signature would belong to whatever follows.
+        assert_eq!(volume_of(&with_blocks(2)), None);
+        // 1536 bytes: the signature is inside.
+        assert_eq!(volume_of(&with_blocks(3)), Some(DiskFormat::RawHfs));
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("image");
+        fs::write(&file, with_blocks(2)).unwrap();
+        let err = plan_import(&file, None).unwrap_err().to_string();
+        assert!(err.contains("no MFS or HFS volume"), "{err}");
     }
 
     #[test]
