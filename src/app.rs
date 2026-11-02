@@ -27,6 +27,42 @@ use std::process::ExitStatus;
 
 const SYSTEM_DISK: &str = "system.dsk";
 
+fn print_table(rows: &[Vec<String>], right_aligned: &[usize]) {
+    for line in table(rows, right_aligned) {
+        println!("{line}");
+    }
+}
+
+/// Lays out rows in columns two spaces apart. The columns in `right_aligned` are padded on
+/// the left. A row's last cell runs on, so it neither pads nor widens its column: that keeps
+/// long options or an error from pushing every other row across.
+fn table(rows: &[Vec<String>], right_aligned: &[usize]) -> Vec<String> {
+    let mut widths: Vec<usize> = Vec::new();
+    for row in rows {
+        for (column, cell) in row.iter().enumerate().take(row.len().saturating_sub(1)) {
+            if column == widths.len() {
+                widths.push(0);
+            }
+            widths[column] = widths[column].max(cell.chars().count());
+        }
+    }
+    rows.iter()
+        .map(|row| {
+            let cells = row.iter().enumerate().map(|(column, cell)| {
+                let width = widths.get(column).copied().unwrap_or(0);
+                if column + 1 == row.len() {
+                    cell.clone()
+                } else if right_aligned.contains(&column) {
+                    format!("{cell:>width$}")
+                } else {
+                    format!("{cell:<width$}")
+                }
+            });
+            cells.collect::<Vec<_>>().join("  ").trim_end().to_string()
+        })
+        .collect()
+}
+
 pub struct App {
     pub paths: Paths,
     pub backends: Backends,
@@ -143,47 +179,61 @@ impl App {
 
     fn list_machines(&self) -> Result<()> {
         let current = Config::load(&self.paths)?.current;
+        let mut rows = Vec::new();
         for name in list_dir(&self.paths.machines())? {
             let marker = if current.as_deref() == Some(&name) {
                 '*'
             } else {
                 ' '
             };
-            match Machine::load(&self.paths, &name) {
+            let label = format!("{marker} {name}");
+            rows.push(match Machine::load(&self.paths, &name) {
                 Ok(m) => {
                     let version = m.system.version.as_deref().unwrap_or("-");
                     let hardware = m
                         .hardware
                         .model
                         .map_or(m.emulator.backend.clone(), |model| model.to_string());
-                    println!(
-                        "{marker} {name}  {hardware} {} {}x{}x{} system {version}",
-                        m.hardware.memory, m.display.width, m.display.height, m.display.depth
-                    );
+                    vec![
+                        label,
+                        hardware,
+                        m.hardware.memory.clone(),
+                        format!(
+                            "{}x{}x{}",
+                            m.display.width, m.display.height, m.display.depth
+                        ),
+                        format!("system {version}"),
+                    ]
                 }
-                Err(e) => println!("{marker} {name}  (unreadable: {e:#})"),
-            }
+                Err(e) => vec![label, format!("(unreadable: {e:#})")],
+            });
         }
+        print_table(&rows, &[2]);
         Ok(())
     }
 
     fn list_builds(&self) -> Result<()> {
+        let mut rows = Vec::new();
         for key in list_dir(&self.paths.builds())? {
-            match read_toml::<Manifest>(&self.paths.builds().join(&key).join(MANIFEST)) {
-                Ok(m) => println!(
-                    "{}  {} {}  {}",
-                    &key[..12.min(key.len())],
-                    m.backend,
-                    m.revision,
-                    m.options.join(" ")
-                ),
-                Err(_) => println!("{key}  (no valid manifest)"),
-            }
+            rows.push(
+                match read_toml::<Manifest>(&self.paths.builds().join(&key).join(MANIFEST)) {
+                    Ok(m) => vec![
+                        key[..12.min(key.len())].to_string(),
+                        m.backend,
+                        m.revision,
+                        m.options.join(" "),
+                    ],
+                    // One cell, as the whole key would widen the column for every other row.
+                    Err(_) => vec![format!("{key}  (no valid manifest)")],
+                },
+            );
         }
+        print_table(&rows, &[]);
         Ok(())
     }
 
     fn list_roms(&self) -> Result<()> {
+        let mut rows = Vec::new();
         for rom in registry::list_roms(&self.paths)? {
             let models: Vec<_> = rom.models.iter().map(|m| m.name()).collect();
             let file = self.paths.roms().join(format!("{}.rom", rom.name));
@@ -194,29 +244,33 @@ impl App {
             } else {
                 "unrecognised".to_string()
             };
-            println!(
-                "{}  {}K  {models}  {}",
+            rows.push(vec![
                 rom.name,
-                rom.size / 1024,
-                &rom.sha256[..12]
-            );
+                format!("{}K", rom.size / 1024),
+                models,
+                rom.sha256[..12].to_string(),
+            ]);
         }
+        print_table(&rows, &[1]);
         Ok(())
     }
 
     fn list_systems(&self) -> Result<()> {
+        let mut rows = Vec::new();
         for system in registry::list_systems(&self.paths)? {
             let version = system.version.as_deref().unwrap_or("-");
             let (_, file) = registry::load_system(&self.paths, &system.name)?;
             let format = disk::detect_format(&file)
                 .map(registry::describe_format)
                 .unwrap_or("unknown format");
-            println!(
-                "{}  {version}  {}K  {format}",
-                system.name,
-                system.size / 1024
-            );
+            rows.push(vec![
+                system.name.clone(),
+                version.to_string(),
+                format!("{}K", system.size / 1024),
+                format.to_string(),
+            ]);
         }
+        print_table(&rows, &[2]);
         Ok(())
     }
 
@@ -870,4 +924,46 @@ fn exit_code(status: ExitStatus) -> u8 {
         }
     }
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::table;
+
+    fn rows(rows: &[&[&str]]) -> Vec<Vec<String>> {
+        rows.iter()
+            .map(|row| row.iter().map(|cell| cell.to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn columns_line_up() {
+        let rows = rows(&[&["a", "4M", "x"], &["long-name", "128M", "y"]]);
+        assert_eq!(
+            table(&rows, &[1]),
+            ["a            4M  x", "long-name  128M  y"]
+        );
+    }
+
+    #[test]
+    fn the_last_cell_of_a_row_doesnt_set_a_width() {
+        let rows = rows(&[
+            &["a", "plus", "4M"],
+            &["bb", "(unreadable: a long message)"],
+            &["a whole line in one cell"],
+        ]);
+        assert_eq!(
+            table(&rows, &[]),
+            [
+                "a   plus  4M",
+                "bb  (unreadable: a long message)",
+                "a whole line in one cell",
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_last_cells_leave_no_trailing_space() {
+        assert_eq!(table(&rows(&[&["a", "b", ""]]), &[]), ["a  b"]);
+    }
 }
