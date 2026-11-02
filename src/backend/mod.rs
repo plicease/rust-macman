@@ -1,8 +1,11 @@
 //! The narrow boundary between MacMan and an emulator (design §7).
 
+pub mod basilisk2;
 pub mod minivmac;
+pub mod source;
 
 use crate::machine::Machine;
+use crate::registry::{self, Rom};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -92,6 +95,22 @@ pub trait EmulatorBackend {
 
     /// Reject a disk list the backend cannot attach.
     fn validate_disks(&self, machine: &Machine, count: usize) -> Result<()>;
+
+    /// Reject a host this backend can't run on. Unlike [`Self::validate`], this
+    /// isn't part of importing, because a machine may just be passing through.
+    fn check_host(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Reject a ROM that `machine` cannot start from. `file` is its contents.
+    fn check_rom(&self, machine: &Machine, rom: &Rom, _file: &Path) -> Result<()> {
+        registry::check_rom_for_model(rom, machine.hardware.require_model()?)
+    }
+
+    /// Reject a disk this backend can't attach safely in this mode.
+    fn check_disk(&self, _path: &Path, _writable: bool) -> Result<()> {
+        Ok(())
+    }
 
     /// Build or reuse the emulator for `machine`.
     fn prepare(&self, machine: &Machine, verbose: bool) -> Result<Executable>;

@@ -3,7 +3,8 @@
 A [perlbrew](https://perlbrew.pl/)-inspired manager for named classic Macintosh
 emulation environments. It creates machines from your own ROMs and bootable disk
 images, builds the right [Mini vMac](https://www.gryphel.com/c/minivmac/) for each
-one, and launches them with disk-image safety checks.
+one, or [Basilisk II](#basilisk-ii) for later 68k systems, and launches them with
+disk-image safety checks.
 
 macman does not emulate anything itself, and it does not include or download Apple
 ROMs or system software. See [docs/DESIGN.md](docs/DESIGN.md) for the full design.
@@ -128,6 +129,55 @@ extracting or registering first. Blank images are fine, and `--any-format` attac
 can't identify, ideally with `--readonly`. See
 [docs/DISK_FORMATS.md](docs/DISK_FORMATS.md) for the details.
 
+## Basilisk II
+
+macman can also run [Basilisk II](https://github.com/kanjitalk755/macemu), for later 68k
+software, generally System 7 through Mac OS 8.1. Keep Mini vMac for early Macs and for
+exact models: Basilisk II imitates no particular Macintosh, and has no PowerPC, no Mac
+OS 8.5 or later, and no exact Quadra hardware. It has been tested with System 7.5.5, and
+not yet with Mac OS 8; see [docs/PLATFORMS.md](docs/PLATFORMS.md#basilisk-ii).
+
+It's for Linux x86-64 only. Besides what Mini vMac needs, it compiles with:
+
+```sh
+apt install build-essential autoconf automake pkg-config libsdl2-dev
+```
+
+It needs a 512K or 1M 32-bit clean ROM of your own, such as from a IIci, a Centris, or a
+Quadra. The Plus, SE, II, and IIx ROMs that suit Mini vMac won't start it, and neither
+will a Classic's.
+
+```sh
+macman rom add Quadra-650.ROM --name quadra650
+macman system add System-7.5.5.img --name system-7.5.5 --version 7.5.5
+macman create quadra --backend basilisk2 --rom quadra650 --system system-7.5.5 \
+  --memory 64M --display 800x600x16 --cpu 68040
+```
+
+| Option | Values | Default |
+|---|---|---|
+| `--cpu` | `68020`, `68030`, `68040` | `68040` |
+| `--no-fpu` | not with a 68040 | FPU on |
+| `--no-sound` | | sound on |
+| `--network` | `none`, `slirp` | `none` |
+| `--shared-folder DIR` | a host folder the guest can read and write | none |
+| `--memory` | `1M` to `1023M`, in whole megabytes | `32M` |
+| `--display` | 512x342 to 7680x4320, at depth 8, 16, or 32 | `640x480x8` |
+| `--scale` | 1 to 4; a window bigger than the screen is cut off | 2 |
+
+A 68040 presents a Quadra 900, which Mac OS 8 needs, and anything else a IIci. These
+are all run-time settings, so every machine on a host shares one build.
+
+`--disk`, `--readonly`, locks, `doctor`, `list --builds`, and `export` work as they do
+for Mini vMac. A Disk Copy image needs `--readonly`, since Basilisk II would write to it
+without updating its checksum. The shared folder belongs to the host, so `export` leaves
+it out. PRAM settings last for one run.
+
+Closing the window presses the Mac's power key, so the guest asks to shut down. Choose
+Shut Down, or press Ctrl-Esc to quit at once, which is as abrupt as a power cut. If
+macman is killed, it takes the emulator with it, because Basilisk II doesn't lock its
+disks on Linux and macman's locks would go. The guest's disks are then as after a crash.
+
 ## Moving machines between hosts
 
 `macman export` writes machines to an archive, with each one's current disks and the
@@ -156,7 +206,7 @@ them. See [docs/EXPORT_IMPORT.md](docs/EXPORT_IMPORT.md) for the details.
 
 ## Working offline
 
-macman downloads Mini vMac on the first build and verifies its SHA-256. That's 36.04 on
+macman downloads its emulators on the first build and verifies its SHA-256. That's 36.04 on
 Linux and Windows, and 37.03 on macOS, the first version with an ARM64 target. For a
 machine without network access, download the source archive for
 [36.04](https://www.gryphel.com/d/minivmac/minivmac-36.04/minivmac-36.04.src.tgz) or
@@ -168,7 +218,10 @@ yourself and point `config.toml` (in the configuration directory above) at it:
 source_archive = "/path/to/minivmac-36.04.src.tgz"
 ```
 
+Basilisk II is a [macemu commit](https://github.com/kanjitalk755/macemu/archive/f532be3d3d70b70f272b52050ce0889a4025d624.tar.gz),
+set the same way under `[basilisk2]`.
+
 ## License
 
-macman is MIT licensed. Mini vMac, which it fetches and compiles but does not
-include, is GPL-2.0.
+macman is MIT licensed. Mini vMac and Basilisk II, which it fetches and compiles but
+does not include, are GPL-2.0.

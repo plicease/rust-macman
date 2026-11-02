@@ -12,7 +12,9 @@ use crate::fsutil::{
     atomic_copy_range_checked, hex_digest, list_dir, publish_new, sha256_file, temp_sibling,
     validate_name, windows_can_name,
 };
-use crate::machine::{Disk, Display, Machine, SCHEMA_VERSION, SystemInfo, new_id, publish_dir};
+use crate::machine::{
+    Basilisk2Settings, Disk, Display, Machine, SCHEMA_VERSION, SystemInfo, new_id, publish_dir,
+};
 use crate::model::Model;
 use crate::paths::Paths;
 use crate::registry;
@@ -111,6 +113,10 @@ pub fn export(paths: &Paths, names: &[String], output: &Path) -> Result<usize> {
         if machine.id.is_none() {
             machine.id = Some(new_id());
             machine.save_to(&paths.machine(&machine.name))?;
+        }
+        if let Some(settings) = &mut machine.basilisk2 {
+            // It's a path on this host, and may say more than the owner meant to.
+            settings.shared_folder = None;
         }
         let (rom, rom_path) = registry::load_rom(paths, &machine.hardware.rom)?;
         registry::verify(&rom_path, "ROM", &rom.name, &rom.sha256)?;
@@ -533,10 +539,12 @@ fn unpack_blob<R: Read>(
 struct Fingerprint<'a> {
     backend: &'a str,
     revision: Option<String>,
-    model: Model,
+    model: Option<Model>,
     memory: &'a str,
     display: &'a Display,
     system: &'a SystemInfo,
+    /// Without the shared folder, which belongs to a host, not the machine.
+    basilisk2: Option<Basilisk2Settings>,
     disks: &'a [Disk],
 }
 
@@ -553,6 +561,10 @@ impl<'a> Fingerprint<'a> {
             memory: &machine.hardware.memory,
             display: &machine.display,
             system: &machine.system,
+            basilisk2: machine.basilisk2.clone().map(|settings| Basilisk2Settings {
+                shared_folder: None,
+                ..settings
+            }),
             disks: &machine.disks,
         }
     }
@@ -618,7 +630,7 @@ impl Importing<'_> {
 
         let blob = self.blob(&rom.sha256);
         let incoming = registry::rom_from_blob(&blob, &rom.name, &rom.sha256)?;
-        registry::check_rom_for_model(&incoming, machine.hardware.model)?;
+        backend.check_rom(machine, &incoming, &blob)?;
         let mut existing = self.local_rom(rom)?;
         if existing.is_none() && registry::rom_exists(self.paths, &rom.name) {
             if !registry::recover_rom(self.paths, &incoming)? {

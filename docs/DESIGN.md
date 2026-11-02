@@ -3,7 +3,7 @@
 **Status:** Design proposal  
 **Initial implementation:** Rust CLI, Linux x86-64 host  
 **Initial backend:** Mini vMac  
-**Future backends:** Basilisk II, SheepShaver  
+**Later backends:** Basilisk II, with SheepShaver in future  
 **Distribution:** GitHub source/releases; no crates.io publication required
 
 ## 1. Summary
@@ -199,6 +199,21 @@ Checked against the Mini vMac 37.03 source and real builds; see [SMOKE_TEST.md](
 - **Exit status:** signal numbers differ from Linux. SIGBUS is 10 rather than 7, which is reported as a host crash.
 - **Locks and sharing:** as on Linux, macman's locks last as long as it does. The emulator also takes `flock` on writable disks, so if macman dies and leaves it running, a second emulator refuses the disk itself.
 
+### Basilisk II
+
+Checked against the pinned macemu source and real builds; see [PLATFORMS.md](PLATFORMS.md#basilisk-ii). The module comment in `src/backend/basilisk2.rs` has the details. It differs from Mini vMac in these ways:
+
+- **Configuration:** everything is a run-time preference, so one build serves every machine on a host. A `[basilisk2]` table holds `cpu`, `fpu`, `sound`, `network`, and `shared_folder`, and `[hardware] model` is left out.
+- **Build:** `autogen.sh`, `configure`, and `make` under `BasiliskII/src/Unix`, with SDL 2 and without GTK. The key covers the source, the configure options, `g++`, and SDL.
+- **Launch:** each run writes a preferences file to its session directory and passes it with `--config`, so the user's own settings and XPRAM aren't touched. That file cuts lines at 256 bytes, so the ROM, disks, and shared folder go on the command line.
+- **Host files:** upstream's default `extfs` is `/`, a read-write volume of the whole host. macman always sets it, empty unless the machine has a shared folder.
+- **Exit status:** `QuitEmulator` always exits 0, even for a refused ROM, so macman reads the emulator's output, and counts an `ERROR:` line as a failure to start. GTK would have shown a dialog instead.
+- **Locks:** Linux builds take no locks of their own, so `PR_SET_PDEATHSIG` stops the emulator if macman dies, and the disks are never written with macman's locks gone. It sends `SIGKILL`, because SDL turns `SIGTERM` into the window closing, which only asks the guest to shut down.
+- **ROMs:** it starts only from 32-bit clean ROMs, which have no registered models, so backends check ROMs themselves.
+- **Disks:** it writes straight through a Disk Copy image, so those attach read-only or not at all.
+
+Shared code is limited to fetching a pinned source and publishing a build, in `src/backend/source.rs`. SheepShaver could use the same, but nothing here assumes so.
+
 ### Backend boundary
 
 Expose a narrow internal trait/interface, conceptually:
@@ -269,7 +284,7 @@ Use clear exit codes, human-friendly messages by default, and a `--verbose` opti
 
 ### Future
 
-- Basilisk II and SheepShaver adapters.
+- SheepShaver adapter.
 - Snapshot/copy-on-write support where feasible.
 - HFS file injection/extraction through safe external tooling.
 - Scripted guest test automation and CI smoke-testing.

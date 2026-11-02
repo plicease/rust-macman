@@ -326,6 +326,7 @@ dependencies = [
  "anyhow",
  "clap",
  "flate2",
+ "libc",
  "serde",
  "sha2",
  "tar",

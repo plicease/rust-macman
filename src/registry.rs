@@ -131,6 +131,22 @@ pub fn remove_rom(paths: &Paths, name: &str) -> Result<()> {
 /// The largest ROM macman knows, which is all it needs to read of a file.
 const MAX_ROM_SIZE: u64 = 512 * 1024;
 
+/// The version word of a 32-bit clean ROM, as in `ROM_VERSION_32` upstream.
+const ROM_VERSION_32: u16 = 0x067C;
+
+/// Whether a ROM of `size` bytes, starting `bytes`, is one Basilisk II takes on
+/// a 64-bit host: 32-bit clean, and 512K or 1M, which is what `CheckROM` and
+/// `main_unix.cpp` require. Those ROMs have no one checksum to test.
+pub fn is_32_bit_clean(bytes: &[u8], size: u64) -> bool {
+    matches!(size, 0x8_0000 | 0x10_0000)
+        && bytes.get(8..10) == Some(ROM_VERSION_32.to_be_bytes().as_slice())
+}
+
+/// [`is_32_bit_clean`], for a stored ROM.
+pub fn rom_file_is_32_bit_clean(file: &Path, size: u64) -> Result<bool> {
+    Ok(is_32_bit_clean(&read_rom_prefix(file)?, size))
+}
+
 /// Read up to the largest ROM size from the start of `path`.
 fn read_rom_prefix(path: &Path) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
@@ -192,10 +208,12 @@ fn add_rom_checked(
     let trailing_bytes = file_size - size;
     if models.is_empty() {
         reject_damaged_rom(source, file_size, &bytes)?;
-        eprintln!(
-            "warning: unrecognised ROM; no supported model can use it, so `macman create` will \
-             refuse it"
-        );
+        if !is_32_bit_clean(&bytes, file_size) {
+            eprintln!(
+                "warning: unrecognised ROM; no supported model can use it, so `macman create` \
+                 will refuse it"
+            );
+        }
     }
     if trailing_bytes > 0 {
         eprintln!(
@@ -395,6 +413,33 @@ mod tests {
             trailing_bytes: 0,
             source_sha256: None,
         }
+    }
+
+    #[test]
+    fn only_full_size_32_bit_clean_roms_suit_basilisk_ii() {
+        let mut bytes = vec![0u8; 64];
+        bytes[8..10].copy_from_slice(&[0x06, 0x7C]);
+        assert!(is_32_bit_clean(&bytes, 512 * 1024));
+        assert!(is_32_bit_clean(&bytes, 1024 * 1024));
+        assert!(!is_32_bit_clean(&bytes, 256 * 1024), "too small");
+        // A Mac IIx ROM's version, and a Classic's, which needs a slower build.
+        bytes[8..10].copy_from_slice(&[0x01, 0x78]);
+        assert!(!is_32_bit_clean(&bytes, 512 * 1024));
+        bytes[8..10].copy_from_slice(&[0x02, 0x76]);
+        assert!(!is_32_bit_clean(&bytes, 512 * 1024));
+        assert!(!is_32_bit_clean(&[], 512 * 1024));
+    }
+
+    #[test]
+    fn a_32_bit_clean_rom_imports_without_complaint_and_stays_whole() {
+        let mut bytes = vec![0u8; 1024 * 1024];
+        bytes[8..10].copy_from_slice(&[0x06, 0x7C]);
+        let (env, result) = import(&bytes);
+        let rom = result.unwrap();
+        assert!(rom.models.is_empty());
+        assert_eq!(rom.size, 1024 * 1024);
+        let stored = env.paths.roms().join("r.rom");
+        assert!(rom_file_is_32_bit_clean(&stored, rom.size).unwrap());
     }
 
     #[test]

@@ -55,6 +55,29 @@ The 37.03 archive is one GitHub generates from the tag, and the pin is its SHA-2
 GitHub ever changed how it generates archives, downloads would be refused rather than
 trusted, and the pin would need checking against the tag.
 
+## Basilisk II
+
+| Host | Status |
+|---|---|
+| Linux x86-64 | Yes: builds, and boots System 7.5.5 from a Quadra 650 ROM |
+| Windows x86-64 | No. Upstream builds only 32-bit MinGW, with MSYS2 |
+| macOS ARM64 | No. Upstream builds it with Xcode, and all of macman's work here is on Linux |
+
+macman treats Linux x86-64 as its one Basilisk II host, and anywhere else it refuses to
+create or run such a machine, while still importing one for passing on. No host counts
+as supported until [the smoke test](SMOKE_TEST.md#basilisk-ii) has passed there.
+
+Mac OS 8.1 hasn't been tried, for want of an image, and nor have sound on a real device,
+`slirp` networking, or full screen. System 7.5.5 was tested with 68030 and 68040 settings.
+
+The pin is commit `f532be3d3d70` of [kanjitalk755/macemu](https://github.com/kanjitalk755/macemu),
+the maintained fork, and its SHA-256 is that of the archive GitHub generates for it. If
+GitHub changed how it generates archives, downloads would be refused, not trusted.
+
+Upstream documents System 7 and Mac OS 8.0 and 8.1 on 32-bit clean ROMs. macman
+accepts those only: a Classic ROM needs a build with virtual addressing, and it's not
+what this backend is for.
+
 ## Release targets
 
 `.github/workflows/release.yml` lists its targets explicitly instead of using the
