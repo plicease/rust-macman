@@ -15,6 +15,7 @@ use anyhow::{Context, Result, bail};
 use std::fs;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 
 const SYSTEM_DISK: &str = "system.dsk";
 
@@ -353,15 +354,17 @@ impl App {
                 args.disks.len()
             );
         }
-        session.record(&SessionRecord {
+        let mut record = SessionRecord {
             machine: name.clone(),
             pid: std::process::id(),
+            outcome: None,
             writable_disks: disks
                 .iter()
                 .filter(|disk| disk.writable)
                 .map(|disk| disk.path.clone())
                 .collect(),
-        })?;
+        };
+        session.record(&record)?;
 
         let launched = backend.launch(&LaunchRequest {
             machine: &machine,
@@ -371,10 +374,21 @@ impl App {
             workdir: &session.dir,
             verbose,
         });
-        session.finish()?;
-        let status = launched?;
-        if !status.success() {
-            eprintln!("warning: emulator ended abnormally ({status}); disks were left in place");
+        let status = match launched {
+            Ok(status) => status,
+            Err(error) => {
+                record.outcome = Some("the emulator failed to start".to_string());
+                session.abandon(&record);
+                return Err(error);
+            }
+        };
+        match abnormal_outcome(status) {
+            None => session.finish()?,
+            Some(outcome) => {
+                eprintln!("warning: {outcome}; disks were left in place");
+                record.outcome = Some(outcome);
+                session.abandon(&record);
+            }
         }
         Ok(exit_code(status))
     }
@@ -409,9 +423,11 @@ impl App {
     fn sweep_stale_sessions(&self) -> Result<()> {
         for stale in disk::stale_sessions(&self.paths)? {
             eprintln!(
-                "warning: a previous run of {} (pid {}) did not shut down cleanly; its disks \
-                 were kept but may need checking:",
-                stale.record.machine, stale.record.pid
+                "warning: a previous run of {} (pid {}) ended abnormally: {}; its disks were \
+                 kept but may need checking:",
+                stale.record.machine,
+                stale.record.pid,
+                stale.record.describe()
             );
             for path in &stale.record.writable_disks {
                 eprintln!("  {}", path.display());
@@ -422,25 +438,8 @@ impl App {
     }
 
     fn doctor(&self, verbose: bool) -> Result<u8> {
-        let mut checks: Vec<Check> = Vec::new();
-        for backend in self.backends.iter() {
-            checks.extend(backend.doctor());
-        }
-        self.check_registry(&mut checks)?;
-        self.check_cache(&mut checks, verbose)?;
-        self.check_machines(&mut checks)?;
-        for stale in disk::stale_sessions(&self.paths)? {
-            checks.push(Check::warn(
-                format!(
-                    "an earlier run of {} ended abnormally",
-                    stale.record.machine
-                ),
-                "check its disks; the next `macman run` clears this notice",
-            ));
-        }
-
         let mut failed = false;
-        for check in &checks {
+        for check in &self.doctor_checks(verbose)? {
             let label = match check.level {
                 CheckLevel::Ok => "ok",
                 CheckLevel::Warn => "warn",
@@ -453,6 +452,27 @@ impl App {
             }
         }
         Ok(u8::from(failed))
+    }
+
+    pub fn doctor_checks(&self, verbose: bool) -> Result<Vec<Check>> {
+        let mut checks: Vec<Check> = Vec::new();
+        for backend in self.backends.iter() {
+            checks.extend(backend.doctor());
+        }
+        self.check_registry(&mut checks)?;
+        self.check_cache(&mut checks, verbose)?;
+        self.check_machines(&mut checks)?;
+        for stale in disk::stale_sessions(&self.paths)? {
+            checks.push(Check::warn(
+                format!(
+                    "an earlier run of {} ended abnormally: {}",
+                    stale.record.machine,
+                    stale.record.describe()
+                ),
+                "check its disks; the next `macman run` clears this notice",
+            ));
+        }
+        Ok(checks)
     }
 
     fn check_registry(&self, checks: &mut Vec<Check>) -> Result<()> {
@@ -569,7 +589,34 @@ fn confirm_delete(name: &str, disks: usize) -> Result<()> {
     Ok(())
 }
 
-fn exit_code(status: std::process::ExitStatus) -> u8 {
+/// Describe a run that didn't end normally, or `None` if it did.
+///
+/// Mini vMac's `main` always returns 0 and it installs no signal handlers. So
+/// a guest shutdown and a user quit are indistinguishable (both exit 0), while
+/// host-side trouble shows up as a signal or a non-zero code from the loader.
+fn abnormal_outcome(status: ExitStatus) -> Option<String> {
+    if status.success() {
+        return None;
+    }
+    if let Some(code) = status.code() {
+        return Some(format!("the emulator exited with code {code}"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        // SIGILL, SIGABRT, SIGBUS, SIGFPE, and SIGSEGV on Linux.
+        if let Some(signal) = status.signal() {
+            return Some(if matches!(signal, 4 | 6 | 7 | 8 | 11) {
+                format!("the emulator crashed on the host (signal {signal})")
+            } else {
+                format!("the emulator was killed by signal {signal}")
+            });
+        }
+    }
+    Some(format!("the emulator ended abnormally ({status})"))
+}
+
+fn exit_code(status: ExitStatus) -> u8 {
     if let Some(code) = status.code() {
         return code.clamp(0, 255) as u8;
     }

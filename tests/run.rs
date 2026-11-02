@@ -8,7 +8,9 @@ use clap::Parser;
 use common::{II_ROM_CHECKSUM, PLUS_ROM_CHECKSUM, write_disk, write_rom};
 use macman::app::App;
 use macman::backend::minivmac::{MiniVmac, SourcePin};
-use macman::backend::{Backends, Check, EmulatorBackend, Executable, LaunchRequest, ResolvedDisk};
+use macman::backend::{
+    Backends, Check, CheckLevel, EmulatorBackend, Executable, LaunchRequest, ResolvedDisk,
+};
 use macman::cli::Cli;
 use macman::disk::{LockMode, lock_image};
 use macman::fsutil::sha256_file;
@@ -38,7 +40,9 @@ struct MockState {
     /// Runs while the emulator is "running".
     during: Option<DuringLaunch>,
     exit: i32,
+    signal: i32,
     fail_prepare: bool,
+    fail_launch: bool,
 }
 
 #[derive(Clone, Default)]
@@ -71,6 +75,9 @@ impl EmulatorBackend for Mock {
         })
     }
     fn launch(&self, request: &LaunchRequest<'_>) -> Result<ExitStatus> {
+        if self.0.borrow().fail_launch {
+            bail!("cannot start emulator");
+        }
         let launch = Launch {
             workdir: request.workdir.to_path_buf(),
             rom: request.rom.to_path_buf(),
@@ -82,7 +89,7 @@ impl EmulatorBackend for Mock {
         }
         let mut state = self.0.borrow_mut();
         state.launches.push(launch);
-        Ok(ExitStatus::from_raw(state.exit << 8))
+        Ok(ExitStatus::from_raw(state.exit << 8 | state.signal))
     }
     fn doctor(&self) -> Vec<Check> {
         vec![]
@@ -292,32 +299,114 @@ fn running_machine_cannot_be_removed_or_cloned() {
     assert_eq!(mock.0.borrow().launches.len(), 1);
 }
 
-#[test]
-fn emulator_exit_code_is_propagated() {
-    let (h, mock) = Harness::mock();
-    mock.0.borrow_mut().exit = 3;
-    assert_eq!(h.cmd(&["run", "plus-a"]).unwrap(), 3);
+/// The one abnormal session left behind, as reported by `doctor`.
+fn assert_reported(h: &Harness, expected: &str) {
+    let stale = macman::disk::stale_sessions(&h.paths).unwrap();
+    assert_eq!(stale.len(), 1);
+    assert!(stale[0].record.describe().contains(expected));
+    assert_eq!(stale[0].record.writable_disks.len(), 1);
+
+    let checks = h.app.doctor_checks(false).unwrap();
+    let report = checks
+        .iter()
+        .find(|check| check.message.contains("ended abnormally"))
+        .expect("doctor reports the abnormal run");
+    assert_eq!(report.level, CheckLevel::Warn);
+    assert!(report.message.contains("plus-a"), "{}", report.message);
+    assert!(report.message.contains(expected), "{}", report.message);
+}
+
+/// The disks survive, nothing stays locked, and the next run clears the notice.
+fn assert_recovers(h: &Harness, mock: &Mock) {
+    assert!(h.system_disk("plus-a").exists());
+    let (exit, signal, fail) = {
+        let mut state = mock.0.borrow_mut();
+        let saved = (state.exit, state.signal, state.fail_launch);
+        state.exit = 0;
+        state.signal = 0;
+        state.fail_launch = false;
+        saved
+    };
+    assert!(exit != 0 || signal != 0 || fail);
+    assert_eq!(h.cmd(&["run", "plus-a"]).unwrap(), 0);
+    assert_eq!(session_count(&h.paths), 0);
     assert!(h.system_disk("plus-a").exists());
 }
 
 #[test]
-fn abnormal_session_is_reported_and_keeps_disks() {
-    let (h, _mock) = Harness::mock();
-    // What a killed macman leaves: a record and no lock holder.
+fn nonzero_exit_is_kept_for_doctor() {
+    let (h, mock) = Harness::mock();
+    mock.0.borrow_mut().exit = 3;
+    assert_eq!(h.cmd(&["run", "plus-a"]).unwrap(), 3);
+    assert_reported(&h, "exited with code 3");
+    assert_recovers(&h, &mock);
+}
+
+#[test]
+fn launch_failure_is_kept_for_doctor() {
+    let (h, mock) = Harness::mock();
+    mock.0.borrow_mut().fail_launch = true;
+    let error = h.cmd(&["run", "plus-a"]).unwrap_err();
+    assert!(error.to_string().contains("cannot start"), "{error}");
+    assert_reported(&h, "failed to start");
+    assert_recovers(&h, &mock);
+}
+
+#[test]
+fn host_crash_is_told_apart_from_being_killed() {
+    let (h, mock) = Harness::mock();
+    mock.0.borrow_mut().signal = 11; // SIGSEGV
+    assert_eq!(h.cmd(&["run", "plus-a"]).unwrap(), 139);
+    assert_reported(&h, "crashed on the host (signal 11)");
+    assert_recovers(&h, &mock);
+
+    mock.0.borrow_mut().signal = 15; // SIGTERM
+    assert_eq!(h.cmd(&["run", "plus-a"]).unwrap(), 143);
+    assert_reported(&h, "killed by signal 15");
+    assert_recovers(&h, &mock);
+}
+
+#[test]
+fn abnormal_run_keeps_throwaway_copies_until_cleared_but_never_touches_originals() {
+    let (h, mock) = Harness::mock();
+    let app_disk = write_disk(h.dir(), "tico68.dsk");
+    let before = sha256_file(&app_disk).unwrap();
+    mock.0.borrow_mut().exit = 1;
+    h.cmd(&[
+        "run",
+        "plus-a",
+        "--disk",
+        app_disk.to_str().unwrap(),
+        "--readonly",
+    ])
+    .unwrap();
+    assert_eq!(sha256_file(&app_disk).unwrap(), before);
+    // The lock must not outlive the run, or the disk stays stuck "in use".
+    assert!(lock_image(&h.paths, &app_disk, LockMode::Exclusive).is_ok());
+    assert_recovers(&h, &mock);
+    assert_eq!(sha256_file(&app_disk).unwrap(), before);
+}
+
+#[test]
+fn killed_macman_is_reported_and_keeps_disks() {
+    let (h, mock) = Harness::mock();
+    // What a killed macman leaves: a startup record and no lock holder.
     let session = macman::disk::Session::start(&h.paths, "plus-a").unwrap();
     session
         .record(&macman::disk::SessionRecord {
             machine: "plus-a".into(),
             pid: 1,
+            outcome: None,
             writable_disks: vec![h.system_disk("plus-a")],
         })
         .unwrap();
     drop(session);
-    assert_eq!(macman::disk::stale_sessions(&h.paths).unwrap().len(), 1);
+    assert_reported(&h, "macman stopped before the emulator did");
 
     h.cmd(&["run", "plus-a"]).unwrap();
     assert_eq!(session_count(&h.paths), 0);
     assert!(h.system_disk("plus-a").exists());
+    assert_eq!(mock.0.borrow().launches.len(), 1);
 }
 
 #[test]

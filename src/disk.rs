@@ -115,17 +115,30 @@ fn file_identity(path: &Path) -> Result<String> {
     Ok(sha256_bytes(path.to_string_lossy().as_bytes()))
 }
 
-/// Metadata for one live `run`; a session whose lock is free died uncleanly.
+/// Metadata for one `run`. A clean shutdown deletes it, so any record whose
+/// lock is free describes a run that ended abnormally.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub machine: String,
     pub pid: u32,
+    /// How the run ended, when macman lived to see it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
     /// Writable disks the session had attached.
     pub writable_disks: Vec<PathBuf>,
 }
 
+impl SessionRecord {
+    /// Why this run counts as abnormal.
+    pub fn describe(&self) -> &str {
+        self.outcome
+            .as_deref()
+            .unwrap_or("macman stopped before the emulator did")
+    }
+}
+
 /// A running session. Dropping it without [`Session::finish`] leaves the
-/// record behind, which is how the next run learns of an abnormal exit.
+/// record behind, as a killed macman would.
 #[derive(Debug)]
 pub struct Session {
     pub dir: PathBuf,
@@ -176,6 +189,15 @@ impl Session {
     pub fn finish(self) -> Result<()> {
         fs::remove_dir_all(&self.dir)
             .with_context(|| format!("cannot remove session {}", self.dir.display()))
+    }
+
+    /// End the session abnormally, leaving `record` for `doctor` and the next
+    /// `run`. If it can't be saved, the record from startup still marks the
+    /// session as abnormal, so this only warns.
+    pub fn abandon(self, record: &SessionRecord) {
+        if let Err(error) = self.record(record) {
+            eprintln!("warning: cannot update session record: {error:#}");
+        }
     }
 }
 
@@ -291,6 +313,7 @@ mod tests {
         let record = SessionRecord {
             machine: "m".into(),
             pid: 1,
+            outcome: None,
             writable_disks: vec![],
         };
 
