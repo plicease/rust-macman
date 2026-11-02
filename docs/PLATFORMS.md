@@ -7,7 +7,7 @@ Mini vMac there, launch it, and track it until it exits.
 | Platform | Backend works | Release binary |
 |---|---|---|
 | Linux x86-64 | Yes | Yes |
-| Linux i686 | No | Yes |
+| Linux i686 | No | **No, deferred** |
 | Linux ARM64 | No | **No, deferred** |
 | macOS ARM64 | Yes | Yes |
 | macOS x86-64 | No | **No, deferred** |
@@ -61,6 +61,8 @@ trusted, and the pin would need checking against the tag.
 reusable workflow's default matrix, so a change to that default can't publish a new
 platform unnoticed.
 
+- **Linux i686** (`i686-unknown-linux-gnu`) was published through 0.2.0, and is now left
+  out. It compiles, but the backend refuses the host, so it would only mislead.
 - **Linux ARM64** (`aarch64-unknown-linux-gnu`) was in the default matrix, and is now
   left out.
 - **macOS x86-64** (`x86_64-apple-darwin`) was never in the default matrix, so no such
@@ -69,6 +71,12 @@ platform unnoticed.
   out. It compiles, but the backend refuses the host, so it would only mislead.
 
 ## Before enabling a deferred target
+
+### Linux i686
+
+- Map the host to upstream's `lx86` target, and accept a 32-bit `gcc`.
+- Test build, cache reuse, launch, and exit tracking on a 32-bit toolchain.
+- Add the target to `release.yml` and update the tests in `tests/release_targets.rs`.
 
 ### Linux ARM64
 
