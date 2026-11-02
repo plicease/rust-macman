@@ -25,8 +25,8 @@ Run `macman doctor` to check your setup.
 macman rom add ~/roms/MacPlus.rom --name plus-v3
 macman system add ~/images/System-6.0.8.dsk --name system-6.0.8 --version 6.0.8
 
-macman create wombat-6 --model plus --rom plus-v3 --system system-6.0.8 --memory 4M
-macman use wombat-6
+macman create mac-plus --model plus --rom plus-v3 --system system-6.0.8 --memory 4M
+macman use mac-plus
 macman run
 ```
 
@@ -38,7 +38,7 @@ configuration, reuse that build.
 To try a freshly built disk image without saving anything to the machine:
 
 ```sh
-macman run wombat-6 --disk ./build/tico68.dsk --readonly
+macman run mac-plus --disk ./build/tico68.dsk --readonly
 ```
 
 With `--readonly`, the emulator gets a read-only throwaway copy, so your file can't
