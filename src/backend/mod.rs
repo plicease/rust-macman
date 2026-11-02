@@ -113,6 +113,11 @@ pub trait EmulatorBackend {
         Ok(())
     }
 
+    /// Whether the emulator finds the volume in a partitioned disk by itself.
+    fn mounts_partitioned_disks(&self) -> bool {
+        false
+    }
+
     /// Build or reuse the emulator for `machine`.
     fn prepare(&self, machine: &Machine, verbose: bool) -> Result<Executable>;
 

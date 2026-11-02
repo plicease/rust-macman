@@ -59,7 +59,7 @@ trusted, and the pin would need checking against the tag.
 
 | Host | Status |
 |---|---|
-| Linux x86-64 | Yes: builds, and boots System 7.5.5 from a Quadra 650 ROM |
+| Linux x86-64 | Yes: builds, and boots System 7.5.5 and Mac OS 8.1 from a Quadra 650 ROM |
 | Windows x86-64 | Yes: builds, and boots System 7.1 from a Quadra 650 ROM with a 68030 setting |
 | macOS ARM64 | Yes: builds, and boots System 7.1 from a Quadra 650 ROM with a 68030 setting |
 
@@ -67,9 +67,11 @@ On any other host macman refuses to create or run such a machine, while still im
 one for passing on. No host counts as supported until
 [the smoke test](SMOKE_TEST.md#basilisk-ii) has passed there.
 
-Mac OS 8.1 hasn't been tried, for want of an image, and nor have `slirp` networking or
-full screen. System 7.5.5 was tested on Linux with 68030 and 68040 settings. Sound on a
-real device has been tried only on Linux, where System 7.5.5 played its startup chime.
+Mac OS 8.1 was tried on Linux only, with a 68040 setting: a System 7.5.5 machine was
+upgraded from the 8.1 CD image, attached with `--disk`, and it boots and shuts down
+cleanly. `slirp` networking and full screen haven't been tried. System 7.5.5 was tested on
+Linux with 68030 and 68040 settings. Sound on a real device has been tried only on Linux,
+where System 7.5.5 played its startup chime.
 
 On Windows, upstream builds only 32-bit MinGW with MSYS2, and macman doesn't follow it. It
 compiles a 64-bit static emulator itself, with MinGW-w64 and the official

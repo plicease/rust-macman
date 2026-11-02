@@ -118,7 +118,7 @@ macman create q7b --backend basilisk2 --rom quadra650 --system system-7.5.5 --me
 | `macman create qs --backend basilisk2 ... --shared-folder "a folder"`, then run it | A `Unix` volume holds that folder's files and no others. |
 | `macman create q2 --backend basilisk2 --rom <a IIx ROM> ...` | Refused, naming the ROMs it needs. |
 | Run a ROM macman accepts but the emulator refuses | `macman run` fails, though the emulator exits 0. |
-| `macman create q8 --backend basilisk2 ...` with a Mac OS 8.1 image | Boots to the Finder. Note the result here if there's no such image. |
+| `macman run q8 --disk MacOS8_1.iso --readonly`, with `q8` a 7.5.5 machine | The CD mounts in the guest. Its installer upgrades the machine, which then boots Mac OS 8.1 and shuts down with exit code 0. |
 | `macman import` an archive of `q7` into empty directories, then `macman run q7` | No compiling until the run, and then it boots. |
 
 On Windows, these replace the matching steps:

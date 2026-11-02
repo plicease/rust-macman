@@ -373,6 +373,25 @@ fn a_readonly_extra_disk_cannot_change_its_source() {
 }
 
 #[test]
+fn a_partitioned_disk_is_left_for_the_emulator_to_mount() {
+    let h = harness!();
+    h.create("a");
+    let mut image = vec![0u8; 256 * 512];
+    image[..4].copy_from_slice(b"ER\x02\x00");
+    image[512..514].copy_from_slice(b"PM");
+    image[512 + 7] = 1; // One entry in the map.
+    image[512 + 11] = 64; // Its first block.
+    image[512 + 15] = 128; // Its length.
+    image[512 + 48..512 + 57].copy_from_slice(b"Apple_HFS");
+    let extra = h.root.path().join("whole.img");
+    fs::write(&extra, image).unwrap();
+
+    let path = extra.to_str().unwrap();
+    h.cmd(&["run", "a", "--disk", path, "--readonly"]).unwrap();
+    assert!(h.log().contains("--disk *"), "{}", h.log());
+}
+
+#[test]
 fn a_refusal_that_exits_zero_is_still_a_failure() {
     let h = harness!();
     h.create("a");

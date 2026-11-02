@@ -681,6 +681,10 @@ impl EmulatorBackend for Basilisk2 {
         Ok(())
     }
 
+    fn mounts_partitioned_disks(&self) -> bool {
+        true
+    }
+
     fn prepare(&self, machine: &Machine, verbose: bool) -> Result<Executable> {
         self.check_host()?;
         self.validate(machine)?;

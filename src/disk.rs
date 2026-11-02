@@ -203,7 +203,13 @@ pub fn classify(path: &Path) -> Result<Classification> {
         return Ok(Unrecognized);
     }
     if head.starts_with(b"ER") {
-        let block_size = be16(&head[2..]);
+        // A bootable CD says 2048, but holds a whole map in 512-byte blocks, and the entries
+        // of that map land among those of a 2048-byte one. Upstream reads the 512-byte map.
+        let block_size = if head.get(512..514) == Some(b"PM") {
+            BLOCK
+        } else {
+            be16(&head[2..])
+        };
         if block_size >= BLOCK
             && block_size.is_multiple_of(BLOCK)
             && let Some(partitions) = partition_map(&mut file, block_size, size)?
@@ -863,6 +869,17 @@ mod tests {
         let mut corrupt = partitioned_image(&[(96, b"BD")]);
         corrupt[512 + 4..512 + 8].copy_from_slice(&u32::MAX.to_be_bytes());
         assert_eq!(classified(&corrupt), Classification::Unrecognized);
+    }
+
+    #[test]
+    fn a_map_in_512_byte_blocks_wins_over_the_stated_block_size() {
+        let mut image = partitioned_image(&[(96, b"BD")]);
+        image[2..4].copy_from_slice(&2048u16.to_be_bytes());
+        let Classification::Partitioned(partitions) = classified(&image) else {
+            panic!("expected a partitioned image");
+        };
+        assert_eq!(partitions[2].offset, 96 * 512);
+        assert_eq!(partitions[2].volume, Some(DiskFormat::RawHfs));
     }
 
     #[test]

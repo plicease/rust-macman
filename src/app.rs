@@ -528,7 +528,10 @@ impl App {
         for path in &args.disks {
             drop(disk::lock_image(&self.paths, path, LockMode::Shared)?);
             backend.check_disk(path, !args.readonly)?;
-            disk::check_attachable(path, args.any_format, !args.readonly)?;
+            let partitioned = matches!(disk::classify(path)?, Classification::Partitioned(_));
+            if !(partitioned && backend.mounts_partitioned_disks()) {
+                disk::check_attachable(path, args.any_format, !args.readonly)?;
+            }
         }
         backend.validate_disks(&machine, saved_disks.len() + args.disks.len())?;
 
