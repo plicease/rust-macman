@@ -329,6 +329,34 @@ fn system_add_refuses_blank_and_warns_about_unbootable_volumes() {
 }
 
 #[test]
+fn rom_with_trailing_data_works_and_says_so() {
+    let env = Env::new();
+    let rom = write_rom(env.path(), "vMac.ROM", PLUS_ROM_CHECKSUM, 128 * 1024);
+    let mut bytes = fs::read(&rom).unwrap();
+    bytes.extend_from_slice(&[0xAA; 7504]);
+    fs::write(&rom, &bytes).unwrap();
+
+    let output = env.run(&["rom", "add", rom.to_str().unwrap(), "--name", "plus-v3"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("ignoring 7504 extra bytes"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fs::read(&rom).unwrap(), bytes, "the source is left alone");
+
+    let disk = write_disk(env.path(), "sys.dsk");
+    env.ok(&["system", "add", disk.to_str().unwrap(), "--name", "sys"]);
+    env.ok(&[
+        "create", "m", "--model", "plus", "--rom", "plus-v3", "--system", "sys",
+    ]);
+    assert!(
+        env.ok(&["rom", "list"])
+            .contains("plus-v3  128K  512ke/plus")
+    );
+}
+
+#[test]
 fn readonly_requires_a_disk() {
     let output = Env::new().run(&["run", "m", "--readonly"]);
     assert_eq!(output.status.code(), Some(2));
