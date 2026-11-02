@@ -10,7 +10,7 @@ use crate::backend::Backends;
 use crate::disk::{self, ImageLock, LockMode};
 use crate::fsutil::{
     atomic_copy_range_checked, hex_digest, list_dir, publish_new, sha256_file, temp_sibling,
-    validate_name,
+    validate_name, windows_can_name,
 };
 use crate::machine::{Disk, Display, EmulatorConfig, Machine, SCHEMA_VERSION, SystemInfo, new_id};
 use crate::model::Model;
@@ -380,8 +380,13 @@ fn validate_disk_path(path: &str) -> Result<()> {
     let safe_components = Path::new(path)
         .components()
         .all(|c| matches!(c, Component::Normal(_)));
-    // These mean something on some other host's filesystem.
-    let portable = !path.is_empty() && !path.contains(['\\', ':']);
+    // These mean something on some other host's filesystem, so they're refused
+    // everywhere: an archive made here may be imported on Windows.
+    let portable = !path.is_empty()
+        && !path.contains(['\\', ':'])
+        && path
+            .split('/')
+            .all(|part| windows_can_name(part) && !part.ends_with(' '));
     if !safe_components || !portable || path.eq_ignore_ascii_case("machine.toml") {
         bail!("the manifest has an unsafe disk path {path:?}");
     }

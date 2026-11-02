@@ -110,7 +110,8 @@ exFAT drive, export elsewhere and copy it.
   a decompression bomb can do.
 - Names in the manifest follow the rules for machine and ROM names. Disk paths must be
   relative, with no `..`, backslashes, or colons, and must not name `machine.toml` or
-  collide with each other under case folding.
+  collide with each other under case folding. On every host, they also can't use
+  Windows device names or end in a dot or space, because an archive may reach Windows.
 
 Everything unpacks into `staging/` and is verified before anything else is touched.
 A machine is assembled there and moved into place with a single rename, and each copy

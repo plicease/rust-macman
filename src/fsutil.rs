@@ -184,7 +184,7 @@ pub fn validate_name(kind: &str, name: &str) -> Result<()> {
 
 /// Device names are reserved whatever follows the first dot, and a trailing
 /// dot is silently dropped, which would make two names one directory.
-fn windows_can_name(name: &str) -> bool {
+pub fn windows_can_name(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
     let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || (stem.len() == 4

@@ -144,6 +144,7 @@ impl Host {
             for entry in entries {
                 let path = entry.unwrap().path();
                 let relative = path.strip_prefix(root).unwrap().display().to_string();
+                let relative = relative.replace('\\', "/");
                 if relative == "import.lock" || relative == "locks" {
                     continue;
                 }
@@ -188,7 +189,7 @@ fn read_entries(archive: &str) -> Vec<(String, Vec<u8>)> {
         .unwrap()
         .map(|entry| {
             let mut entry = entry.unwrap();
-            let name = entry.path().unwrap().display().to_string();
+            let name = String::from_utf8(entry.path_bytes().into_owned()).unwrap();
             let mut bytes = Vec::new();
             entry.read_to_end(&mut bytes).unwrap();
             (name, bytes)
@@ -807,6 +808,11 @@ fn refuses_sizes_beyond_the_limits_before_reading_the_data() {
 #[test]
 fn refuses_hostile_manifests() {
     let (_source, archive) = honest();
+    for path in ["CON.dsk", "sub/nul", "system.dsk.", "system.dsk "] {
+        let edit =
+            |text: String| text.replace("path = \"system.dsk\"", &format!("path = \"{path}\""));
+        assert_refused(&with_manifest(&archive, edit), "unsafe disk path");
+    }
     let cases: &[(&str, &str, &str)] = &[
         (
             "path = \"system.dsk\"",
