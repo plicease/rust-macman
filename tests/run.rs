@@ -7,6 +7,7 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use common::{II_ROM_CHECKSUM, PLUS_ROM_CHECKSUM, write_disk, write_partitioned_disk, write_rom};
 use macman::app::App;
+#[cfg(unix)]
 use macman::backend::minivmac::{MiniVmac, SourcePin};
 use macman::backend::{
     Backends, Check, CheckLevel, EmulatorBackend, Executable, LaunchRequest, ResolvedDisk,
@@ -18,10 +19,16 @@ use macman::machine::Machine;
 use macman::paths::Paths;
 use std::cell::RefCell;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
+#[cfg(windows)]
+use std::os::windows::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+#[cfg(unix)]
+use std::process::Command;
+use std::process::ExitStatus;
 use std::rc::Rc;
 use tempfile::TempDir;
 
@@ -47,6 +54,25 @@ struct MockState {
 
 #[derive(Clone, Default)]
 struct Mock(Rc<RefCell<MockState>>);
+
+#[cfg(unix)]
+fn raw_status(exit: i32, signal: i32) -> ExitStatus {
+    ExitStatus::from_raw(exit << 8 | signal)
+}
+
+/// `signal` holds the NTSTATUS that ends a process abnormally on Windows.
+#[cfg(windows)]
+fn raw_status(exit: i32, signal: i32) -> ExitStatus {
+    ExitStatus::from_raw(if signal != 0 { signal } else { exit } as u32)
+}
+
+/// A second name for `target`. Windows users can rarely create symlinks.
+fn alias_file(target: &Path, alias: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, alias).unwrap();
+    #[cfg(not(unix))]
+    fs::hard_link(target, alias).unwrap();
+}
 
 impl EmulatorBackend for Mock {
     fn name(&self) -> &str {
@@ -89,7 +115,7 @@ impl EmulatorBackend for Mock {
         }
         let mut state = self.0.borrow_mut();
         state.launches.push(launch);
-        Ok(ExitStatus::from_raw(state.exit << 8 | state.signal))
+        Ok(raw_status(state.exit, state.signal))
     }
     fn doctor(&self) -> Vec<Check> {
         vec![]
@@ -241,7 +267,7 @@ fn conflicting_writable_attachment_is_blocked() {
     h.create("plus-b");
     let shared = write_disk(h.dir(), "shared.dsk");
     let alias = h.dir().join("alias.dsk");
-    std::os::unix::fs::symlink(&shared, &alias).unwrap();
+    alias_file(&shared, &alias);
 
     // Another process's emulator holds the disk.
     let held = lock_image(&h.paths, &shared, LockMode::Exclusive).unwrap();
@@ -352,6 +378,26 @@ fn launch_failure_is_kept_for_doctor() {
     assert_recovers(&h, &mock);
 }
 
+#[cfg(windows)]
+#[test]
+fn host_crash_is_told_apart_from_being_interrupted() {
+    let (h, mock) = Harness::mock();
+    mock.0.borrow_mut().signal = 0xC000_0005_u32 as i32; // STATUS_ACCESS_VIOLATION
+    assert_eq!(
+        h.cmd(&["run", "plus-a"]).unwrap(),
+        1,
+        "a crash is a failure"
+    );
+    assert_reported(&h, "crashed on the host (status 0xC0000005)");
+    assert_recovers(&h, &mock);
+
+    mock.0.borrow_mut().signal = 0xC000_013A_u32 as i32; // STATUS_CONTROL_C_EXIT
+    assert_eq!(h.cmd(&["run", "plus-a"]).unwrap(), 1);
+    assert_reported(&h, "interrupted (0xC000013A)");
+    assert_recovers(&h, &mock);
+}
+
+#[cfg(unix)]
 #[test]
 fn host_crash_is_told_apart_from_being_killed() {
     let (h, mock) = Harness::mock();
@@ -503,6 +549,7 @@ fn too_many_disks_are_refused_before_launch() {
 /// Stand-ins for upstream's configuration tool and build. The tool records its
 /// arguments and emits a script installing the Makefile; make installs a fake
 /// emulator that records how it was called.
+#[cfg(unix)]
 const FIXTURE_TOOL: &str = r#"
 #include <stdio.h>
 int main(int argc, char **argv) {
@@ -514,15 +561,19 @@ int main(int argc, char **argv) {
     return 0;
 }
 "#;
+#[cfg(unix)]
 const FIXTURE_MAKEFILE: &str = "minivmac:\n\techo build >> LOG\n\tcp fake-emulator minivmac\n";
+#[cfg(unix)]
 const FIXTURE_EMULATOR: &str = "#!/bin/sh\necho \"run $*\" >> LOG\n";
 
+#[cfg(unix)]
 fn has_build_tools() -> bool {
     ["gcc", "make", "tar", "bash"]
         .iter()
         .all(|tool| Command::new(tool).arg("--version").output().is_ok())
 }
 
+#[cfg(unix)]
 fn real_adapter() -> Option<(Harness, PathBuf)> {
     if !has_build_tools() {
         eprintln!("skipping: build tools not installed");
@@ -568,6 +619,7 @@ fn real_adapter() -> Option<(Harness, PathBuf)> {
 }
 
 #[test]
+#[cfg(unix)]
 fn real_adapter_builds_once_per_configuration_and_launches() {
     let Some((h, log)) = real_adapter() else {
         return;
