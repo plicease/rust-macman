@@ -10,8 +10,10 @@ ROMs or system software. See [docs/DESIGN.md](docs/DESIGN.md) for the full desig
 
 ## Requirements
 
-Linux x86-64 with an X11 session, plus what Mini vMac needs to compile: `gcc`,
-`make`, `bash`, `tar`, and the X11 headers. On Debian or Ubuntu:
+macman can currently build and run Mini vMac only on Linux x86-64; see
+[docs/PLATFORMS.md](docs/PLATFORMS.md). That needs an X11 session, plus what Mini
+vMac needs to compile: `gcc`, `make`, `bash`, `tar`, and the X11 headers. On Debian or
+Ubuntu:
 
 ```sh
 apt install build-essential libx11-dev libxext-dev curl
