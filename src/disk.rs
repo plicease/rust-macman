@@ -2,7 +2,7 @@
 //! session records used to spot abnormal exits.
 
 use crate::fsutil::{
-    atomic_copy, atomic_copy_range_checked, list_dir, read_toml, sha256_bytes, write_toml,
+    HeldLock, atomic_copy, atomic_copy_range_checked, list_dir, read_toml, sha256_bytes, write_toml,
 };
 use crate::paths::Paths;
 use anyhow::{Context, Result, anyhow, bail};
@@ -511,7 +511,7 @@ pub fn has_boot_blocks(path: &Path) -> Result<bool> {
 /// so symlinks and hard links to one image contend for the same lock.
 #[derive(Debug)]
 pub struct ImageLock {
-    _file: File,
+    _lock: HeldLock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -546,7 +546,9 @@ pub fn lock_image(paths: &Paths, image: &Path, mode: LockMode) -> Result<ImageLo
     };
     match result {
         Ok(()) if held_by_emulator(image) => Err(in_use()),
-        Ok(()) => Ok(ImageLock { _file: file }),
+        Ok(()) => Ok(ImageLock {
+            _lock: HeldLock::new(file),
+        }),
         Err(TryLockError::WouldBlock) => Err(in_use()),
         Err(TryLockError::Error(e)) => {
             Err(e).with_context(|| format!("cannot lock {}", image.display()))
@@ -630,7 +632,7 @@ impl SessionRecord {
 #[derive(Debug)]
 pub struct Session {
     pub dir: PathBuf,
-    _lock: File,
+    _lock: HeldLock,
 }
 
 const SESSION_LOCK: &str = "session.lock";
@@ -650,7 +652,10 @@ impl Session {
         // and treats a recorded session as dead only if this lock is free.
         let lock = File::create(dir.join(SESSION_LOCK)).context("cannot create session lock")?;
         lock.try_lock().context("cannot lock new session")?;
-        Ok(Self { dir, _lock: lock })
+        Ok(Self {
+            dir,
+            _lock: HeldLock::new(lock),
+        })
     }
 
     pub fn record(&self, record: &SessionRecord) -> Result<()> {

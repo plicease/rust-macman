@@ -9,8 +9,8 @@
 use crate::backend::Backends;
 use crate::disk::{self, ImageLock, LockMode};
 use crate::fsutil::{
-    atomic_copy_range_checked, hex_digest, list_dir, publish_new, sha256_file, temp_sibling,
-    validate_name, windows_can_name,
+    HeldLock, atomic_copy_range_checked, hex_digest, list_dir, publish_new, sha256_file,
+    temp_sibling, validate_name, windows_can_name,
 };
 use crate::machine::{
     Basilisk2Settings, Disk, Display, Machine, SCHEMA_VERSION, SystemInfo, new_id, publish_dir,
@@ -281,6 +281,7 @@ pub fn import(
             return Err(error).context("cannot take the import lock");
         }
     }
+    let _lock = HeldLock::new(lock);
     if paths.staging().exists() {
         fs::remove_dir_all(paths.staging()).context("cannot clear an abandoned import")?;
     }
