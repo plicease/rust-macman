@@ -178,8 +178,7 @@ macman create quadra --backend basilisk2 --rom quadra650 --system system-7.5.5 \
 | `--scale` | 1 to 4; a window bigger than the screen is cut off | 2 |
 
 A 68040 presents a Quadra 900, which Mac OS 8 needs, and anything else a IIci. These
-are all run-time settings, so every machine on a host shares one build. `slirp` didn't
-work when tried on Mac OS 8.1 on macOS, though it does on Linux and Windows.
+are all run-time settings, so every machine on a host shares one build.
 
 `--disk`, `--readonly`, locks, `doctor`, `list --builds`, and `export` work as they do
 for Mini vMac. A Disk Copy image needs `--readonly`, since Basilisk II would write to it
