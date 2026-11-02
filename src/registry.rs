@@ -71,6 +71,14 @@ fn read_rom_prefix(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// The models `bytes` is a genuine ROM for.
+fn genuine_models(bytes: &[u8]) -> Vec<Model> {
+    ALL_MODELS
+        .into_iter()
+        .filter(|model| model.accepts_rom(bytes))
+        .collect()
+}
+
 /// The models whose header checksum `bytes` claims, genuine or not.
 fn claimed_models(bytes: &[u8]) -> Vec<Model> {
     let Some(header) = bytes.first_chunk::<4>() else {
@@ -84,19 +92,31 @@ fn claimed_models(bytes: &[u8]) -> Vec<Model> {
 }
 
 pub fn add_rom(paths: &Paths, source: &Path, name: &str) -> Result<Rom> {
+    add_rom_checked(paths, source, name, || {})
+}
+
+/// [`add_rom`], with `before_copy` running between validating the source and
+/// copying it, the window in which a process ignoring macman's lock could
+/// change it.
+fn add_rom_checked(
+    paths: &Paths,
+    source: &Path,
+    name: &str,
+    before_copy: impl FnOnce(),
+) -> Result<Rom> {
     validate_name("ROM", name)?;
     let dest = rom_path(paths, name);
     if dest.exists() {
         bail!("a ROM named {name:?} is already registered; pick another --name");
     }
+    // Held throughout, so identification, the copy, and the recorded source
+    // hash all describe one state of the source, for cooperating processes.
+    let _guard = disk::lock_image(paths, source, LockMode::Shared)?;
     let file_size = std::fs::metadata(source)
         .with_context(|| format!("cannot read ROM {}", source.display()))?
         .len();
     let bytes = read_rom_prefix(source)?;
-    let models: Vec<_> = ALL_MODELS
-        .into_iter()
-        .filter(|model| model.accepts_rom(&bytes))
-        .collect();
+    let models = genuine_models(&bytes);
 
     // A genuine ROM fixes the size, so anything beyond it is extra.
     let size = models.first().map_or(file_size, |model| model.rom_size());
@@ -116,7 +136,17 @@ pub fn add_rom(paths: &Paths, source: &Path, name: &str) -> Result<Rom> {
         );
     }
 
+    before_copy();
     atomic_copy_range(source, 0, size, &dest)?;
+    // Check what was stored, not just what was read, before registering it.
+    let stored = read_rom_prefix(&dest)?;
+    if stored.len() as u64 != size.min(MAX_ROM_SIZE) || genuine_models(&stored) != models {
+        let _ = std::fs::remove_file(&dest);
+        bail!(
+            "{} changed while it was being imported; nothing was registered",
+            source.display()
+        );
+    }
     let sha256 = sha256_file(&dest)?;
     let existing = list_roms(paths)?;
     if let Some(same) = existing.iter().find(|rom| rom.sha256 == sha256) {
@@ -414,6 +444,84 @@ mod tests {
         let (env, result) = import(&damaged);
         assert!(result.unwrap_err().to_string().contains("corrupted"));
         assert!(!env.paths.roms().join("r.rom").exists());
+    }
+
+    #[test]
+    fn add_rom_locks_the_source_before_reading_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        // Truncated, so reading first would report that instead.
+        let source = dir.path().join("vMac.ROM");
+        std::fs::write(&source, &synthetic_rom(PLUS_V3, K128)[..100_000]).unwrap();
+
+        let held = disk::lock_image(&paths, &source, LockMode::Exclusive).unwrap();
+        let err = add_rom(&paths, &source, "r").unwrap_err();
+        assert!(err.to_string().contains("in use"), "{err}");
+        drop(held);
+
+        let err = add_rom(&paths, &source, "r").unwrap_err();
+        assert!(err.to_string().contains("truncated"), "{err}");
+    }
+
+    /// Import a valid ROM while `change` rewrites the source mid-import, as
+    /// something ignoring macman's lock might.
+    fn import_racing(change: impl FnOnce(&Path)) -> (tempfile::TempDir, Paths, Result<Rom>) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let source = dir.path().join("vMac.ROM");
+        std::fs::write(&source, synthetic_rom(PLUS_V3, K128)).unwrap();
+        let result = add_rom_checked(&paths, &source, "r", || change(&source));
+        (dir, paths, result)
+    }
+
+    fn assert_nothing_registered(paths: &Paths) {
+        assert!(!paths.roms().join("r.rom").exists());
+        assert!(!paths.roms().join("r.toml").exists());
+        assert!(list_roms(paths).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_source_changed_mid_import_is_not_registered() {
+        let (_dir, paths, result) = import_racing(|source| {
+            let mut bytes = std::fs::read(source).unwrap();
+            bytes[5000] ^= 1;
+            std::fs::write(source, bytes).unwrap();
+        });
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("changed while it was being imported"), "{err}");
+        assert_nothing_registered(&paths);
+    }
+
+    #[test]
+    fn a_source_swapped_for_another_model_mid_import_is_not_registered() {
+        let (_dir, paths, result) = import_racing(|source| {
+            std::fs::write(source, synthetic_rom(0xB2E3_62A8, K128)).unwrap();
+        });
+        assert!(result.is_err());
+        assert_nothing_registered(&paths);
+    }
+
+    #[test]
+    fn a_source_cut_short_mid_import_is_not_registered() {
+        let (_dir, paths, result) = import_racing(|source| {
+            let bytes = std::fs::read(source).unwrap();
+            std::fs::write(source, &bytes[..100_000]).unwrap();
+        });
+        assert!(result.is_err());
+        assert_nothing_registered(&paths);
+    }
+
+    #[test]
+    fn an_unrecognised_source_changed_mid_import_is_not_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let source = dir.path().join("mystery.rom");
+        std::fs::write(&source, vec![7u8; K128]).unwrap();
+        let result = add_rom_checked(&paths, &source, "r", || {
+            std::fs::write(&source, synthetic_rom(PLUS_V3, K128)).unwrap();
+        });
+        assert!(result.is_err());
+        assert_nothing_registered(&paths);
     }
 
     #[test]
