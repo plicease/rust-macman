@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::ExitStatus;
 use std::rc::Rc;
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tempfile::TempDir;
 
 #[derive(Debug, Clone)]
@@ -82,6 +83,10 @@ impl EmulatorBackend for Mock {
     fn revision(&self) -> &str {
         "36.04"
     }
+
+    fn resolve_revision(&self, _recorded: &str) -> Result<String> {
+        Ok(self.revision().to_string())
+    }
     fn validate(&self, _: &Machine) -> Result<()> {
         Ok(())
     }
@@ -123,16 +128,47 @@ impl EmulatorBackend for Mock {
     }
 }
 
+/// A child holds copies of its parent's descriptors between fork and exec, and
+/// with them any file lock, which can make a finished session look alive. So
+/// tests that spawn processes run alone, apart from those that check locks.
+static SPAWNING: RwLock<()> = RwLock::new(());
+
+#[allow(dead_code)] // Held for its lifetime, never read.
+enum Turn {
+    NoSpawning(RwLockReadGuard<'static, ()>),
+    Alone(RwLockWriteGuard<'static, ()>),
+}
+
+fn turn_without_spawning() -> Turn {
+    Turn::NoSpawning(SPAWNING.read().unwrap_or_else(PoisonError::into_inner))
+}
+
+#[cfg(unix)]
+fn turn_alone() -> Turn {
+    Turn::Alone(SPAWNING.write().unwrap_or_else(PoisonError::into_inner))
+}
+
 struct Harness {
     root: TempDir,
     paths: Paths,
     app: App,
+    _turn: Turn,
 }
 
 impl Harness {
-    fn new(backend: impl EmulatorBackend + 'static, paths: Paths, root: TempDir) -> Self {
+    fn new(
+        backend: impl EmulatorBackend + 'static,
+        paths: Paths,
+        root: TempDir,
+        turn: Turn,
+    ) -> Self {
         let app = App::new(paths.clone(), Backends::new(vec![Box::new(backend)]));
-        let harness = Self { root, paths, app };
+        let harness = Self {
+            root,
+            paths,
+            app,
+            _turn: turn,
+        };
         let rom = write_rom(harness.dir(), "plus.bin", PLUS_ROM_CHECKSUM, 128 * 1024);
         let ii = write_rom(harness.dir(), "ii.bin", II_ROM_CHECKSUM, 256 * 1024);
         let system = write_disk(harness.dir(), "system.dsk");
@@ -149,10 +185,11 @@ impl Harness {
     }
 
     fn mock() -> (Self, Mock) {
+        let turn = turn_without_spawning();
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::under(root.path());
         let mock = Mock::default();
-        let harness = Self::new(mock.clone(), paths, root);
+        let harness = Self::new(mock.clone(), paths, root, turn);
         harness.create("plus-a");
         (harness, mock)
     }
@@ -638,6 +675,7 @@ fn has_build_tools() -> bool {
 
 #[cfg(unix)]
 fn real_adapter() -> Option<(Harness, PathBuf)> {
+    let turn = turn_alone();
     if !has_build_tools() {
         eprintln!("skipping: build tools not installed");
         return None;
@@ -678,7 +716,7 @@ fn real_adapter() -> Option<(Harness, PathBuf)> {
     };
     let paths = Paths::under(root.path());
     let backend = MiniVmac::new(paths.clone(), pin, Some(archive));
-    Some((Harness::new(backend, paths, root), log))
+    Some((Harness::new(backend, paths, root, turn), log))
 }
 
 #[test]
@@ -718,7 +756,7 @@ fn real_adapter_builds_once_per_configuration_and_launches() {
     assert_eq!(h.cmd(&["run", "plus-a"]).unwrap(), 0);
     assert_eq!(builds(), 1);
     let target = if cfg!(target_os = "macos") {
-        "-e xcd -cl -t mcar"
+        "-e xcd -cl -t mcar -ndp 0"
     } else {
         "-t lx64"
     };
@@ -776,6 +814,61 @@ fn real_adapter_builds_once_per_configuration_and_launches() {
     assert_eq!(builds(), 3);
 
     assert_eq!(h.cmd(&["list", "--builds"]).unwrap(), 0);
+}
+
+/// A machine from a host on the other revision uses this host's revision, and
+/// shares its build with machines made here.
+#[test]
+#[cfg(unix)]
+fn the_build_depends_on_this_host_not_the_revision_a_machine_records() {
+    let Some((h, log)) = real_adapter() else {
+        return;
+    };
+    let builds = || {
+        let text = fs::read_to_string(&log).unwrap_or_default();
+        text.lines().filter(|l| *l == "build").count()
+    };
+    let host = SourcePin::default().revision;
+    let other = if host == "36.04" { "37.03" } else { "36.04" };
+    let set_revision = |machine: &str, from: &str, to: &str| {
+        let file = h.paths.machine(machine).join("machine.toml");
+        let text = fs::read_to_string(&file).unwrap();
+        let (from, to) = (
+            format!("revision = \"{from}\""),
+            format!("revision = \"{to}\""),
+        );
+        assert!(text.contains(&from), "{text}");
+        fs::write(&file, text.replace(&from, &to)).unwrap();
+    };
+
+    h.create("native");
+    h.create("visitor");
+    set_revision("visitor", &host, other);
+    assert_eq!(h.cmd(&["run", "visitor"]).unwrap(), 0);
+    assert_eq!(h.cmd(&["run", "native"]).unwrap(), 0);
+    assert_eq!(builds(), 1, "both use one build");
+
+    let builds_dir = fs::read_dir(h.paths.builds()).unwrap();
+    let entries: Vec<_> = builds_dir.collect();
+    assert_eq!(entries.len(), 1);
+    let build = entries[0].as_ref().unwrap().path();
+    let manifest = fs::read_to_string(build.join("manifest.toml")).unwrap();
+    assert!(
+        manifest.contains(&format!("revision = \"{host}\"")),
+        "{manifest}"
+    );
+
+    // What the machine records is left as it was.
+    let text = fs::read_to_string(h.paths.machine("visitor").join("machine.toml")).unwrap();
+    assert!(text.contains(&format!("revision = \"{other}\"")), "{text}");
+
+    set_revision("visitor", other, "99.0");
+    let error = h.cmd(&["run", "visitor"]).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("pinned to Mini vMac 99.0"),
+        "{error:#}"
+    );
+    assert_eq!(builds(), 1);
 }
 
 /// The emulator got the ROM by flag and the private boot disk by path.

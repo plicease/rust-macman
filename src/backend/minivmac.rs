@@ -15,6 +15,10 @@
 //! `disk2.dsk`, and so on, and only 37.03 onwards can target ARM64. So macOS
 //! has its own source pin, each run gets a private copy of the bundle, and the
 //! disks are symbolic links in the session directory.
+//!
+//! A machine runs on whichever revision its host builds, so that it can move
+//! between hosts. Its `revision` records where it came from, and is checked
+//! against [`INTERCHANGEABLE_REVISIONS`].
 
 use super::{Check, EmulatorBackend, Executable, LaunchRequest};
 use crate::fsutil::{
@@ -46,6 +50,12 @@ const EXECUTABLE: &str = if cfg!(windows) {
 const BUILD_OUTPUT: &str = if MACOS { BUNDLE } else { EXECUTABLE };
 /// `_MAX_PATH`, which Mini vMac's Windows glue uses for every path buffer.
 const WINDOWS_MAX_PATH: usize = 260;
+/// Revisions that give a machine the same guest. They're checked against each
+/// other's source: the emulated hardware, models, memory sizes, ROMs, and disk
+/// formats match, and 37.03's core changes are bug fixes. Where 37.03 changes a
+/// default that a guest would notice, [`build_options`] puts it back. Only add
+/// a revision after that same comparison.
+const INTERCHANGEABLE_REVISIONS: &[&str] = &["36.04", "37.03"];
 const UNSUPPORTED_HOST: &str =
     "the Mini vMac backend supports only Linux x86-64, Windows x86-64, and macOS ARM64 hosts";
 
@@ -528,7 +538,9 @@ fn target_options() -> &'static [&'static str] {
     if cfg!(windows) {
         &["-t", "wx64"]
     } else if MACOS {
-        &["-e", "xcd", "-cl", "-t", "mcar"]
+        // From 37.03, the emulator refuses to mount blank or unrecognized
+        // images unless told not to. `-ndp 0` keeps 36.04's behavior.
+        &["-e", "xcd", "-cl", "-t", "mcar", "-ndp", "0"]
     } else {
         &["-t", "lx64"]
     }
@@ -823,6 +835,10 @@ fn build_options(machine: &Machine) -> Vec<String> {
     } else {
         options.extend(["-magnify".to_string(), "0".to_string()]);
     }
+    // From 37.03 these models slow down automatically, which 36.04's don't.
+    if MACOS && matches!(hardware.model, Model::II | Model::IIx) {
+        options.extend(["-as".to_string(), "0".to_string()]);
+    }
     options
 }
 
@@ -835,16 +851,21 @@ impl EmulatorBackend for MiniVmac {
         &self.pin.revision
     }
 
-    fn validate(&self, machine: &Machine) -> Result<()> {
-        if machine.emulator.revision != self.pin.revision {
-            bail!(
-                "machine {:?} is pinned to Mini vMac {}, but this macman supports {}; \
-                 set [emulator] revision in its machine.toml",
-                machine.name,
-                machine.emulator.revision,
-                self.pin.revision
-            );
+    fn resolve_revision(&self, recorded: &str) -> Result<String> {
+        let known = |revision: &str| INTERCHANGEABLE_REVISIONS.contains(&revision);
+        if recorded == self.pin.revision || (known(recorded) && known(&self.pin.revision)) {
+            return Ok(self.pin.revision.clone());
         }
+        bail!(
+            "pinned to Mini vMac {recorded}, which isn't known to behave the same as {}, the \
+             revision this host builds; upgrade macman",
+            self.pin.revision
+        )
+    }
+
+    fn validate(&self, machine: &Machine) -> Result<()> {
+        self.resolve_revision(&machine.emulator.revision)
+            .with_context(|| format!("machine {:?} can't run here", machine.name))?;
         let model = machine.hardware.model;
         let sizes = memory_sizes(model);
         if !sizes.contains(&machine.hardware.memory.as_str()) {
@@ -1175,15 +1196,69 @@ mod tests {
         assert!(backend().validate(&m).is_err());
     }
 
+    fn pinned_to(revision: &str) -> MiniVmac {
+        let pin = SourcePin {
+            revision: revision.into(),
+            ..SourcePin::default()
+        };
+        MiniVmac::new(Paths::under(Path::new("/nonexistent")), pin, None)
+    }
+
+    #[test]
+    fn a_machine_runs_on_the_revision_its_host_builds() {
+        for (recorded, host) in [
+            ("36.04", "37.03"),
+            ("37.03", "36.04"),
+            ("36.04", "36.04"),
+            ("37.03", "37.03"),
+        ] {
+            let backend = pinned_to(host);
+            assert_eq!(backend.resolve_revision(recorded).unwrap(), host);
+            let mut m = machine(Model::Plus, "4M", (512, 342, 1));
+            m.emulator.revision = recorded.into();
+            backend.validate(&m).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_unknown_revision_is_a_compatibility_error() {
+        let error = pinned_to("37.03").resolve_revision("99.0").unwrap_err();
+        let error = format!("{error:#}");
+        assert!(error.contains("pinned to Mini vMac 99.0"), "{error}");
+        assert!(error.contains("upgrade macman"), "{error}");
+        // Neither end may be unknown, but a host always accepts its own.
+        assert!(pinned_to("99.0").resolve_revision("36.04").is_err());
+        assert_eq!(pinned_to("99.0").resolve_revision("99.0").unwrap(), "99.0");
+    }
+
+    #[test]
+    fn the_host_revision_is_one_machines_can_move_to() {
+        assert!(INTERCHANGEABLE_REVISIONS.contains(&SourcePin::default().revision.as_str()));
+    }
+
+    #[test]
+    fn macos_options_keep_the_guest_as_it_is_on_36_04() {
+        let plus = build_options(&machine(Model::Plus, "4M", (512, 342, 1)));
+        let ii = build_options(&machine(Model::II, "8M", (640, 480, 8)));
+        let has_pair = |options: &[String], flag: &str, value: &str| {
+            options.windows(2).any(|pair| pair == [flag, value])
+        };
+        assert_eq!(has_pair(&plus, "-ndp", "0"), MACOS);
+        assert_eq!(has_pair(&ii, "-ndp", "0"), MACOS);
+        assert_eq!(has_pair(&ii, "-as", "0"), MACOS);
+        assert!(!has_pair(&plus, "-as", "0"));
+    }
+
     #[test]
     fn translates_machine_to_upstream_options() {
         let m = machine(Model::II, "8M", (640, 480, 8));
         let target = target_options().join(" ");
+        let slowdown = if MACOS { " -as 0" } else { "" };
         assert_eq!(
             build_options(&m).join(" "),
             format!(
                 "{target} -m II -mem 8M -hres 640 -vres 480 -depth 3 -fullscreen 0 -mf 2 \
-                 -magnify 1"
+                 -magnify 1{slowdown}"
             )
         );
         let mut m = machine(Model::Plus, "4M", (512, 342, 1));

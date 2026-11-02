@@ -451,6 +451,13 @@ impl App {
         }
         backend.validate_disks(&machine, saved_disks.len() + args.disks.len())?;
 
+        if verbose && backend.revision() != machine.emulator.revision {
+            println!(
+                "Machine records Mini vMac {}; this host runs it on {}",
+                machine.emulator.revision,
+                backend.revision()
+            );
+        }
         let executable = backend.prepare(&machine, verbose)?;
         if executable.built {
             println!("Built emulator {}", &executable.build_key[..12]);

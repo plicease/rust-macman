@@ -77,5 +77,7 @@ macman create iix-71 --model iix --rom maciix --system system-7.1 --memory 8M --
 | `macman run iix-71 --disk "extra disk.dsk" --readonly` | Boots System 7.1 in color with the extra disk mounted, and locked. |
 | In the guest, save a file to the system disk, then shut down | Exit code 0, and the file is there on the next run: writes reach the real disk through its link. |
 | Close the emulator, and compare the extra disk's hash | The hash is unchanged. |
+| `macman run plus-6 --disk blank.dsk`, with `blank.dsk` an 800K file of zeros | The guest offers to initialize the disk. There's no "Unsupported Disk Image" alert. |
+| `macman import` an archive exported on Linux or Windows, then `macman run NAME --verbose` | Says the machine records 36.04 and runs on 37.03, then boots. |
 | End `macman` with `kill -9` while the emulator runs, then `macman run iix-71` | Warns about the earlier run. Its lock died with `macman`, so the new emulator is the one to refuse the disk, with an "image in use" alert. |
 | Close the emulators. The next `macman run` | Clears the notice left by the abandoned session. |

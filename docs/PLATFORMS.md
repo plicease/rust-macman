@@ -34,12 +34,22 @@ beta that adds one, as tagged by the repository that continues Mini vMac.
 | Windows x86-64 | 36.04 | `wx64` | gryphel.com |
 | macOS ARM64 | 37.03 | `mcar` | [minivmac/minivmac](https://github.com/minivmac/minivmac) tag |
 
-Machines record their revision, so a machine made on another host, or by an earlier
-macman on a Mac, says so when it's run. Its disks are unaffected: set `revision` under
-`[emulator]` in its `machine.toml` to the one the error names.
+A machine isn't tied to a revision, so it runs on whichever one its host builds. Its
+`revision` under `[emulator]` records where it came from, and it's never rewritten, so
+there's nothing to migrate or edit: existing machines and archives work as they are,
+in either direction. The build key and build manifest hold the revision really used,
+and `--verbose` says when that differs from the machine's.
 
-`macman import` fails such a machine, as it does any revision this host can't build, so
-for now an archive can't move a machine between macOS and the other hosts.
+36.04 and 37.03 are interchangeable because their sources were compared: the emulated
+models, memory sizes, ROMs, and disk formats match, and 37.03's changes to the emulator
+core are bug fixes. Two of its defaults would change what a guest sees, so macman turns
+them back. `-ndp 0` keeps blank and unrecognized images mountable, and `-as 0` keeps the
+II and IIx from slowing down automatically.
+
+A revision that hasn't been compared this way is an error when importing or running,
+and it asks you to upgrade macman, because there's no way to know the guest would
+behave the same. Add a new revision to `INTERCHANGEABLE_REVISIONS` only after the same
+comparison, and resolve any such difference there, in the build options.
 
 The 37.03 archive is one GitHub generates from the tag, and the pin is its SHA-256. If
 GitHub ever changed how it generates archives, downloads would be refused rather than

@@ -12,9 +12,7 @@ use crate::fsutil::{
     atomic_copy_range_checked, hex_digest, list_dir, publish_new, sha256_file, temp_sibling,
     validate_name, windows_can_name,
 };
-use crate::machine::{
-    Disk, Display, EmulatorConfig, Machine, SCHEMA_VERSION, SystemInfo, new_id, publish_dir,
-};
+use crate::machine::{Disk, Display, Machine, SCHEMA_VERSION, SystemInfo, new_id, publish_dir};
 use crate::model::Model;
 use crate::paths::Paths;
 use crate::registry;
@@ -529,9 +527,12 @@ fn unpack_blob<R: Read>(
 
 /// The parts of a machine that decide whether two copies are the same. Names,
 /// locations, and ROM aliases don't count; the ROM's and disks' contents do.
+/// Nor does the revision a copy happens to record, only what it runs as here,
+/// so a machine that has been to a host with another revision is still itself.
 #[derive(Debug, PartialEq)]
 struct Fingerprint<'a> {
-    emulator: &'a EmulatorConfig,
+    backend: &'a str,
+    revision: Option<String>,
     model: Model,
     memory: &'a str,
     display: &'a Display,
@@ -540,9 +541,14 @@ struct Fingerprint<'a> {
 }
 
 impl<'a> Fingerprint<'a> {
-    fn of(machine: &'a Machine) -> Self {
+    fn of(machine: &'a Machine, backends: &Backends) -> Self {
+        let emulator = &machine.emulator;
         Self {
-            emulator: &machine.emulator,
+            backend: &emulator.backend,
+            revision: backends
+                .get(&emulator.backend)
+                .and_then(|backend| backend.resolve_revision(&emulator.revision))
+                .ok(),
             model: machine.hardware.model,
             memory: &machine.hardware.memory,
             display: &machine.display,
@@ -729,7 +735,9 @@ impl Importing<'_> {
                  with --rename"
             ))
         };
-        if Fingerprint::of(local) != Fingerprint::of(&self.entry.machine) {
+        if Fingerprint::of(local, self.backends)
+            != Fingerprint::of(&self.entry.machine, self.backends)
+        {
             return Ok(diverged("configuration"));
         }
         let Ok((rom, _)) = registry::load_rom(self.paths, &local.hardware.rom) else {

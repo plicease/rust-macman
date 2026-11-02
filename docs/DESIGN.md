@@ -190,7 +190,7 @@ Checked against the Mini vMac 36.04 source and real builds. The Windows backend 
 
 Checked against the Mini vMac 37.03 source and real builds; see [SMOKE_TEST.md](SMOKE_TEST.md#macos-arm64). The macOS backend differs from the Linux one in these ways:
 
-- **Revision:** 36.04 has no ARM64 target. The 37.03 beta adds `mcar`, so macOS pins it, from the GitHub repository that continues Mini vMac. Other hosts stay on the stable 36.04.
+- **Revision:** 36.04 has no ARM64 target. The 37.03 beta adds `mcar`, so macOS pins it, from the GitHub repository that continues Mini vMac. Other hosts stay on the stable 36.04. A machine's `revision` records where it came from, and the backend resolves it to the host's revision, so machines move between hosts. `-ndp 0` and, for the II and IIx, `-as 0` restore the 36.04 defaults a guest would notice. See [PLATFORMS.md](PLATFORMS.md#mini-vmac-revisions).
 - **Build:** `-e xcd -cl -t mcar` asks for a Makefile and `clang`, so the command line tools are enough, where a plain `-e xcd` would generate a project needing all of Xcode. The setup tool is compiled with `clang` too.
 - **SDK:** the generated Makefile fixes `-isysroot` to `/Library/Developer/CommandLineTools/SDKs/MacOSX11.1.sdk`, which current tools don't have, so macman substitutes `xcrun --show-sdk-path`.
 - **Cache:** a build is `minivmac.app`, whole. The manifest records a digest of the bundle's names, contents, executable bits, and links, so damage anywhere causes a rebuild. Its key includes the host, `clang`'s target and version, and the SDK's version and path, which keeps it apart from any Linux, Intel Mac, or other-SDK build.

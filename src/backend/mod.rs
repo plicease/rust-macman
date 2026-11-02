@@ -79,8 +79,13 @@ impl Check {
 pub trait EmulatorBackend {
     fn name(&self) -> &str;
 
-    /// The revision recorded in new machines.
+    /// The revision this host builds, which new machines record.
     fn revision(&self) -> &str;
+
+    /// The revision this host would build for a machine that records
+    /// `recorded`, or why it can't stand in for that one. A machine's recorded
+    /// revision says where it came from, so it never has to match this host.
+    fn resolve_revision(&self, recorded: &str) -> Result<String>;
 
     /// Reject configurations the backend cannot honour, without side effects.
     fn validate(&self, machine: &Machine) -> Result<()>;
