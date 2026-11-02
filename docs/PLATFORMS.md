@@ -97,8 +97,8 @@ MacPorts or Homebrew, are found with `pkg-config`, and are linked dynamically, s
 in their version or location means a new build. MPFR is the ARM64 FPU core: ARM64 has no
 80-bit `long double`.
 
-On macOS, System 7.5.5 and Mac OS 8.1 were each tested with the default 68040 setting, and
-sound on a real device and full screen worked. Mac OS 8.1 was tested with `slirp`
+On macOS, System 7.5.5 and Mac OS 8.1 were each tested with the default 68040 setting, on
+machines brought in with `macman import`, and sound on a real device and full screen worked. Mac OS 8.1 was tested with `slirp`
 networking too. Closing the window opens the shutdown dialog in the guest. A shared folder
 works in both directions, written from the host and from the guest. System 7.1 was tested
 with a 68030 setting.
