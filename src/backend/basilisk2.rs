@@ -347,15 +347,26 @@ fn arguments(request: &LaunchRequest<'_>, preferences: &Path) -> Vec<OsString> {
 /// the window closing, which only asks the guest whether to shut down.
 #[cfg(target_os = "linux")]
 fn die_with_macman(command: &mut Command) {
+    die_with_parent(command, std::process::id());
+}
+
+/// The signal is only armed once `prctl` runs, and a parent that dies sooner
+/// never sends it. So the child compares its parent with `parent`, as noted
+/// before spawning, and goes no further if macman has already gone.
+#[cfg(target_os = "linux")]
+fn die_with_parent(command: &mut Command, parent: u32) {
     use std::os::unix::process::CommandExt;
-    // SAFETY: `prctl` is async-signal-safe, and nothing else runs in the child.
+    // SAFETY: `prctl` and `getppid` are async-signal-safe, and nothing else
+    // runs in the child.
     unsafe {
-        command.pre_exec(|| {
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
             }
+            if libc::getppid() as u32 != parent {
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            Ok(())
         });
     }
 }
@@ -758,6 +769,22 @@ mod tests {
         .join()
         .unwrap();
         assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+    }
+
+    /// The race itself can't be staged, but its outcome can: the child sees a
+    /// parent other than the one noted, as it would if macman had just died.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_emulator_whose_parent_has_already_gone_never_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("ran");
+        let mut command = Command::new("touch");
+        command.arg(&ran);
+        die_with_parent(&mut command, std::process::id() + 1);
+
+        let error = command.spawn().unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ESRCH));
+        assert!(!ran.exists(), "it stopped before exec");
     }
 
     #[test]

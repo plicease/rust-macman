@@ -208,7 +208,7 @@ Checked against the pinned macemu source and real builds; see [PLATFORMS.md](PLA
 - **Launch:** each run writes a preferences file to its session directory and passes it with `--config`, so the user's own settings and XPRAM aren't touched. That file cuts lines at 256 bytes, so the ROM, disks, and shared folder go on the command line.
 - **Host files:** upstream's default `extfs` is `/`, a read-write volume of the whole host. macman always sets it, empty unless the machine has a shared folder.
 - **Exit status:** `QuitEmulator` always exits 0, even for a refused ROM, so macman reads the emulator's output, and counts an `ERROR:` line as a failure to start. GTK would have shown a dialog instead.
-- **Locks:** Linux builds take no locks of their own, so `PR_SET_PDEATHSIG` stops the emulator if macman dies, and the disks are never written with macman's locks gone. It sends `SIGKILL`, because SDL turns `SIGTERM` into the window closing, which only asks the guest to shut down.
+- **Locks:** Linux builds take no locks of their own, so `PR_SET_PDEATHSIG` stops the emulator if macman dies, and the disks are never written with macman's locks gone. It sends `SIGKILL`, because SDL turns `SIGTERM` into the window closing, which only asks the guest to shut down. The child then checks `getppid`, and doesn't start if macman died before the signal was armed.
 - **ROMs:** it starts only from 32-bit clean ROMs, which have no registered models, so backends check ROMs themselves.
 - **Disks:** it writes straight through a Disk Copy image, so those attach read-only or not at all.
 
