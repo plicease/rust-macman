@@ -3,10 +3,16 @@
 
 mod common;
 
+use clap::Parser;
 use common::{II_ROM_CHECKSUM, IIX_ROM_CHECKSUM, PLUS_ROM_CHECKSUM, write_disk, write_rom};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
+use macman::app::App;
+use macman::archive;
+use macman::backend::Backends;
+use macman::backend::minivmac::{MiniVmac, SourcePin};
+use macman::cli::Cli;
 use macman::disk::{LockMode, lock_image};
 use macman::fsutil::{sha256_bytes, sha256_file};
 use macman::machine::Machine;
@@ -535,9 +541,10 @@ fn a_conflict_does_not_stop_the_other_machines() {
 #[test]
 fn an_incompatible_machine_fails_with_advice_and_others_continue() {
     let source = Host::with_two_machines();
+    let revision = format!("revision = \"{}\"", SourcePin::default().revision);
     let definition = source
         .definition("plus-b")
-        .replace("revision = \"36.04\"", "revision = \"99.0\"");
+        .replace(&revision, "revision = \"99.0\"");
     source.write_definition("plus-b", &definition);
     let archive = source.export(&["plus-a", "plus-b"], "both.tar.gz");
 
@@ -547,6 +554,119 @@ fn an_incompatible_machine_fails_with_advice_and_others_continue() {
     assert!(output.contains("pinned to Mini vMac 99.0"), "{output}");
     assert!(output.contains("imported machine plus-a"), "{output}");
     assert!(!target.machine_dir("plus-b").exists());
+}
+
+/// A host whose backend builds `revision`, whatever this test really runs on.
+struct Pinned {
+    root: TempDir,
+    app: App,
+    paths: Paths,
+}
+
+impl Pinned {
+    fn new(revision: &str) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        let pin = SourcePin {
+            revision: revision.into(),
+            ..SourcePin::default()
+        };
+        let backend = MiniVmac::new(paths.clone(), pin, None);
+        let app = App::new(paths.clone(), Backends::new(vec![Box::new(backend)]));
+        Self { root, app, paths }
+    }
+
+    fn cmd(&self, args: &[&str]) {
+        let argv = std::iter::once("macman").chain(args.iter().copied());
+        assert_eq!(
+            self.app.execute(Cli::parse_from(argv)).unwrap(),
+            0,
+            "{args:?}"
+        );
+    }
+
+    fn create_machine(&self) {
+        let dir = self.root.path();
+        let rom = write_rom(dir, "plus.bin", PLUS_ROM_CHECKSUM, 128 * 1024);
+        let disk = write_disk(dir, "sys.dsk");
+        self.cmd(&["rom", "add", rom.to_str().unwrap(), "--name", "plus"]);
+        self.cmd(&["system", "add", disk.to_str().unwrap(), "--name", "sys"]);
+        self.cmd(&[
+            "create", "plus-a", "--model", "plus", "--rom", "plus", "--system", "sys",
+        ]);
+    }
+
+    fn export(&self) -> PathBuf {
+        let archive = self.root.path().join("out.tar.gz");
+        let _ = fs::remove_file(&archive);
+        self.cmd(&["export", "plus-a", "-o", archive.to_str().unwrap()]);
+        archive
+    }
+
+    fn import(&self, archive: &Path) -> (usize, usize) {
+        let report = archive::import(&self.paths, &self.app.backends, archive, None).unwrap();
+        (report.imported(), report.unchanged())
+    }
+
+    fn recorded_revision(&self) -> String {
+        let machine = Machine::load(&self.paths, "plus-a").unwrap();
+        machine.emulator.revision
+    }
+
+    fn runnable(&self) -> bool {
+        self.app
+            .doctor_checks(false)
+            .unwrap()
+            .iter()
+            .any(|check| check.message == "machine plus-a is runnable")
+    }
+}
+
+/// 36.04 to 37.03, as from Linux or Windows to macOS, and the reverse.
+#[test]
+fn machines_move_between_hosts_on_different_revisions() {
+    for (from, to) in [("36.04", "37.03"), ("37.03", "36.04")] {
+        let source = Pinned::new(from);
+        source.create_machine();
+        assert_eq!(source.recorded_revision(), from);
+        let archive = source.export();
+
+        let target = Pinned::new(to);
+        assert_eq!(target.import(&archive), (1, 0), "{from} to {to}");
+        assert!(target.runnable(), "{from} to {to}");
+        assert_eq!(
+            target.recorded_revision(),
+            from,
+            "the definition arrives as it left"
+        );
+
+        // Importing again changes nothing, and neither does coming home.
+        assert_eq!(target.import(&archive), (0, 1), "{from} to {to}");
+        assert_eq!(source.import(&target.export()), (0, 1), "{from} to {to}");
+        assert_eq!(source.recorded_revision(), from);
+    }
+}
+
+/// Two hosts that made the same machine's copies with different revisions.
+#[test]
+fn copies_recording_different_revisions_are_the_same_machine() {
+    let source = Pinned::new("36.04");
+    source.create_machine();
+    let archive = source.export();
+    let target = Pinned::new("37.03");
+    assert_eq!(target.import(&archive), (1, 0));
+
+    let file = target.paths.machine("plus-a").join("machine.toml");
+    let text = fs::read_to_string(&file).unwrap();
+    fs::write(&file, text.replace("\"36.04\"", "\"37.03\"")).unwrap();
+    assert_eq!(target.recorded_revision(), "37.03");
+    assert_eq!(target.import(&archive), (0, 1));
+
+    // One that can't run here isn't the same, though everything else matches.
+    let text = fs::read_to_string(&file).unwrap();
+    fs::write(&file, text.replace("\"37.03\"", "\"99.0\"")).unwrap();
+    let report = archive::import(&target.paths, &target.app.backends, &archive, None).unwrap();
+    assert_eq!((report.imported(), report.unchanged()), (0, 0));
 }
 
 #[test]

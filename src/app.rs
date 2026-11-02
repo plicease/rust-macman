@@ -451,6 +451,13 @@ impl App {
         }
         backend.validate_disks(&machine, saved_disks.len() + args.disks.len())?;
 
+        if verbose && backend.revision() != machine.emulator.revision {
+            println!(
+                "Machine records Mini vMac {}; this host runs it on {}",
+                machine.emulator.revision,
+                backend.revision()
+            );
+        }
         let executable = backend.prepare(&machine, verbose)?;
         if executable.built {
             println!("Built emulator {}", &executable.build_key[..12]);
@@ -645,10 +652,8 @@ impl App {
         for key in list_dir(&self.paths.builds())? {
             let dir = self.paths.builds().join(&key);
             let short = &key[..12.min(key.len())];
-            let intact = read_toml::<Manifest>(&dir.join(MANIFEST)).is_ok_and(|manifest| {
-                sha256_file(&dir.join(&manifest.executable))
-                    .is_ok_and(|sha| sha == manifest.executable_sha256)
-            });
+            let intact =
+                read_toml::<Manifest>(&dir.join(MANIFEST)).is_ok_and(|m| m.is_intact(&dir));
             if intact {
                 checks.push(Check::ok(format!("cached build {short} intact")));
             } else {
@@ -735,9 +740,8 @@ fn abnormal_outcome(status: ExitStatus) -> Option<String> {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        // SIGILL, SIGABRT, SIGBUS, SIGFPE, and SIGSEGV on Linux.
         if let Some(signal) = status.signal() {
-            return Some(if matches!(signal, 4 | 6 | 7 | 8 | 11) {
+            return Some(if is_crash_signal(signal) {
                 format!("the emulator crashed on the host (signal {signal})")
             } else {
                 format!("the emulator was killed by signal {signal}")
@@ -745,6 +749,14 @@ fn abnormal_outcome(status: ExitStatus) -> Option<String> {
         }
     }
     Some(format!("the emulator ended abnormally ({status})"))
+}
+
+/// SIGILL, SIGABRT, SIGBUS, SIGFPE, or SIGSEGV. SIGBUS is 10 on macOS, where
+/// 7 is SIGEMT, and 7 on Linux, where 10 is SIGUSR1.
+#[cfg(unix)]
+fn is_crash_signal(signal: i32) -> bool {
+    let sigbus = if cfg!(target_os = "macos") { 10 } else { 7 };
+    matches!(signal, 4 | 6 | 8 | 11) || signal == sigbus
 }
 
 /// Windows has no signals: a process killed by an exception or Ctrl-C exits

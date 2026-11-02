@@ -42,6 +42,7 @@ fn deferred_targets_stay_documented() {
     for row in [
         "| Linux x86-64 | Yes | Yes |",
         "| Windows x86-64 | Yes | Yes |",
+        "| macOS ARM64 | Yes | Yes |",
         "| Linux ARM64 | No | **No, deferred** |",
         "| macOS x86-64 | No | **No, deferred** |",
         "| Windows i686 | No | **No, deferred** |",

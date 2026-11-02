@@ -87,7 +87,9 @@ A later version may add `macman build`, `macman disk attach/detach`, `macman sna
 
 On Windows, configuration lives in `%APPDATA%macman`, data in `%LOCALAPPDATA%macman`, and the cache in `%LOCALAPPDATA%macmanche`. An absolute `XDG_*` variable overrides its directory on both systems; otherwise Windows uses the environment variable, then the shell's known folder, so `HOME` is never needed.
 
-Use XDG paths on Linux, respecting `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_CACHE_HOME`:
+macOS deliberately shares the Linux layout, not `~/Library`, so that a data directory means the same thing on both.
+
+Use XDG paths on Linux and macOS, respecting `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_CACHE_HOME`:
 
 ```text
 ~/.config/macman/
@@ -184,6 +186,19 @@ Checked against the Mini vMac 36.04 source and real builds. The Windows backend 
 - **Exit status:** a process ended by an exception or Ctrl-C exits with an NTSTATUS code rather than a signal, and these are reported as abnormal. A Windows exit code is 32 bits, and a failure must not round to success.
 - **Locks and sharing:** Mini vMac opens writable disks with sharing denied. That shuts out macman's own reads, so disks are probed through the lock first. It also means a disk stays protected if macman dies and leaves its emulator running, and macman reports such a disk as in use.
 
+### macOS ARM64
+
+Checked against the Mini vMac 37.03 source and real builds; see [SMOKE_TEST.md](SMOKE_TEST.md#macos-arm64). The macOS backend differs from the Linux one in these ways:
+
+- **Revision:** 36.04 has no ARM64 target. The 37.03 beta adds `mcar`, so macOS pins it, from the GitHub repository that continues Mini vMac. Other hosts stay on the stable 36.04. A machine's `revision` records where it came from, and the backend resolves it to the host's revision, so machines move between hosts. `-ndp 0` and, for the II and IIx, `-as 0` restore the 36.04 defaults a guest would notice. See [PLATFORMS.md](PLATFORMS.md#mini-vmac-revisions).
+- **Build:** `-e xcd -cl -t mcar` asks for a Makefile and `clang`, so the command line tools are enough, where a plain `-e xcd` would generate a project needing all of Xcode. The setup tool is compiled with `clang` too.
+- **SDK:** the generated Makefile fixes `-isysroot` to `/Library/Developer/CommandLineTools/SDKs/MacOSX11.1.sdk`, which current tools don't have, so macman substitutes `xcrun --show-sdk-path`.
+- **Cache:** a build is `minivmac.app`, whole. The manifest records a digest of the bundle's names, contents, executable bits, and links, so damage anywhere causes a rebuild. Its key includes the host, `clang`'s target and version, and the SDK's version and path, which keeps it apart from any Linux, Intel Mac, or other-SDK build.
+- **Launch:** `OSGLUCCO.m` never reads its arguments, so there are no `-r` or `-d` flags and no paths to pass. It looks beside its bundle for the ROM by a per-model name, and for `disk1.dsk`, `disk2.dsk`, and so on, stopping at the first gap. Each run copies the bundle and ROM into the session directory, with the disks as consecutive links there, boot disk first. A link reaches the real file through `fopen`; only Finder aliases are resolved separately.
+- **Process:** macman runs `Contents/MacOS/minivmac` directly, not through `open`, so it's the emulator's parent and gets its real exit status.
+- **Exit status:** signal numbers differ from Linux. SIGBUS is 10 rather than 7, which is reported as a host crash.
+- **Locks and sharing:** as on Linux, macman's locks last as long as it does. The emulator also takes `flock` on writable disks, so if macman dies and leaves it running, a second emulator refuses the disk itself.
+
 ### Backend boundary
 
 Expose a narrow internal trait/interface, conceptually:
@@ -258,7 +273,7 @@ Use clear exit codes, human-friendly messages by default, and a `--verbose` opti
 - Snapshot/copy-on-write support where feasible.
 - HFS file injection/extraction through safe external tooling.
 - Scripted guest test automation and CI smoke-testing.
-- macOS and ARM64 hosts as supported by individual backends. Windows x86-64 is supported; see §7 and [SMOKE_TEST.md](SMOKE_TEST.md).
+- Linux ARM64 and Intel Mac hosts as supported by individual backends. Windows x86-64 and macOS ARM64 are supported; see §7 and [SMOKE_TEST.md](SMOKE_TEST.md).
 
 ## 12. Open questions
 

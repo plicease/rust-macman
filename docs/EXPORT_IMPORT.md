@@ -41,7 +41,10 @@ created from, and the one ROM each machine uses. They leave out registered syste
 images, builds, source and build caches, logs, locks, and session data. Disk paths are
 relative to the machine, so nothing in an archive depends on where macman stores files
 on the source host. An imported machine builds or reuses its emulator on its first
-`run`, and import itself compiles nothing.
+`run`, and import itself compiles nothing. Hosts can build different Mini vMac revisions,
+so that's whichever revision the destination builds; see
+[PLATFORMS.md](PLATFORMS.md#mini-vmac-revisions). The definition keeps the revision it
+arrived with.
 
 ## Identity
 
@@ -73,11 +76,11 @@ For each machine:
 | Same `id` and the local disks are in use | `conflict`; they can't be compared |
 | Different machine with this name | `conflict` |
 | The ROM's name is taken by a different ROM, or by an unclear partial registration | `conflict` |
-| Backend, revision, hardware, or ROM unusable here | `failed` |
+| Backend, hardware, or ROM unusable here, or a revision not known to be interchangeable with this host's | `failed` |
 
-The comparison includes the emulator, hardware, display, and disk settings, and the
-contents of every disk. It ignores file locations, timestamps, and which name the ROM
-goes by. The comparison finds the local machine by `id`, even if it has been renamed.
+The comparison includes the backend, hardware, display, and disk settings, and the
+contents of every disk. It ignores file locations, timestamps, which name the ROM goes
+by, and which revision a copy records, provided both run as the same one here. The comparison finds the local machine by `id`, even if it has been renamed.
 
 Nothing is merged or overwritten, and there's no `--replace`. Conflicts and failures
 affect only that machine: the others still import, the summary says what happened to
