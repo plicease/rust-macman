@@ -12,7 +12,9 @@ use crate::fsutil::{
     atomic_copy_range_checked, hex_digest, list_dir, publish_new, sha256_file, temp_sibling,
     validate_name, windows_can_name,
 };
-use crate::machine::{Disk, Display, EmulatorConfig, Machine, SCHEMA_VERSION, SystemInfo, new_id};
+use crate::machine::{
+    Disk, Display, EmulatorConfig, Machine, SCHEMA_VERSION, SystemInfo, new_id, publish_dir,
+};
 use crate::model::Model;
 use crate::paths::Paths;
 use crate::registry;
@@ -611,27 +613,40 @@ impl Importing<'_> {
         let blob = self.blob(&rom.sha256);
         let incoming = registry::rom_from_blob(&blob, &rom.name, &rom.sha256)?;
         registry::check_rom_for_model(&incoming, machine.hardware.model)?;
-        let existing = self.local_rom(rom)?;
+        let mut existing = self.local_rom(rom)?;
         if existing.is_none() && registry::rom_exists(self.paths, &rom.name) {
-            return Ok(Outcome::Conflict(format!(
-                "a different ROM is already named {:?}; nothing was changed",
-                rom.name
-            )));
+            if !registry::recover_rom(self.paths, &incoming)? {
+                return Ok(Outcome::Conflict(format!(
+                    "a different ROM is already named {:?}; nothing was changed",
+                    rom.name
+                )));
+            }
+            roms.insert(rom.name.clone(), format!("recovered rom {}", rom.name));
+            existing = Some(incoming.clone());
         }
 
         let built = self.staging.join("machines").join(name);
         let result = self.publish(name, incoming, existing, &built);
         let _ = fs::remove_dir_all(&built);
-        let line = result?;
-        roms.entry(rom.name.clone()).or_insert(line);
-        Ok(Outcome::Imported)
+        match result {
+            Ok(line) => {
+                roms.entry(rom.name.clone()).or_insert(line);
+                Ok(Outcome::Imported)
+            }
+            Err(_) if self.paths.machine(name).symlink_metadata().is_ok() => Ok(Outcome::Conflict(
+                format!("machine {name:?} appeared during the import; nothing was changed"),
+            )),
+            Err(error) => Err(error),
+        }
     }
 
     /// The registered ROM with these contents, preferring one of the same name.
     fn local_rom(&self, rom: &ArchivedRom) -> Result<Option<registry::Rom>> {
         let matching = registry::list_roms(self.paths)?
             .into_iter()
-            .filter(|local| local.sha256 == rom.sha256);
+            .filter(|local| {
+                local.sha256 == rom.sha256 && registry::rom_file_exists(self.paths, &local.name)
+            });
         let Some(local) =
             matching.reduce(|best, local| if local.name == rom.name { local } else { best })
         else {
@@ -679,10 +694,7 @@ impl Importing<'_> {
         if existing.is_none() {
             registry::add_rom_blob(self.paths, &self.blob(&incoming.sha256), &incoming)?;
         }
-        let published = fs::create_dir_all(self.paths.machines())
-            .and_then(|()| fs::rename(built, self.paths.machine(name)))
-            .context("cannot publish the machine");
-        if let Err(error) = published {
+        if let Err(error) = publish_dir(self.paths, built, name) {
             if existing.is_none() {
                 let _ = registry::remove_rom(self.paths, &incoming.name);
             }

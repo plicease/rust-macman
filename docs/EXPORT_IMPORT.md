@@ -57,6 +57,12 @@ ROMs are matched by SHA-256, so a ROM that's already registered is reused under 
 local name, and the imported machine's definition refers to that name. A ROM with a
 name in use but different contents is a conflict. It isn't renamed automatically.
 
+If registering a ROM stopped after the ROM file but before its metadata, the next
+import finishes the job and reports `recovered rom`. It does that only for a plain file
+with no metadata and the archive's exact SHA-256, because the metadata can then be
+rebuilt from the bytes. Anything else under that name is left alone as a conflict,
+including metadata with no ROM file.
+
 For each machine:
 
 | Local state | Outcome |
@@ -66,7 +72,7 @@ For each machine:
 | Same `id`, but anything else differs, whichever side changed | `conflict` |
 | Same `id` and the local disks are in use | `conflict`; they can't be compared |
 | Different machine with this name | `conflict` |
-| The ROM's name is taken by a different ROM | `conflict` |
+| The ROM's name is taken by a different ROM, or by an unclear partial registration | `conflict` |
 | Backend, revision, hardware, or ROM unusable here | `failed` |
 
 The comparison includes the emulator, hardware, display, and disk settings, and the
@@ -116,7 +122,13 @@ exFAT drive, export elsewhere and copy it.
 Everything unpacks into `staging/` and is verified before anything else is touched.
 A machine is assembled there and moved into place with a single rename, and each copy
 is verified again. If publishing fails, a ROM added for that machine is removed again.
+A rename can replace an empty directory, and the standard library has no portable way
+to refuse that, so `create`, `clone`, and `import` all hold `locks/machines.lock` across
+the final existence check and the rename. A machine that appears during an import
+is a conflict, and is left as it is. That lock only binds macman: an empty directory
+another program creates in that instant could be replaced, though nothing in it can be
+lost.
 `staging/` is removed when an import finishes, and if an import was killed, the next
 one clears what it left. A killed import can leave a ROM registered without a machine
-that uses it, which is harmless, and the next import reuses it. One import runs at a
-time, enforced by `import.lock`. File permissions from the archive are ignored.
+that uses it, which is harmless, and the next import reuses or recovers it. One import
+runs at a time, enforced by `import.lock`. File permissions from the archive are ignored.

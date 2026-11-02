@@ -12,6 +12,7 @@ use crate::fsutil::{
 };
 use crate::machine::{
     Config, Disk, Display, EmulatorConfig, Hardware, Machine, SCHEMA_VERSION, SystemInfo, new_id,
+    publish_dir,
 };
 use crate::model::{Model, parse_display};
 use crate::paths::Paths;
@@ -356,8 +357,7 @@ impl App {
             .with_context(|| format!("cannot create {}", staging.display()))?;
         let result = populate(&staging).and_then(|()| {
             machine.save_to(&staging)?;
-            fs::rename(&staging, self.paths.machine(&machine.name))
-                .context("cannot publish machine")
+            publish_dir(&self.paths, &staging, &machine.name)
         });
         if result.is_err() {
             let _ = fs::remove_dir_all(&staging);

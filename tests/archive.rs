@@ -16,6 +16,8 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 struct Host {
@@ -37,16 +39,20 @@ impl Host {
         self.path().join("data/macman")
     }
 
-    fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_macman"))
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_macman"));
+        command
             .args(args)
             .env("HOME", self.path())
             .env("XDG_CONFIG_HOME", self.path().join("cfg"))
             .env("XDG_DATA_HOME", self.path().join("data"))
             .env("XDG_CACHE_HOME", self.path().join("cache"))
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
+            .stdin(Stdio::null());
+        command
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -644,6 +650,182 @@ fn a_clone_is_a_different_machine() {
         id_of(&source.definition("plus-a")),
         id_of(&source.definition("plus-c"))
     );
+}
+
+/// A host where registering `plus-v3` stopped after the ROM file, holding
+/// `bytes` where the ROM should be.
+fn with_interrupted_rom(bytes: &[u8]) -> Host {
+    let host = Host::new();
+    let roms = host.data().join("roms");
+    fs::create_dir_all(&roms).unwrap();
+    fs::write(roms.join("plus-v3.rom"), bytes).unwrap();
+    host
+}
+
+#[test]
+fn a_rom_registration_interrupted_before_its_metadata_is_recovered() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["plus-a", "plus-b"], "both.tar.gz");
+    let rom = fs::read(source.data().join("roms/plus-v3.rom")).unwrap();
+
+    let target = with_interrupted_rom(&rom);
+    let output = target.ok(&["import", &archive]);
+    assert!(output.contains("recovered rom plus-v3"), "{output}");
+    assert!(
+        output.contains("2 imported, 0 unchanged, 0 unresolved"),
+        "{output}"
+    );
+    assert_eq!(
+        fs::read(target.data().join("roms/plus-v3.rom")).unwrap(),
+        rom
+    );
+
+    // The result is what an uninterrupted import would have left.
+    let clean = Host::new();
+    clean.ok(&["import", &archive]);
+    let metadata = |host: &Host| fs::read(host.data().join("roms/plus-v3.toml")).unwrap();
+    assert_eq!(metadata(&target), metadata(&clean));
+    assert_eq!(target.ok(&["rom", "list"]), clean.ok(&["rom", "list"]));
+
+    let output = target.ok(&["import", &archive]);
+    assert!(output.contains("unchanged rom plus-v3"), "{output}");
+    assert!(
+        output.contains("0 imported, 2 unchanged, 0 unresolved"),
+        "{output}"
+    );
+}
+
+#[test]
+fn an_incomplete_rom_with_other_contents_is_left_alone() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["plus-a"], "plus.tar.gz");
+
+    let target = with_interrupted_rom(b"something else");
+    let before = target.snapshot();
+    let output = target.fails(&["import", &archive]);
+    assert!(
+        output.contains("different ROM is already named"),
+        "{output}"
+    );
+    assert_eq!(target.snapshot(), before);
+}
+
+#[test]
+fn rom_metadata_without_its_file_is_left_alone() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["plus-a"], "plus.tar.gz");
+
+    let target = Host::new();
+    let roms = target.data().join("roms");
+    fs::create_dir_all(&roms).unwrap();
+    let metadata = roms.join("plus-v3.toml");
+    fs::copy(source.data().join("roms/plus-v3.toml"), &metadata).unwrap();
+    let before = target.snapshot();
+    let output = target.fails(&["import", &archive]);
+    assert!(
+        output.contains("different ROM is already named"),
+        "{output}"
+    );
+    assert_eq!(target.snapshot(), before);
+}
+
+#[test]
+fn rom_metadata_that_disagrees_with_its_file_is_left_alone() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["plus-a"], "plus.tar.gz");
+    let rom = fs::read(source.data().join("roms/plus-v3.rom")).unwrap();
+
+    let target = with_interrupted_rom(&rom);
+    let metadata = fs::read_to_string(source.data().join("roms/plus-v3.toml")).unwrap();
+    let digest = sha256_bytes(&rom);
+    let metadata = metadata.replace(&digest, &sha256_bytes(b"another ROM"));
+    fs::write(target.data().join("roms/plus-v3.toml"), metadata).unwrap();
+
+    let before = target.snapshot();
+    let output = target.fails(&["import", &archive]);
+    assert!(
+        output.contains("different ROM is already named"),
+        "{output}"
+    );
+    assert_eq!(target.snapshot(), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_rom_reached_through_a_link_is_not_recovered() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["plus-a"], "plus.tar.gz");
+
+    let target = Host::new();
+    let roms = target.data().join("roms");
+    fs::create_dir_all(&roms).unwrap();
+    let elsewhere = source.data().join("roms/plus-v3.rom");
+    std::os::unix::fs::symlink(&elsewhere, roms.join("plus-v3.rom")).unwrap();
+    let output = target.fails(&["import", &archive]);
+    assert!(
+        output.contains("different ROM is already named"),
+        "{output}"
+    );
+    assert!(!roms.join("plus-v3.toml").exists());
+}
+
+#[test]
+fn a_recovered_rom_stays_when_its_machine_cannot_be_published() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["plus-a"], "plus.tar.gz");
+    let rom = fs::read(source.data().join("roms/plus-v3.rom")).unwrap();
+
+    let target = with_interrupted_rom(&rom);
+    // Publication needs the locks directory, which this blocks.
+    fs::write(target.data().join("locks"), "in the way").unwrap();
+    let output = target.fails(&["import", &archive]);
+    assert!(output.contains("failed machine plus-a"), "{output}");
+    assert!(target.data().join("roms/plus-v3.rom").exists());
+    assert!(target.data().join("roms/plus-v3.toml").exists());
+}
+
+/// Waits behind `File::lock`, so the competing machine lands exactly between
+/// the import's own check and its publication.
+#[test]
+fn a_machine_appearing_during_an_import_is_not_replaced() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["plus-a"], "plus.tar.gz");
+
+    let target = Host::new();
+    fs::create_dir_all(target.data().join("locks")).unwrap();
+    let lock = fs::File::create(target.data().join("locks/machines.lock")).unwrap();
+    lock.lock().unwrap();
+
+    let child = target
+        .command(&["import", &archive])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The ROM goes in just before the machine does.
+    let rom = target.data().join("roms/plus-v3.toml");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !rom.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the import never reached the lock"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let competitor = target.machine_dir("plus-a");
+    fs::create_dir_all(&competitor).unwrap();
+    drop(lock);
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        stdout(&output).contains("appeared during the import"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read_dir(&competitor).unwrap().count(), 0);
+    assert!(!rom.exists(), "the ROM added for it was rolled back");
+    assert!(!target.data().join("staging").exists());
 }
 
 #[test]

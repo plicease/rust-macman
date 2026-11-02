@@ -97,6 +97,10 @@ impl Paths {
     pub fn locks(&self) -> PathBuf {
         self.data_dir.join("locks")
     }
+    /// Held by whatever is putting a new machine directory in place.
+    pub fn machines_lock(&self) -> PathBuf {
+        self.locks().join("machines.lock")
+    }
     /// One directory per live `run`; holds throwaway disk copies.
     pub fn sessions(&self) -> PathBuf {
         self.data_dir.join("sessions")

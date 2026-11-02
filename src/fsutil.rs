@@ -161,6 +161,24 @@ pub fn write_toml<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     atomic_write(path, text.as_bytes())
 }
 
+/// [`write_toml`], except that it won't replace an existing file.
+pub fn write_toml_new<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let text = toml::to_string_pretty(value)
+        .with_context(|| format!("cannot serialize {}", path.display()))?;
+    let tmp = temp_sibling(path)?;
+    let result = (|| -> Result<()> {
+        let mut file = File::create(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        publish_new(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result.with_context(|| format!("cannot write {}", path.display()))
+}
+
 /// Names become file names, so restrict them to a safe alphabet.
 pub fn validate_name(kind: &str, name: &str) -> Result<()> {
     let valid_chars = name
