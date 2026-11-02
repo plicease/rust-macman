@@ -84,8 +84,9 @@ macman create iix-71 --model iix --rom maciix --system system-7.1 --memory 8M --
 
 ## Basilisk II
 
-Run this on Linux x86-64. It needs a real ROM and system image, and it uses separate
-directories, so it doesn't touch your machines:
+Run this on Linux x86-64 or Windows x86-64. It needs a real ROM and system image, and it
+uses separate directories, so it doesn't touch your machines. On Windows, set `$root`
+and the rest as at the top of this file, instead of the `export` line.
 
 ```sh
 root="$(mktemp -d)/smoke Zoë"
@@ -118,3 +119,13 @@ macman create q7b --backend basilisk2 --rom quadra650 --system system-7.5.5 --me
 | Run a ROM macman accepts but the emulator refuses | `macman run` fails, though the emulator exits 0. |
 | `macman create q8 --backend basilisk2 ...` with a Mac OS 8.1 image | Boots to the Finder. Note the result here if there's no such image. |
 | `macman import` an archive of `q7` into empty directories, then `macman run q7` | No compiling until the run, and then it boots. |
+
+On Windows, these replace the matching steps:
+
+| Step | Expected |
+|---|---|
+| `Stop-Process -Name BasiliskII -Force` | `macman run` reports the exit as abnormal; `macman doctor` does too. |
+| `macman run q7 --disk "extra 日本.dsk" --readonly` | Mounts the extra disk locked, and its hash stays the same. |
+| `Stop-Process -Name macman -Force` while the emulator runs | The emulator carries on, and opening its disk from elsewhere fails, as does `macman run q7`. `macman doctor` warns that macman stopped first. |
+| `macman create qs --backend basilisk2 ... --shared-folder "a folder"` | Refused. |
+| Close the window instead | On System 7.1, nothing happens. Later systems should ask whether to shut down. |

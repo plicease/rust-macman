@@ -60,15 +60,27 @@ trusted, and the pin would need checking against the tag.
 | Host | Status |
 |---|---|
 | Linux x86-64 | Yes: builds, and boots System 7.5.5 from a Quadra 650 ROM |
-| Windows x86-64 | No. Upstream builds only 32-bit MinGW, with MSYS2 |
+| Windows x86-64 | Yes: builds, and boots System 7.1 from a Quadra 650 ROM with a 68030 setting |
 | macOS ARM64 | No. Upstream builds it with Xcode, and all of macman's work here is on Linux |
 
-macman treats Linux x86-64 as its one Basilisk II host, and anywhere else it refuses to
-create or run such a machine, while still importing one for passing on. No host counts
-as supported until [the smoke test](SMOKE_TEST.md#basilisk-ii) has passed there.
+On any other host macman refuses to create or run such a machine, while still importing
+one for passing on. No host counts as supported until
+[the smoke test](SMOKE_TEST.md#basilisk-ii) has passed there.
 
 Mac OS 8.1 hasn't been tried, for want of an image, and nor have sound on a real device,
-`slirp` networking, or full screen. System 7.5.5 was tested with 68030 and 68040 settings.
+`slirp` networking, or full screen. System 7.5.5 was tested on Linux with 68030 and 68040
+settings.
+
+On Windows, upstream builds only 32-bit MinGW with MSYS2, and macman doesn't follow it. It
+compiles a 64-bit static emulator itself, with MinGW-w64 and the official
+`SDL2-devel-2.32.10-mingw.tar.gz`, whose SHA-256 it pins, so neither Autotools nor MSYS2
+is needed; the changes this takes to the source are explained in
+`src/backend/macemu_windows.rs`.
+
+The Windows smoke test hasn't covered a Shut Down from inside the guest, as Windows kept
+scripted input from reaching the emulator's menus; only the fixture test sees a clean exit
+there. A 68040 boots with a IIci's model, but the System 7.1 image at hand stops with an
+error as a Quadra 900, so the default `--cpu` is yet to be tried, on System 7.5.5 or later.
 
 The pin is commit `f532be3d3d70` of [kanjitalk755/macemu](https://github.com/kanjitalk755/macemu),
 the maintained fork, and its SHA-256 is that of the archive GitHub generates for it. If

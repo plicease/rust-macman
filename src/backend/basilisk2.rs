@@ -1,6 +1,8 @@
 //! Basilisk II adapter, for later 68k software. Everything here comes from the
 //! source of the pinned macemu commit (`BasiliskII/src`): `prefs_items.cpp`,
-//! `Unix/main_unix.cpp`, `Unix/sys_unix.cpp`, and `SDL/video_sdl2.cpp`.
+//! `Unix/main_unix.cpp`, `Unix/sys_unix.cpp`, and `SDL/video_sdl2.cpp`, and on
+//! Windows, their counterparts in `Windows/`, as noted below and in
+//! [`macemu_windows`], which builds it there.
 //!
 //! Unlike Mini vMac, Basilisk II settles everything at run time, from a
 //! preferences file. So one build serves every machine on a host, and the build
@@ -18,12 +20,24 @@
 //!   macman, so the emulator is tied to macman's life: if macman dies, it does
 //!   too, rather than go on writing to a disk that looks free.
 //! - A Disk Copy image is written straight through, leaving its checksum wrong.
+//!
+//! Windows differs again:
+//!
+//! - `Sys_open` denies sharing, so Windows protects an attached disk for as long
+//!   as the emulator has it, and the emulator needn't die with macman.
+//! - Paths reach narrow `CreateFile` calls in buffers of 260 bytes, and longer
+//!   ones are cut short, not refused. The build's manifest makes those calls
+//!   read UTF-8, which is what SDL hands `main`, so any characters work.
+//! - `extfs` is ignored. `enableextfs` instead shows the guest whole drives, so
+//!   this backend can't honor a shared folder here, and refuses one.
+//! - `GetFileSize` reads only the low 32 bits of a disk's size.
 
 use super::minivmac::{MANIFEST, Manifest};
+use super::minivmac::{gcc_target, is_mingw_x64};
 use super::source::{self, Source, SourcePin, tool_exists};
-use super::{Check, EmulatorBackend, Executable, LaunchRequest};
+use super::{Check, EmulatorBackend, Executable, LaunchRequest, macemu_windows};
 use crate::disk::{self, Classification, DiskFormat};
-use crate::fsutil::{sha256_bytes, sha256_file, write_toml};
+use crate::fsutil::{atomic_copy, sha256_bytes, sha256_file, without_verbatim_prefix, write_toml};
 use crate::machine::{Basilisk2Settings, Cpu, Display, Machine, Network};
 use crate::paths::Paths;
 use crate::registry::{self, Rom};
@@ -39,18 +53,32 @@ pub const BACKEND_NAME: &str = "basilisk2";
 pub const DEFAULT_MEMORY: &str = "32M";
 pub const DEFAULT_DISPLAY: (u32, u32, u32) = (640, 480, 8);
 const LABEL: &str = "Basilisk II";
-const EXECUTABLE: &str = "BasiliskII";
-const BUILD_DIRECTORY: &str = "BasiliskII/src/Unix";
+const WINDOWS: bool = cfg!(all(windows, target_arch = "x86_64"));
+const EXECUTABLE: &str = if WINDOWS {
+    macemu_windows::EXECUTABLE
+} else {
+    "BasiliskII"
+};
+const BUILD_DIRECTORY: &str = if WINDOWS {
+    macemu_windows::BUILD_DIRECTORY
+} else {
+    "BasiliskII/src/Unix"
+};
 const PREFERENCES: &str = "prefs";
+/// The session's copy of the ROM, on Windows.
+const ROM_COPY: &str = "rom";
+/// Windows reads a disk's size as 32 bits (`Sys_open`).
+const WINDOWS_MAX_DISK: u64 = 1 << 32;
+const WINDOWS_MAX_PATH: usize = 260;
 /// How `ErrorAlert` reports without a GUI (`STR_SHELL_ERROR_PREFIX`).
 const ERROR_PREFIX: &str = "ERROR: ";
 /// `modelid` is the Gestalt ID less 6. Mac OS 8 needs a 68040 model, and the
 /// Quadra 900 is upstream's; older systems expect the IIci that's its default.
 const MODEL_ID_IICI: u32 = 5;
 const MODEL_ID_QUADRA_900: u32 = 14;
-const HOST_SUPPORTED: bool = cfg!(all(target_os = "linux", target_arch = "x86_64"));
-const UNSUPPORTED_HOST: &str = "the Basilisk II backend supports only Linux x86-64 hosts; see \
-                                docs/PLATFORMS.md";
+const HOST_SUPPORTED: bool = WINDOWS || cfg!(all(target_os = "linux", target_arch = "x86_64"));
+const UNSUPPORTED_HOST: &str = "the Basilisk II backend supports only Linux x86-64 and Windows \
+                                x86-64 hosts; see docs/PLATFORMS.md";
 /// SDL for video and sound, and no GTK, whose dialogs would wait for a click
 /// in place of the `ERROR:` lines macman reads.
 const CONFIGURE_OPTIONS: &[&str] = &[
@@ -76,6 +104,10 @@ pub struct Basilisk2 {
     pin: SourcePin,
     /// Optional local copy of the pinned archive.
     source_archive: Option<PathBuf>,
+    /// The SDL package, on Windows.
+    sdl: SourcePin,
+    /// Optional local copy of that.
+    sdl_archive: Option<PathBuf>,
 }
 
 impl Basilisk2 {
@@ -84,6 +116,16 @@ impl Basilisk2 {
             paths,
             pin,
             source_archive,
+            sdl: macemu_windows::sdl_pin(),
+            sdl_archive: None,
+        }
+    }
+
+    pub fn with_sdl(self, sdl: SourcePin, sdl_archive: Option<PathBuf>) -> Self {
+        Self {
+            sdl,
+            sdl_archive,
+            ..self
         }
     }
 
@@ -97,13 +139,23 @@ impl Basilisk2 {
         }
     }
 
+    fn sdl_source(&self) -> Source<'_> {
+        Source {
+            paths: &self.paths,
+            pin: &self.sdl,
+            local: self.sdl_archive.as_deref(),
+            label: "SDL",
+            config_table: "sdl",
+        }
+    }
+
     fn build_key(&self, toolchain: &str) -> String {
         sha256_bytes(
             format!(
                 "{BACKEND_NAME}\n{}\n{}\n{toolchain}\n{}\n",
                 self.pin.revision,
                 self.pin.sha256,
-                CONFIGURE_OPTIONS.join(" ")
+                build_options().join(" ")
             )
             .as_bytes(),
         )
@@ -124,7 +176,14 @@ impl Basilisk2 {
         let log_path = self.paths.build_logs().join(format!("{key}.log"));
 
         eprintln!("Building {LABEL} {}...", self.pin.revision);
-        let result = run_build(&archive, &src, &log_path);
+        let result = if WINDOWS {
+            self.sdl_source().fetch().and_then(|sdl| {
+                let log = File::create(&log_path).context("cannot create build log")?;
+                macemu_windows::build(&archive, &sdl, &src, &log)
+            })
+        } else {
+            run_build(&archive, &src, &log_path)
+        };
         if verbose && let Ok(log) = fs::read_to_string(&log_path) {
             eprint!("{log}");
         }
@@ -155,9 +214,14 @@ impl Basilisk2 {
             &Manifest {
                 backend: BACKEND_NAME.into(),
                 revision: self.pin.revision.clone(),
-                host: "x86_64-unknown-linux-gnu".into(),
+                host: if WINDOWS {
+                    "x86_64-pc-windows-gnu"
+                } else {
+                    "x86_64-unknown-linux-gnu"
+                }
+                .into(),
                 toolchain: toolchain.into(),
-                options: CONFIGURE_OPTIONS.iter().map(|s| s.to_string()).collect(),
+                options: build_options().iter().map(|s| s.to_string()).collect(),
                 executable: EXECUTABLE.into(),
                 executable_sha256: sha256_file(&publish.join(EXECUTABLE))?,
                 bundle: None,
@@ -171,6 +235,14 @@ impl Basilisk2 {
         fs::rename(&publish, &dest).context("cannot publish build")?;
         let _ = fs::remove_dir_all(&work);
         Ok(())
+    }
+}
+
+fn build_options() -> &'static [&'static str] {
+    if WINDOWS {
+        macemu_windows::DEFINES
+    } else {
+        CONFIGURE_OPTIONS
     }
 }
 
@@ -219,9 +291,20 @@ fn first_line(program: &str, args: &[&str]) -> Option<String> {
 
 /// `g++` compiles most of it, and `gcc` the rest. SDL is linked dynamically,
 /// but a new version may change what `configure` finds.
-fn toolchain_identity() -> Result<String> {
+fn toolchain_identity(sdl_pin: &SourcePin) -> Result<String> {
     let hint = "install a C++ compiler (run `macman doctor`)";
     let compiler = first_line("g++", &["--version"]).context(hint)?;
+    if WINDOWS {
+        let target = gcc_target()?;
+        if !is_mingw_x64(&target) {
+            bail!("gcc targets {target}, not 64-bit Windows; run `macman doctor`");
+        }
+        let recipe = macemu_windows::RECIPE;
+        return Ok(format!(
+            "{target} {compiler} SDL {} {recipe}",
+            sdl_pin.sha256
+        ));
+    }
     let sdl = first_line("pkg-config", &["--modversion", "sdl2"]);
     Ok(format!("{compiler} SDL {}", sdl.as_deref().unwrap_or("?")))
 }
@@ -305,7 +388,8 @@ fn preferences(machine: &Machine) -> String {
          idlewait true\n\
          bootdrive 0\n\
          bootdriver 0\n\
-         extfs \n",
+         extfs \n\
+         {host}",
         name = machine.name,
         ramsize = u64::from(megabytes) * 1024 * 1024,
         cpu = cpu_level(settings.cpu),
@@ -315,6 +399,12 @@ fn preferences(machine: &Machine) -> String {
         depth = display.depth,
         scale = display.scale,
         nosound = !settings.sound,
+        // Without these, Windows would offer the host's drives and media.
+        host = if WINDOWS {
+            "enableextfs false\npollmedia false\n"
+        } else {
+            ""
+        },
     );
     if settings.network == Network::Slirp {
         text.push_str("ether slirp\n");
@@ -340,6 +430,41 @@ fn arguments(request: &LaunchRequest<'_>, preferences: &Path) -> Vec<OsString> {
         arguments.extend(["--extfs".into(), folder.into()]);
     }
     arguments
+}
+
+/// What Basilisk II can open on Windows, or why it can't. A session's own disk
+/// goes by its name there, which keeps it short.
+fn windows_disk_path(disk: &Path, workdir: &Path) -> Result<PathBuf> {
+    let path = match disk.strip_prefix(workdir) {
+        Ok(name) => name.to_path_buf(),
+        Err(_) => without_verbatim_prefix(disk),
+    };
+    // Bytes, in UTF-8, not characters: that's what its buffers hold.
+    if path.to_string_lossy().len() >= WINDOWS_MAX_PATH {
+        bail!(
+            "{} is too long for Basilisk II, which handles paths under {WINDOWS_MAX_PATH} bytes; \
+             move it to a shorter path",
+            disk.display()
+        );
+    }
+    Ok(path)
+}
+
+/// The arguments on Windows: see the module comment for why they're different.
+fn windows_arguments(request: &LaunchRequest<'_>) -> Result<Vec<OsString>> {
+    atomic_copy(request.rom, &request.workdir.join(ROM_COPY))?;
+    let mut arguments: Vec<OsString> = vec![
+        "--config".into(),
+        PREFERENCES.into(),
+        "--rom".into(),
+        ROM_COPY.into(),
+    ];
+    for disk in request.disks {
+        let mut value = OsString::from(if disk.writable { "" } else { "*" });
+        value.push(windows_disk_path(&disk.path, request.workdir)?);
+        arguments.extend(["--disk".into(), value]);
+    }
+    Ok(arguments)
 }
 
 /// Have the kernel stop the emulator if macman dies, because the locks on its
@@ -428,6 +553,12 @@ impl EmulatorBackend for Basilisk2 {
         if settings.cpu == Cpu::M68040 && !settings.fpu {
             bail!("a 68040 always has an FPU; pick --cpu 68030 to leave it out");
         }
+        if WINDOWS && settings.shared_folder.is_some() {
+            bail!(
+                "shared folders aren't available with Basilisk II on Windows, where it can only \
+                 show the guest whole drives"
+            );
+        }
         Ok(())
     }
 
@@ -456,6 +587,12 @@ impl EmulatorBackend for Basilisk2 {
     }
 
     fn check_disk(&self, path: &Path, writable: bool) -> Result<()> {
+        if WINDOWS && fs::metadata(path)?.len() >= WINDOWS_MAX_DISK {
+            bail!(
+                "{} is too big for Basilisk II on Windows, which handles disks under 4G",
+                path.display()
+            );
+        }
         if writable && disk::classify(path)? == Classification::Supported(DiskFormat::DiskCopy42) {
             bail!(
                 "{} is a Disk Copy 4.2 image, and Basilisk II would change it without updating \
@@ -469,7 +606,7 @@ impl EmulatorBackend for Basilisk2 {
     fn prepare(&self, machine: &Machine, verbose: bool) -> Result<Executable> {
         self.check_host()?;
         self.validate(machine)?;
-        let toolchain = toolchain_identity()?;
+        let toolchain = toolchain_identity(&self.sdl)?;
         let key = self.build_key(&toolchain);
         source::cached_or_built(&self.paths, key, LABEL, |key| {
             self.build(key, &toolchain, verbose)
@@ -486,9 +623,14 @@ impl EmulatorBackend for Basilisk2 {
         fs::write(&file, preferences(request.machine))
             .with_context(|| format!("cannot write {}", file.display()))?;
 
+        let arguments = if WINDOWS {
+            windows_arguments(request)?
+        } else {
+            arguments(request, &file)
+        };
         let mut command = Command::new(&request.executable.path);
         command
-            .args(arguments(request, &file))
+            .args(arguments)
             .current_dir(request.workdir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped());
@@ -521,6 +663,21 @@ impl EmulatorBackend for Basilisk2 {
             )];
         }
         let mut checks = Vec::new();
+        if WINDOWS {
+            // Mini vMac's checks already cover the rest of MinGW.
+            if tool_exists("g++") {
+                checks.push(Check::ok("g++ found, for Basilisk II"));
+            } else {
+                checks.push(Check::fail(
+                    "g++ not found, which Basilisk II needs",
+                    "install MinGW-w64, then open a new terminal: \
+                     winget install BrechtSanders.WinLibs.POSIX.UCRT",
+                ));
+            }
+            checks.push(self.source().check());
+            checks.push(self.sdl_source().check());
+            return checks;
+        }
         const INSTALL: &str = "install what Basilisk II builds with (Debian/Ubuntu: apt install \
                                build-essential autoconf automake pkg-config libsdl2-dev)";
         for tool in [
@@ -603,27 +760,29 @@ mod tests {
 
     #[test]
     fn translates_a_machine_to_preferences() {
-        assert_eq!(
-            lines(&preferences(&machine())),
-            [
-                "nogui true",
-                "title quadra",
-                "ramsize 67108864",
-                "cpu 4",
-                "fpu true",
-                "modelid 14",
-                "screen win/800/600",
-                "displaycolordepth 16",
-                "mag_rate 2",
-                "nosound false",
-                "nocdrom true",
-                "jit false",
-                "idlewait true",
-                "bootdrive 0",
-                "bootdriver 0",
-                "extfs ",
-            ]
-        );
+        let text = preferences(&machine());
+        let mut expected = vec![
+            "nogui true",
+            "title quadra",
+            "ramsize 67108864",
+            "cpu 4",
+            "fpu true",
+            "modelid 14",
+            "screen win/800/600",
+            "displaycolordepth 16",
+            "mag_rate 2",
+            "nosound false",
+            "nocdrom true",
+            "jit false",
+            "idlewait true",
+            "bootdrive 0",
+            "bootdriver 0",
+            "extfs ",
+        ];
+        if WINDOWS {
+            expected.extend(["enableextfs false", "pollmedia false"]);
+        }
+        assert_eq!(lines(&text), expected);
     }
 
     #[test]
@@ -802,6 +961,55 @@ mod tests {
         let error = backend().check_disk(&path, true).unwrap_err().to_string();
         assert!(error.contains("--readonly"), "{error}");
         backend().check_disk(&path, false).unwrap();
+    }
+
+    #[test]
+    fn a_windows_session_disk_goes_by_its_ascii_name() {
+        let session = Path::new("session");
+        assert_eq!(
+            windows_disk_path(&session.join("1-app.dsk"), session).unwrap(),
+            Path::new("1-app.dsk")
+        );
+    }
+
+    /// Longer ones would be cut short and open the wrong file, or none. This
+    /// counts bytes, so 90 characters of Japanese are just over the limit.
+    #[test]
+    fn a_windows_path_must_fit_the_emulator_s_buffers_in_bytes() {
+        let session = Path::new("session");
+        let fits = PathBuf::from(format!("{}.dsk", "x".repeat(WINDOWS_MAX_PATH - 5)));
+        assert_eq!(windows_disk_path(&fits, session).unwrap(), fits);
+        for name in [
+            format!("{}.dsk", "x".repeat(WINDOWS_MAX_PATH - 4)),
+            format!("{}.dsk", "日".repeat(WINDOWS_MAX_PATH / 3)),
+        ] {
+            let error = windows_disk_path(Path::new(&name), session)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("too long"), "{error}");
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_shared_folder_is_refused_where_only_whole_drives_can_be_shared() {
+        let mut m = machine();
+        m.basilisk2.as_mut().unwrap().shared_folder = Some("C:\\shared".into());
+        let error = backend().validate(&m).unwrap_err().to_string();
+        assert!(error.contains("whole drives"), "{error}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_refuses_a_disk_whose_size_it_would_misread() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.dsk");
+        File::create(&path)
+            .unwrap()
+            .set_len(WINDOWS_MAX_DISK)
+            .unwrap();
+        let error = backend().check_disk(&path, true).unwrap_err().to_string();
+        assert!(error.contains("under 4G"), "{error}");
     }
 
     #[test]

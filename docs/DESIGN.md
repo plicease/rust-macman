@@ -212,6 +212,16 @@ Checked against the pinned macemu source and real builds; see [PLATFORMS.md](PLA
 - **ROMs:** it starts only from 32-bit clean ROMs, which have no registered models, so backends check ROMs themselves.
 - **Disks:** it writes straight through a Disk Copy image, so those attach read-only or not at all.
 
+On Windows it also differs from its Linux self. `src/backend/macemu_windows.rs` has the details of the build:
+
+- **Build:** no `configure`, as the tree's Windows port targets 32-bit MSVC. macman edits `config.h`, generates a Makefile, and links a static 64-bit `BasiliskII.exe` against a pinned SDL 2 package. The key covers the source, the compiler, SDL, and `RECIPE`, which changes with these steps.
+- **Patches:** `vm_acquire` allocates bottom-up, or memory comes back in descending order and Mac addresses wrap. `ErrorAlert` prints under `nogui`, or a refusal would be silent.
+- **Unicode:** a manifest sets the active code page to UTF-8, since SDL hands `main` UTF-8 and the emulator opens files with narrow calls. Short names won't do, as NTFS keeps characters like `ë` in them.
+- **Launch:** preferences and a copy of the ROM go in the session, by relative name, as XPRAM lands in the current directory, and every path is limited to 259 bytes.
+- **Host files:** `extfs` is ignored, and `enableextfs` shows whole drives, so it's always off, and a shared folder is refused.
+- **Locks:** `CreateFile` opens disks with no sharing, so Windows protects them itself, and the emulator can outlive macman.
+- **Disks:** `GetFileSize` is read as 32 bits, so disks of 4G or more are refused.
+
 Shared code is limited to fetching a pinned source and publishing a build, in `src/backend/source.rs`. SheepShaver could use the same, but nothing here assumes so.
 
 ### Backend boundary

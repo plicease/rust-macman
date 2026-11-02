@@ -233,6 +233,9 @@ pub struct Config {
     pub minivmac: SourceConfig,
     #[serde(default, skip_serializing_if = "SourceConfig::is_empty")]
     pub basilisk2: SourceConfig,
+    /// The SDL package that Basilisk II builds with on Windows.
+    #[serde(default, skip_serializing_if = "SourceConfig::is_empty")]
+    pub sdl: SourceConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

@@ -389,15 +389,18 @@ fn run_windows_build(archive: &Path, src: &Path, options: &[String], log: &File)
 /// The 8.3 form of `path` if it has one. MinGW's make uses the narrow Windows
 /// API, and stops at a working directory outside the system code page.
 #[cfg(windows)]
-fn short_path(path: &Path) -> PathBuf {
+pub(super) fn short_path(path: &Path) -> PathBuf {
     use std::ffi::OsString;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
 
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-    let mut short = vec![0u16; wide.len()];
-    // SAFETY: `wide` is NUL-terminated, and the length is that of `short`. A
-    // short form is never longer than the long one, which `short` can hold.
+    // A short form can be the longer one: `日本.dsk` is six units, and its 8.3
+    // name up to twelve. So ask how much room it takes.
+    // SAFETY: `wide` is NUL-terminated, and a null buffer of length 0 is valid.
+    let needed = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    let mut short = vec![0u16; needed as usize];
+    // SAFETY: as above, and the length is that of `short`.
     let length =
         unsafe { GetShortPathNameW(wide.as_ptr(), short.as_mut_ptr(), short.len() as u32) };
     match short.get(..length as usize) {
@@ -407,7 +410,7 @@ fn short_path(path: &Path) -> PathBuf {
 }
 
 #[cfg(not(windows))]
-fn short_path(path: &Path) -> PathBuf {
+pub(super) fn short_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
@@ -443,7 +446,7 @@ fn use_wide_windows_api(makefile: &str) -> Result<String> {
 }
 
 /// MinGW's own make goes by this name; a plain `make` may be something else.
-fn make_tool() -> &'static str {
+pub(super) fn make_tool() -> &'static str {
     if tool_exists("mingw32-make") {
         "mingw32-make"
     } else {
@@ -550,7 +553,7 @@ fn toolchain_identity() -> Result<String> {
     Ok(format!("{target} {version}"))
 }
 
-fn gcc_target() -> Result<String> {
+pub(super) fn gcc_target() -> Result<String> {
     let output = Command::new("gcc")
         .arg("-dumpmachine")
         .output()
@@ -559,7 +562,7 @@ fn gcc_target() -> Result<String> {
 }
 
 /// Cygwin and MSYS compilers also run on Windows, but need their own runtimes.
-fn is_mingw_x64(target: &str) -> bool {
+pub(super) fn is_mingw_x64(target: &str) -> bool {
     target.starts_with("x86_64-") && target.contains("mingw")
 }
 
