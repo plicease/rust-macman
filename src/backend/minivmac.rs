@@ -882,6 +882,7 @@ mod tests {
         Machine {
             schema_version: 1,
             name: "m".into(),
+            id: None,
             emulator: EmulatorConfig {
                 backend: BACKEND_NAME.into(),
                 revision: "36.04".into(),

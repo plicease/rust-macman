@@ -50,6 +50,21 @@ pub enum Command {
     Config(ConfigCommand),
     /// Copy a machine and its private disks
     Clone { source: String, dest: String },
+    /// Write machines, with their ROMs and disks, to an archive for another host
+    Export {
+        #[arg(required = true, value_name = "NAME")]
+        names: Vec<String>,
+        /// Archive to create, such as machines.tar.gz
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+    },
+    /// Bring in machines from an archive; existing data is never replaced
+    Import {
+        file: PathBuf,
+        /// Import an independent copy under this name (one-machine archives only)
+        #[arg(long, value_name = "NAME")]
+        rename: Option<String>,
+    },
     /// Remove a machine; registered ROMs and system images are kept
     Remove {
         name: String,

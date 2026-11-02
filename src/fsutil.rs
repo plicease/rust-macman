@@ -70,7 +70,7 @@ pub fn atomic_copy_range_checked(
 }
 
 /// Move `tmp` to `dst`, failing if `dst` appeared since it was last checked.
-fn publish_new(tmp: &Path, dst: &Path) -> Result<()> {
+pub fn publish_new(tmp: &Path, dst: &Path) -> Result<()> {
     publish_new_with(tmp, dst, |from, to| fs::hard_link(from, to))
 }
 
@@ -98,7 +98,7 @@ fn publish_new_with(
     }
 }
 
-fn temp_sibling(path: &Path) -> Result<PathBuf> {
+pub fn temp_sibling(path: &Path) -> Result<PathBuf> {
     let parent = path.parent().context("path has no parent directory")?;
     fs::create_dir_all(parent)
         .with_context(|| format!("cannot create directory {}", parent.display()))?;
@@ -137,6 +137,10 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     }
 }
 
+pub fn hex_digest(hasher: Sha256) -> String {
+    hex(&hasher.finalize())
+}
+
 pub fn sha256_bytes(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
@@ -155,6 +159,24 @@ pub fn write_toml<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let text = toml::to_string_pretty(value)
         .with_context(|| format!("cannot serialize {}", path.display()))?;
     atomic_write(path, text.as_bytes())
+}
+
+/// [`write_toml`], except that it won't replace an existing file.
+pub fn write_toml_new<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let text = toml::to_string_pretty(value)
+        .with_context(|| format!("cannot serialize {}", path.display()))?;
+    let tmp = temp_sibling(path)?;
+    let result = (|| -> Result<()> {
+        let mut file = File::create(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        publish_new(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result.with_context(|| format!("cannot write {}", path.display()))
 }
 
 /// Names become file names, so restrict them to a safe alphabet.
@@ -180,7 +202,7 @@ pub fn validate_name(kind: &str, name: &str) -> Result<()> {
 
 /// Device names are reserved whatever follows the first dot, and a trailing
 /// dot is silently dropped, which would make two names one directory.
-fn windows_can_name(name: &str) -> bool {
+pub fn windows_can_name(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
     let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || (stem.len() == 4

@@ -59,7 +59,7 @@ With `--readonly`, the emulator gets a read-only throwaway copy, so your file ca
 change. Without it, the emulator writes to the file itself.
 
 Other commands: `list [--builds]`, `current`, `rom list`, `system list`,
-`config show`, `clone`, `remove`, and `doctor`. Add `--verbose` for build and launch
+`config show`, `clone`, `export`, `import`, `remove`, and `doctor`. Add `--verbose` for build and launch
 logs.
 
 On Linux, files live under the XDG directories: `~/.config/macman`,
@@ -121,6 +121,32 @@ macman disk extract system710-zip.image system710-hfs.img
 extracting or registering first. Blank images are fine, and `--any-format` attaches an image macman
 can't identify, ideally with `--readonly`. See
 [docs/DISK_FORMATS.md](docs/DISK_FORMATS.md) for the details.
+
+## Moving machines between hosts
+
+`macman export` writes machines to an archive, with each one's current disks and the
+ROM it uses. `macman import` brings them in on another host, with no compiling until
+the first `run`:
+
+```sh
+macman export wombat-6 maciix-7 -o classic-macs.tar.gz
+macman import classic-macs.tar.gz
+```
+
+Export refuses a machine whose disks are in use, so close the emulator first. Import
+never replaces anything: importing the same archive again reports `unchanged`, and a
+machine or ROM that differs from what's already there is reported as a conflict and
+left alone, while the rest of the archive still imports. `macman import` exits with
+status 1 if anything was left unresolved. To keep both, import a single-machine
+archive as an independent copy:
+
+```sh
+macman import wombat-6.tar.gz --rename wombat-6-imported
+```
+
+Apple ROMs and System Software are copyrighted, and archives contain them. Use
+archives to move your own machines between your own computers, and don't publish
+them. See [docs/EXPORT_IMPORT.md](docs/EXPORT_IMPORT.md) for the details.
 
 ## Working offline
 

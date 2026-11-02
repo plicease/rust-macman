@@ -97,9 +97,17 @@ impl Paths {
     pub fn locks(&self) -> PathBuf {
         self.data_dir.join("locks")
     }
+    /// Held by whatever is putting a new machine directory in place.
+    pub fn machines_lock(&self) -> PathBuf {
+        self.locks().join("machines.lock")
+    }
     /// One directory per live `run`; holds throwaway disk copies.
     pub fn sessions(&self) -> PathBuf {
         self.data_dir.join("sessions")
+    }
+    /// Working space for `macman import`, on the same filesystem as the data.
+    pub fn staging(&self) -> PathBuf {
+        self.data_dir.join("staging")
     }
     pub fn builds(&self) -> PathBuf {
         self.cache_dir.join("builds")
