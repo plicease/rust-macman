@@ -10,15 +10,16 @@ ROMs or system software. See [docs/DESIGN.md](docs/DESIGN.md) for the full desig
 
 ## Requirements
 
-Linux x86-64 with an X11 session, plus what Mini vMac needs to compile: `gcc`,
-`make`, `bash`, `tar`, and the X11 headers. On Debian or Ubuntu:
+macman can currently build and run Mini vMac only on Linux x86-64 and Windows x86-64;
+see [docs/PLATFORMS.md](docs/PLATFORMS.md). Linux needs an X11 session, plus what Mini
+vMac needs to compile: `gcc`, `make`, `bash`, `tar`, and the X11 headers. On Debian or
+Ubuntu:
 
 ```sh
 apt install build-essential libx11-dev libxext-dev curl
 ```
 
-Or Windows x86-64 with a native MinGW-w64 toolchain. WSL, Cygwin, and MSVC aren't
-used. `tar` and `curl` come with Windows, and this provides the rest:
+Windows needs a native MinGW-w64 toolchain. WSL, Cygwin, and MSVC aren't used. `tar` and `curl` come with Windows, and this provides the rest:
 
 ```powershell
 winget install BrechtSanders.WinLibs.POSIX.UCRT
@@ -106,8 +107,19 @@ macman system add ~/images/system710-zip.image --name system-7.1 --version 7.1
 If a disk has several volumes, choose one with `--partition N`. Disk Copy images are
 unwrapped the same way, because Mini vMac attaches them read-only.
 
+To get a volume without registering anything, use `macman disk`. `disk info` shows an
+image's format and partitions, and `disk extract` copies a volume out, following the
+same rules and never overwriting an existing file:
+
+```sh
+macman disk info system710-zip.image
+macman disk extract system710-zip.image system710-hfs.img
+```
+
+`--raw` with `--partition N` extracts a partition whatever it holds, such as a driver.
+
 `macman run --disk` takes an image as it stands, so a partitioned disk needs
-registering first. Blank images are fine, and `--any-format` attaches an image macman
+extracting or registering first. Blank images are fine, and `--any-format` attaches an image macman
 can't identify, ideally with `--readonly`. See
 [docs/DISK_FORMATS.md](docs/DISK_FORMATS.md) for the details.
 

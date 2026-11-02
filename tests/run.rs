@@ -1,5 +1,6 @@
 //! `macman run`, against a mock backend and against the real Mini vMac adapter
 //! fed a small fixture source tree, which needs only gcc, make, bash, and tar.
+//! That fixture is Unix only; see `tests/windows_adapter.rs` for its counterpart.
 
 mod common;
 
@@ -494,6 +495,33 @@ fn any_format_admits_unrecognized_disks() {
     ])
     .unwrap();
     assert_eq!(mock.0.borrow().launches.len(), 1);
+}
+
+#[test]
+fn disk_commands_wait_for_no_one_writing_the_source() {
+    let (h, _mock) = Harness::mock();
+    let (image, _) = write_partitioned_disk(h.dir(), "zip.image");
+    let source = image.to_str().unwrap();
+    let dest = h.dir().join("out.img");
+    let dest_str = dest.to_str().unwrap();
+
+    // Another macman has the image attached for writing.
+    let writer = lock_image(&h.paths, &image, LockMode::Exclusive).unwrap();
+    let err = h.cmd(&["disk", "info", source]).unwrap_err();
+    assert!(err.to_string().contains("in use"), "{err}");
+    let err = h.cmd(&["disk", "extract", source, dest_str]).unwrap_err();
+    assert!(err.to_string().contains("in use"), "{err}");
+    assert!(!dest.exists());
+    drop(writer);
+
+    // Other readers don't get in the way.
+    let reader = lock_image(&h.paths, &image, LockMode::Shared).unwrap();
+    h.cmd(&["disk", "info", source]).unwrap();
+    h.cmd(&["disk", "extract", source, dest_str]).unwrap();
+    drop(reader);
+
+    // Nothing keeps the source locked afterwards.
+    assert!(lock_image(&h.paths, &image, LockMode::Exclusive).is_ok());
 }
 
 #[test]

@@ -2,8 +2,10 @@
 
 use crate::backend::minivmac::{MANIFEST, Manifest};
 use crate::backend::{Backends, Check, CheckLevel, LaunchRequest, ResolvedDisk};
-use crate::cli::{Cli, Command, ConfigCommand, CreateArgs, RomCommand, RunArgs, SystemCommand};
-use crate::disk::{self, ImageLock, LockMode, Session, SessionRecord};
+use crate::cli::{
+    Cli, Command, ConfigCommand, CreateArgs, DiskCommand, RomCommand, RunArgs, SystemCommand,
+};
+use crate::disk::{self, Classification, DiskFormat, ImageLock, LockMode, Session, SessionRecord};
 use crate::fsutil::{
     atomic_copy, list_dir, read_toml, sha256_file, validate_name, without_verbatim_prefix,
 };
@@ -60,6 +62,13 @@ impl App {
                 }
             }
             Command::System(SystemCommand::List) => self.list_systems()?,
+            Command::Disk(DiskCommand::Info { file }) => self.disk_info(&file)?,
+            Command::Disk(DiskCommand::Extract {
+                source,
+                dest,
+                partition,
+                raw,
+            }) => self.disk_extract(&source, &dest, partition, raw)?,
             Command::Create(args) => {
                 self.create(args)?;
             }
@@ -170,6 +179,69 @@ impl App {
                 system.name,
                 system.size / 1024
             );
+        }
+        Ok(())
+    }
+
+    fn disk_info(&self, file: &Path) -> Result<()> {
+        let _guard = disk::lock_image(&self.paths, file, LockMode::Shared)?;
+        let size = fs::metadata(file)?.len();
+        println!("{}: {size} bytes", file.display());
+        match disk::classify(file)? {
+            Classification::Supported(DiskFormat::DiskCopy42) => {
+                let (offset, length, volume) = disk::disk_copy_contents(file)?;
+                println!("Format: Disk Copy 4.2, read-only in Mini vMac");
+                println!("Data: {length} bytes at offset {offset}");
+                println!(
+                    "Volume: {}",
+                    volume.map_or("none recognized", disk::volume_name)
+                );
+            }
+            Classification::Supported(format) => {
+                println!("Format: raw {} volume", disk::volume_name(format));
+            }
+            Classification::Partitioned(partitions) => {
+                println!("Format: partitioned disk, not mountable by Mini vMac as it stands");
+                println!(
+                    "{:>3}  {:<24} {:>12} {:>12}  Volume",
+                    "#", "Type", "Offset", "Length"
+                );
+                for p in &partitions {
+                    let volume = match (p.in_bounds, p.volume) {
+                        (false, _) => "out of bounds",
+                        (true, Some(format)) => disk::volume_name(format),
+                        (true, None) => "-",
+                    };
+                    println!(
+                        "{:>3}  {:<24} {:>12} {:>12}  {volume}",
+                        p.index, p.kind, p.offset, p.length
+                    );
+                }
+            }
+            Classification::Blank => println!("Format: blank"),
+            Classification::Unsupported(what) => println!("Format: {what}; not supported"),
+            Classification::Unrecognized => println!("Format: not recognized"),
+        }
+        Ok(())
+    }
+
+    fn disk_extract(
+        &self,
+        source: &Path,
+        dest: &Path,
+        partition: Option<u32>,
+        raw: bool,
+    ) -> Result<()> {
+        let _guard = disk::lock_image(&self.paths, source, LockMode::Shared)?;
+        let import = disk::extract_volume(source, dest, partition, raw)?;
+        let what = import.extracted.as_deref().unwrap_or("a raw volume");
+        println!(
+            "Extracted {what} to {} ({}K)",
+            dest.display(),
+            import.length / 1024
+        );
+        if raw {
+            println!("Not checked as a volume, because of --raw");
         }
         Ok(())
     }

@@ -31,33 +31,43 @@ pub fn write_disk(dir: &Path, name: &str) -> PathBuf {
     path
 }
 
-/// A disk with a partition map, a driver, and one HFS volume at block 96.
+/// A disk with a partition map, a driver, and an HFS volume at block 96.
 /// Returns the path and the volume's bytes.
 pub fn write_partitioned_disk(dir: &Path, name: &str) -> (PathBuf, Vec<u8>) {
-    let mut bytes = vec![0u8; 2048 * 512];
+    let (path, mut volumes) = write_disk_with_volumes(dir, name, &[96]);
+    (path, volumes.remove(0))
+}
+
+/// As [`write_partitioned_disk`], with a 1600-block HFS volume at each block in
+/// `starts`, as partitions 3 onwards. Each volume's contents are distinct.
+pub fn write_disk_with_volumes(dir: &Path, name: &str, starts: &[u32]) -> (PathBuf, Vec<Vec<u8>>) {
+    let blocks = starts.iter().max().unwrap_or(&96) + 2048;
+    let mut bytes = vec![0u8; blocks as usize * 512];
     bytes[..2].copy_from_slice(b"ER");
     bytes[2..4].copy_from_slice(&512u16.to_be_bytes());
-    for (index, (start, length, kind)) in [
+    let mut entries = vec![
         (1u32, 63u32, "Apple_partition_map"),
         (64, 32, "Apple_Driver"),
-        (96, 1600, "Apple_HFS"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    ];
+    entries.extend(starts.iter().map(|start| (*start, 1600, "Apple_HFS")));
+    for (index, (start, length, kind)) in entries.iter().enumerate() {
         let at = (index + 1) * 512;
         bytes[at..at + 2].copy_from_slice(b"PM");
-        bytes[at + 4..at + 8].copy_from_slice(&3u32.to_be_bytes());
+        bytes[at + 4..at + 8].copy_from_slice(&(entries.len() as u32).to_be_bytes());
         bytes[at + 8..at + 12].copy_from_slice(&start.to_be_bytes());
         bytes[at + 12..at + 16].copy_from_slice(&length.to_be_bytes());
         bytes[at + 48..at + 48 + kind.len()].copy_from_slice(kind.as_bytes());
     }
-    let volume = 96 * 512;
-    bytes[volume..volume + 2].copy_from_slice(b"LK");
-    bytes[volume + 1024..volume + 1026].copy_from_slice(b"BD");
-    bytes[volume + 4096] = 0xAB;
+    bytes[64 * 512] = 0xDD; // the driver
+    let mut volumes = Vec::new();
+    for (index, start) in starts.iter().enumerate() {
+        let volume = *start as usize * 512;
+        bytes[volume..volume + 2].copy_from_slice(b"LK");
+        bytes[volume + 1024..volume + 1026].copy_from_slice(b"BD");
+        bytes[volume + 4096] = 0xA0 + index as u8;
+        volumes.push(bytes[volume..volume + 1600 * 512].to_vec());
+    }
     let path = dir.join(name);
     fs::write(&path, &bytes).unwrap();
-    let extracted = bytes[volume..volume + 1600 * 512].to_vec();
-    (path, extracted)
+    (path, volumes)
 }

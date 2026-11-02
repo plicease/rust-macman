@@ -203,13 +203,7 @@ pub fn add_system(
     // Held throughout, so the map, the copied volume, and the recorded source
     // hash all describe one state of the source, for cooperating processes.
     let _guard = disk::lock_image(paths, source, LockMode::Shared)?;
-    let import = disk::plan_import(source, partition)?;
-    atomic_copy_range(source, import.offset, import.length, &dest)?;
-    // Check what was stored, not just the plan, before registering it.
-    if let Err(error) = disk::detect_format(&dest) {
-        let _ = std::fs::remove_file(&dest);
-        return Err(error.context("the extracted volume is not usable; nothing was registered"));
-    }
+    let import = disk::extract_volume(source, &dest, partition, false)?;
     if !disk::has_boot_blocks(&dest)? {
         eprintln!("warning: {name} has no boot blocks, so it cannot start up a machine");
     }

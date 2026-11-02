@@ -2,7 +2,10 @@
 
 mod common;
 
-use common::{II_ROM_CHECKSUM, PLUS_ROM_CHECKSUM, write_disk, write_partitioned_disk, write_rom};
+use common::{
+    II_ROM_CHECKSUM, PLUS_ROM_CHECKSUM, write_disk, write_disk_with_volumes,
+    write_partitioned_disk, write_rom,
+};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -354,6 +357,197 @@ fn rom_with_trailing_data_works_and_says_so() {
         env.ok(&["rom", "list"])
             .contains("plus-v3  128K  512ke/plus")
     );
+}
+
+#[test]
+fn disk_extract_matches_dd_byte_for_byte() {
+    let env = Env::new();
+    let (image, _) = write_partitioned_disk(env.path(), "system-zip.image");
+    let before = fs::read(&image).unwrap();
+    let dest = env.path().join("hfs.img");
+
+    let out = env.ok(&[
+        "disk",
+        "extract",
+        image.to_str().unwrap(),
+        dest.to_str().unwrap(),
+    ]);
+    assert!(out.contains("Extracted partition 3 (Apple_HFS)"), "{out}");
+
+    let by_hand = env.path().join("dd.img");
+    let dd = Command::new("dd")
+        .arg(format!("if={}", image.display()))
+        .arg(format!("of={}", by_hand.display()))
+        .args(["bs=512", "skip=96", "count=1600"])
+        .output()
+        .unwrap();
+    assert!(dd.status.success());
+    assert_eq!(fs::read(&dest).unwrap(), fs::read(by_hand).unwrap());
+    assert_eq!(
+        fs::read(&image).unwrap(),
+        before,
+        "the source is left alone"
+    );
+
+    // The result is itself a usable image.
+    assert!(
+        env.ok(&["disk", "info", dest.to_str().unwrap()])
+            .contains("raw HFS volume")
+    );
+}
+
+#[test]
+fn disk_extract_requires_a_choice_among_several_volumes() {
+    let env = Env::new();
+    let (image, volumes) = write_disk_with_volumes(env.path(), "two.image", &[96, 1696]);
+    let source = image.to_str().unwrap();
+    let dest = env.path().join("out.img");
+    let dest_str = dest.to_str().unwrap();
+
+    let error = env.fails(&["disk", "extract", source, dest_str]);
+    assert!(error.contains("--partition"), "{error}");
+    assert!(
+        error.contains("3: Apple_HFS") && error.contains("4: Apple_HFS"),
+        "{error}"
+    );
+    assert!(!dest.exists());
+
+    env.ok(&["disk", "extract", source, dest_str, "--partition", "4"]);
+    assert_eq!(fs::read(&dest).unwrap(), volumes[1]);
+
+    let driver_only = env.fails(&["disk", "extract", source, "x.img", "--partition", "2"]);
+    assert!(driver_only.contains("holds no MFS or HFS"), "{driver_only}");
+}
+
+#[test]
+fn disk_extract_raw_is_opt_in() {
+    let env = Env::new();
+    let (image, _) = write_partitioned_disk(env.path(), "zip.image");
+    let source = image.to_str().unwrap();
+    let dest = env.path().join("driver.bin");
+    let dest_str = dest.to_str().unwrap();
+
+    let out = env.ok(&[
+        "disk",
+        "extract",
+        source,
+        dest_str,
+        "--partition",
+        "2",
+        "--raw",
+    ]);
+    assert!(out.contains("--raw"), "{out}");
+    let bytes = fs::read(&dest).unwrap();
+    assert_eq!((bytes.len(), bytes[0]), (32 * 512, 0xDD));
+
+    // Without a partition, --raw can't choose.
+    assert_eq!(
+        env.run(&["disk", "extract", source, "x", "--raw"])
+            .status
+            .code(),
+        Some(2)
+    );
+}
+
+#[test]
+fn disk_extract_unwraps_disk_copy() {
+    let env = Env::new();
+    let mut image = vec![0u8; 84 + 1600 * 512];
+    image[64..68].copy_from_slice(&(1600u32 * 512).to_be_bytes());
+    image[82] = 1;
+    image[84 + 1024..84 + 1026].copy_from_slice(b"BD");
+    let source = env.path().join("floppy.image");
+    fs::write(&source, &image).unwrap();
+    let dest = env.path().join("floppy.dsk");
+
+    let info = env.ok(&["disk", "info", source.to_str().unwrap()]);
+    assert!(info.contains("Disk Copy 4.2"), "{info}");
+    assert!(info.contains("819200 bytes at offset 84"), "{info}");
+    assert!(info.contains("Volume: HFS"), "{info}");
+
+    let out = env.ok(&[
+        "disk",
+        "extract",
+        source.to_str().unwrap(),
+        dest.to_str().unwrap(),
+    ]);
+    assert!(out.contains("Disk Copy 4.2 image"), "{out}");
+    assert_eq!(fs::read(&dest).unwrap(), image[84..]);
+}
+
+#[test]
+fn disk_extract_never_overwrites() {
+    let env = Env::new();
+    let (image, _) = write_partitioned_disk(env.path(), "zip.image");
+    let dest = env.path().join("precious.img");
+    fs::write(&dest, b"keep me").unwrap();
+
+    let error = env.fails(&[
+        "disk",
+        "extract",
+        image.to_str().unwrap(),
+        dest.to_str().unwrap(),
+    ]);
+    assert!(error.contains("already exists"), "{error}");
+    assert_eq!(fs::read(&dest).unwrap(), b"keep me");
+
+    // Extracting onto the source is the same case.
+    let source = image.to_str().unwrap();
+    assert!(
+        env.fails(&["disk", "extract", source, source])
+            .contains("already exists")
+    );
+}
+
+#[test]
+fn disk_info_shows_the_partition_map() {
+    let env = Env::new();
+    let (image, _) = write_partitioned_disk(env.path(), "zip.image");
+    let info = env.ok(&["disk", "info", image.to_str().unwrap()]);
+
+    assert!(info.contains(": 1097728 bytes"), "{info}");
+    assert!(info.contains("partitioned disk"), "{info}");
+    let row = |needle: &str| {
+        info.lines()
+            .find(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("{needle}: {info}"))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        row("Apple_partition_map"),
+        ["1", "Apple_partition_map", "512", "32256", "-"]
+    );
+    assert_eq!(
+        row("Apple_Driver"),
+        ["2", "Apple_Driver", "32768", "16384", "-"]
+    );
+    assert_eq!(
+        row("Apple_HFS"),
+        ["3", "Apple_HFS", "49152", "819200", "HFS"]
+    );
+}
+
+#[test]
+fn disk_info_reports_every_other_kind_of_image() {
+    let env = Env::new();
+    let info = |name: &str, bytes: &[u8]| {
+        let file = env.path().join(name);
+        fs::write(&file, bytes).unwrap();
+        env.ok(&["disk", "info", file.to_str().unwrap()])
+    };
+
+    let raw = write_disk(env.path(), "raw.dsk");
+    assert!(
+        env.ok(&["disk", "info", raw.to_str().unwrap()])
+            .contains("raw HFS volume")
+    );
+    assert!(info("blank", &[0u8; 8192]).contains("Format: blank"));
+    assert!(info("zip", b"PK\x03\x04.........................").contains("zip archive"));
+    assert!(info("odd", &[7u8; 8192]).contains("not recognized"));
+
+    let missing = env.fails(&["disk", "info", "/nonexistent/image"]);
+    assert!(missing.contains("cannot read"), "{missing}");
 }
 
 #[test]
