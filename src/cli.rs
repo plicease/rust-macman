@@ -34,6 +34,9 @@ pub enum Command {
     /// Manage registered bootable system images
     #[command(subcommand)]
     System(SystemCommand),
+    /// Inspect disk images and extract volumes from them
+    #[command(subcommand)]
+    Disk(DiskCommand),
     /// Create a machine from a ROM and a private copy of a system image
     Create(CreateArgs),
     /// Set the default machine
@@ -84,6 +87,23 @@ pub enum SystemCommand {
     },
     /// List registered system images
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DiskCommand {
+    /// Show an image's format and partitions
+    Info { file: PathBuf },
+    /// Copy a volume out of a partitioned or Disk Copy image; the source is unchanged
+    Extract {
+        source: PathBuf,
+        dest: PathBuf,
+        /// Partition to extract, if the image has several volumes
+        #[arg(long, value_name = "N")]
+        partition: Option<u32>,
+        /// Extract the partition whatever it holds, without checking it's a volume
+        #[arg(long, requires = "partition")]
+        raw: bool,
+    },
 }
 
 #[derive(Debug, clap::Args)]

@@ -1,7 +1,9 @@
 //! Disk-image safety (design §8): format checks, advisory locks, and the
 //! session records used to spot abnormal exits.
 
-use crate::fsutil::{atomic_copy, list_dir, read_toml, sha256_bytes, write_toml};
+use crate::fsutil::{
+    atomic_copy, atomic_copy_range_checked, list_dir, read_toml, sha256_bytes, write_toml,
+};
 use crate::paths::Paths;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,8 @@ pub struct Partition {
     pub kind: String,
     pub offset: u64,
     pub length: u64,
+    /// Whether the partition fits inside the image.
+    pub in_bounds: bool,
     /// The classic volume inside, if any.
     pub volume: Option<DiskFormat>,
 }
@@ -43,7 +47,7 @@ pub enum Classification {
     Unrecognized,
 }
 
-/// The bytes of an image to store as a system volume.
+/// The bytes of an image to extract as a volume.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Import {
     pub offset: u64,
@@ -127,7 +131,8 @@ fn partition_map(file: &mut File, block_size: u64, size: u64) -> Result<Option<V
         let kind = &kind[..kind.iter().position(|b| *b == 0).unwrap_or(kind.len())];
         let offset = be32(&entry[8..]) * block_size;
         let length = be32(&entry[12..]) * block_size;
-        let volume = if offset + length <= size {
+        let in_bounds = length > 0 && offset + length <= size;
+        let volume = if in_bounds {
             volume_at(file, offset, offset + length)?
         } else {
             None
@@ -138,6 +143,7 @@ fn partition_map(file: &mut File, block_size: u64, size: u64) -> Result<Option<V
             kind: String::from_utf8_lossy(kind).into_owned(),
             offset,
             length,
+            in_bounds,
             volume,
         });
     }
@@ -224,8 +230,8 @@ const ACCEPTED: &str = "macman accepts raw MFS/HFS volumes and Disk Copy 4.2 ima
 
 fn partitioned_hint(path: &Path, partitions: &[Partition]) -> String {
     format!(
-        "{} is a partitioned disk, which Mini vMac cannot mount; use `macman system add` to \
-         extract its volume ({} partitions)",
+        "{} is a partitioned disk, which Mini vMac cannot mount; extract its volume with \
+         `macman disk extract`, or register it with `macman system add` ({} partitions)",
         path.display(),
         partitions.len()
     )
@@ -293,30 +299,45 @@ pub fn warn_disk_copy_read_only(path: &Path) {
     );
 }
 
-/// Work out which bytes of `path` to store as a system volume.
-pub fn plan_import(path: &Path, partition: Option<u32>) -> Result<Import> {
-    let whole = || -> Result<Import> {
-        Ok(Import {
-            offset: 0,
-            length: fs::metadata(path)?.len(),
-            extracted: None,
-        })
-    };
+/// Short name of the volume inside a format.
+pub fn volume_name(format: DiskFormat) -> &'static str {
+    match format {
+        DiskFormat::RawMfs => "MFS",
+        DiskFormat::RawHfs => "HFS",
+        DiskFormat::DiskCopy42 => "Disk Copy 4.2",
+    }
+}
+
+/// Where a Disk Copy image keeps its data, and the volume there, if any.
+pub fn disk_copy_contents(path: &Path) -> Result<(u64, u64, Option<DiskFormat>)> {
+    let mut file = File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let size = file.metadata()?.len();
+    let mut head = [0u8; DC42_HEADER as usize];
+    read_at(&mut file, 0, &mut head)?;
+    let (offset, length) =
+        disk_copy_data(&head, size).context("Disk Copy image changed while reading")?;
+    let volume = volume_at(&mut file, offset, offset + length)?;
+    Ok((offset, length, volume))
+}
+
+/// Work out which bytes of `path` to extract. With `raw`, the chosen partition
+/// is taken whatever it holds. Callers should hold a lock on `path`.
+pub fn plan_import(path: &Path, partition: Option<u32>, raw: bool) -> Result<Import> {
     match classify(path)? {
+        Classification::Partitioned(partitions) if raw => {
+            let index = partition.context("--raw needs --partition N")?;
+            raw_partition(path, &partitions, index)
+        }
         Classification::Partitioned(partitions) => choose_partition(path, &partitions, partition),
-        _ if partition.is_some() => {
+        _ if partition.is_some() || raw => {
             detect_format(path)?;
             bail!(
-                "{} has no partition map, so --partition does not apply",
+                "{} has no partition map, so --partition and --raw do not apply",
                 path.display()
             )
         }
         Classification::Supported(DiskFormat::DiskCopy42) => {
-            let mut head = [0u8; DC42_HEADER as usize];
-            read_at(&mut File::open(path)?, 0, &mut head)?;
-            let size = fs::metadata(path)?.len();
-            let (offset, length) =
-                disk_copy_data(&head, size).context("Disk Copy image changed while reading")?;
+            let (offset, length, _) = disk_copy_contents(path)?;
             Ok(Import {
                 offset,
                 length,
@@ -325,23 +346,85 @@ pub fn plan_import(path: &Path, partition: Option<u32>) -> Result<Import> {
         }
         _ => {
             detect_format(path)?;
-            whole()
+            Ok(Import {
+                offset: 0,
+                length: fs::metadata(path)?.len(),
+                extracted: None,
+            })
         }
     }
 }
 
+/// Extract what [`plan_import`] selects to `dest`, which must not exist. The
+/// result only appears at `dest` once it's complete and, unless `raw`, a usable
+/// volume. Callers should hold a lock on `source`.
+pub fn extract_volume(
+    source: &Path,
+    dest: &Path,
+    partition: Option<u32>,
+    raw: bool,
+) -> Result<Import> {
+    if dest.symlink_metadata().is_ok() {
+        bail!("{} already exists", dest.display());
+    }
+    let import = plan_import(source, partition, raw)?;
+    atomic_copy_range_checked(source, import.offset, import.length, dest, |copy| {
+        if !raw {
+            detect_format(copy).context("the extracted data is not a usable volume")?;
+        }
+        Ok(())
+    })?;
+    Ok(import)
+}
+
+fn describe_partitions(partitions: &[Partition]) -> String {
+    partitions
+        .iter()
+        .map(|p| format!("{}: {} ({}K)", p.index, p.kind, p.length / 1024))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn partition_import(partition: &Partition) -> Import {
+    Import {
+        offset: partition.offset,
+        length: partition.length,
+        extracted: Some(format!(
+            "partition {} ({})",
+            partition.index, partition.kind
+        )),
+    }
+}
+
+fn raw_partition(path: &Path, partitions: &[Partition], index: u32) -> Result<Import> {
+    let Some(partition) = partitions.iter().find(|p| p.index == index) else {
+        bail!(
+            "{} has no partition {index}; partitions are {}",
+            path.display(),
+            describe_partitions(partitions)
+        );
+    };
+    if !partition.in_bounds {
+        bail!(
+            "partition {index} of {} is empty or extends past the end of the image",
+            path.display()
+        );
+    }
+    Ok(partition_import(partition))
+}
+
 fn choose_partition(path: &Path, partitions: &[Partition], chosen: Option<u32>) -> Result<Import> {
     let volumes: Vec<_> = partitions.iter().filter(|p| p.volume.is_some()).collect();
-    let listing = || {
-        partitions
-            .iter()
-            .map(|p| format!("{}: {} ({}K)", p.index, p.kind, p.length / 1024))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
+    let listing = || describe_partitions(partitions);
     let partition = match (chosen, volumes.as_slice()) {
         (Some(index), _) => {
             let Some(partition) = volumes.iter().find(|p| p.index == index) else {
+                if partitions.iter().any(|p| p.index == index && !p.in_bounds) {
+                    bail!(
+                        "partition {index} of {} is empty or extends past the end of the image",
+                        path.display()
+                    );
+                }
                 bail!(
                     "partition {index} of {} holds no MFS or HFS volume; partitions are {}",
                     path.display(),
@@ -362,14 +445,7 @@ fn choose_partition(path: &Path, partitions: &[Partition], chosen: Option<u32>) 
             listing()
         ),
     };
-    Ok(Import {
-        offset: partition.offset,
-        length: partition.length,
-        extracted: Some(format!(
-            "partition {} ({})",
-            partition.index, partition.kind
-        )),
-    })
+    Ok(partition_import(partition))
 }
 
 /// Whether the volume has boot blocks, without which it cannot start up.
@@ -771,7 +847,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("image");
         fs::write(&file, with_blocks(2)).unwrap();
-        let err = plan_import(&file, None).unwrap_err().to_string();
+        let err = plan_import(&file, None, false).unwrap_err().to_string();
         assert!(err.contains("no MFS or HFS volume"), "{err}");
     }
 
@@ -781,7 +857,7 @@ mod tests {
         let file = dir.path().join("image");
         let plan = |bytes: &[u8], partition| {
             fs::write(&file, bytes).unwrap();
-            plan_import(&file, partition)
+            plan_import(&file, partition, false)
         };
 
         let raw = plan(&raw_image(b"BD"), None).unwrap();
@@ -806,6 +882,70 @@ mod tests {
         let err = plan(&raw_image(b"BD"), Some(1)).unwrap_err().to_string();
         assert!(err.contains("no partition map"), "{err}");
         assert!(plan(&vec![0u8; 4096], None).is_err());
+    }
+
+    #[test]
+    fn raw_extraction_takes_any_partition_inside_the_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("image");
+        fs::write(&file, partitioned_image(&[(96, b"BD")])).unwrap();
+
+        let driver = plan_import(&file, Some(2), true).unwrap();
+        assert_eq!((driver.offset, driver.length), (64 * 512, 32 * 512));
+
+        let err = plan_import(&file, Some(9), true).unwrap_err().to_string();
+        assert!(err.contains("no partition 9"), "{err}");
+        let err = plan_import(&file, None, true).unwrap_err().to_string();
+        assert!(err.contains("--partition"), "{err}");
+
+        fs::write(&file, raw_image(b"BD")).unwrap();
+        let err = plan_import(&file, Some(1), true).unwrap_err().to_string();
+        assert!(err.contains("no partition map"), "{err}");
+    }
+
+    #[test]
+    fn out_of_bounds_partitions_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("image");
+        let mut image = partitioned_image(&[(96, b"BD")]);
+        let entry = 3 * 512;
+        image[entry + 12..entry + 16].copy_from_slice(&u32::MAX.to_be_bytes());
+        fs::write(&file, &image).unwrap();
+
+        let Classification::Partitioned(partitions) = classify(&file).unwrap() else {
+            panic!("expected a partitioned image");
+        };
+        assert!(!partitions[2].in_bounds && partitions[2].volume.is_none());
+
+        for raw in [false, true] {
+            let err = plan_import(&file, Some(3), raw).unwrap_err().to_string();
+            assert!(err.contains("past the end"), "{err}");
+        }
+        assert!(plan_import(&file, None, false).is_err());
+
+        image[entry + 12..entry + 16].copy_from_slice(&0u32.to_be_bytes());
+        fs::write(&file, &image).unwrap();
+        let err = plan_import(&file, Some(3), true).unwrap_err().to_string();
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn unusable_extractions_never_reach_the_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("floppy.image");
+        let dest = dir.path().join("floppy.dsk");
+        // A valid Disk Copy image holding no volume.
+        let mut image = dc42(1600, 0);
+        image[84 + 1024..84 + 1026].fill(0);
+        fs::write(&source, image).unwrap();
+
+        let err = extract_volume(&source, &dest, None, false).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not a usable volume"),
+            "{err:#}"
+        );
+        assert!(!dest.exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

@@ -83,8 +83,19 @@ macman system add ~/images/system710-zip.image --name system-7.1 --version 7.1
 If a disk has several volumes, choose one with `--partition N`. Disk Copy images are
 unwrapped the same way, because Mini vMac attaches them read-only.
 
+To get a volume without registering anything, use `macman disk`. `disk info` shows an
+image's format and partitions, and `disk extract` copies a volume out, following the
+same rules and never overwriting an existing file:
+
+```sh
+macman disk info system710-zip.image
+macman disk extract system710-zip.image system710-hfs.img
+```
+
+`--raw` with `--partition N` extracts a partition whatever it holds, such as a driver.
+
 `macman run --disk` takes an image as it stands, so a partitioned disk needs
-registering first. Blank images are fine, and `--any-format` attaches an image macman
+extracting or registering first. Blank images are fine, and `--any-format` attaches an image macman
 can't identify, ideally with `--readonly`. See
 [docs/DISK_FORMATS.md](docs/DISK_FORMATS.md) for the details.
 

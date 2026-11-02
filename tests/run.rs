@@ -451,6 +451,33 @@ fn any_format_admits_unrecognized_disks() {
 }
 
 #[test]
+fn disk_commands_wait_for_no_one_writing_the_source() {
+    let (h, _mock) = Harness::mock();
+    let (image, _) = write_partitioned_disk(h.dir(), "zip.image");
+    let source = image.to_str().unwrap();
+    let dest = h.dir().join("out.img");
+    let dest_str = dest.to_str().unwrap();
+
+    // Another macman has the image attached for writing.
+    let writer = lock_image(&h.paths, &image, LockMode::Exclusive).unwrap();
+    let err = h.cmd(&["disk", "info", source]).unwrap_err();
+    assert!(err.to_string().contains("in use"), "{err}");
+    let err = h.cmd(&["disk", "extract", source, dest_str]).unwrap_err();
+    assert!(err.to_string().contains("in use"), "{err}");
+    assert!(!dest.exists());
+    drop(writer);
+
+    // Other readers don't get in the way.
+    let reader = lock_image(&h.paths, &image, LockMode::Shared).unwrap();
+    h.cmd(&["disk", "info", source]).unwrap();
+    h.cmd(&["disk", "extract", source, dest_str]).unwrap();
+    drop(reader);
+
+    // Nothing keeps the source locked afterwards.
+    assert!(lock_image(&h.paths, &image, LockMode::Exclusive).is_ok());
+}
+
+#[test]
 fn run_refuses_tampered_rom_and_missing_disk() {
     let (h, mock) = Harness::mock();
     fs::remove_file(h.system_disk("plus-a")).unwrap();

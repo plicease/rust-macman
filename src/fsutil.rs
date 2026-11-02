@@ -35,7 +35,19 @@ pub fn atomic_copy(src: &Path, dst: &Path) -> Result<()> {
 
 /// As [`atomic_copy`], for `length` bytes of `src` starting at `offset`.
 pub fn atomic_copy_range(src: &Path, offset: u64, length: u64, dst: &Path) -> Result<()> {
-    if dst.exists() {
+    atomic_copy_range_checked(src, offset, length, dst, |_| Ok(()))
+}
+
+/// As [`atomic_copy_range`], with `check` deciding, from the finished temporary
+/// file, whether to publish it. A rejected copy never appears at `dst`.
+pub fn atomic_copy_range_checked(
+    src: &Path,
+    offset: u64,
+    length: u64,
+    dst: &Path,
+    check: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    if dst.symlink_metadata().is_ok() {
         bail!("{} already exists", dst.display());
     }
     let tmp = temp_sibling(dst)?;
@@ -46,13 +58,31 @@ pub fn atomic_copy_range(src: &Path, offset: u64, length: u64, dst: &Path) -> Re
         if io::copy(&mut input.take(length), &mut output)? != length {
             bail!("source ended early");
         }
-        fs::rename(&tmp, dst)?;
-        Ok(())
+        output.sync_all()?;
+        drop(output);
+        check(&tmp)?;
+        publish_new(&tmp, dst)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
     result.with_context(|| format!("cannot copy {} to {}", src.display(), dst.display()))
+}
+
+/// Move `tmp` to `dst`, failing if `dst` appeared since it was last checked.
+/// A hard link can't replace a file, where a rename would.
+fn publish_new(tmp: &Path, dst: &Path) -> Result<()> {
+    match fs::hard_link(tmp, dst) {
+        Ok(()) => {
+            fs::remove_file(tmp)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            bail!("{} already exists", dst.display())
+        }
+        // Some filesystems have no hard links; the check above must do.
+        Err(_) => Ok(fs::rename(tmp, dst)?),
+    }
 }
 
 fn temp_sibling(path: &Path) -> Result<PathBuf> {
@@ -164,6 +194,39 @@ mod tests {
         atomic_copy(&src, &dst).unwrap();
         assert!(!fs::metadata(&dst).unwrap().permissions().readonly());
         assert!(atomic_copy(&src, &dst).is_err());
+    }
+
+    #[test]
+    fn checked_copy_publishes_only_what_passes_and_never_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::write(&src, b"data").unwrap();
+
+        let dst = dir.path().join("rejected");
+        let rejected = atomic_copy_range_checked(&src, 0, 4, &dst, |tmp| {
+            assert_eq!(fs::read(tmp).unwrap(), b"data");
+            bail!("no thanks")
+        });
+        assert!(rejected.is_err());
+        assert!(!dst.exists());
+
+        // A file appearing after the first check must survive.
+        let dst = dir.path().join("raced");
+        let raced = atomic_copy_range_checked(&src, 0, 4, &dst, |_| {
+            fs::write(&dst, b"someone else's").unwrap();
+            Ok(())
+        });
+        assert!(format!("{:#}", raced.unwrap_err()).contains("already exists"));
+        assert_eq!(fs::read(&dst).unwrap(), b"someone else's");
+
+        // Nor may a dangling symlink be written through.
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path().join("target"), &link).unwrap();
+        assert!(atomic_copy_range(&src, 0, 4, &link).is_err());
+        assert!(!dir.path().join("target").exists());
+
+        let names: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(names.len(), 3, "no temporary files left: {names:?}");
     }
 
     #[test]
