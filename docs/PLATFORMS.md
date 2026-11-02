@@ -99,13 +99,13 @@ in their version or location means a new build. MPFR is the ARM64 FPU core: ARM6
 80-bit `long double`.
 
 On macOS, System 7.5.5 and Mac OS 8.1 were each tested with the default 68040 setting, and
-sound worked on a real device. System 7.1 was tested with a 68030 setting. `slirp`
-networking didn't work on Mac OS 8.1, the only system it was tried on there, and the cause
-hasn't been looked into.
+sound on a real device and full screen worked. System 7.1 was tested with a 68030 setting.
+`slirp` networking didn't work on Mac OS 8.1, the only system it was tried on there, and
+the cause hasn't been looked into.
 
 The macOS smoke test covered Shut Down from inside the guest, killing the emulator, and
-killing macman, but not full screen, closing the window, or a shared folder. Homebrew
-hasn't been tried, only MacPorts.
+killing macman, but not closing the window or a shared folder. Homebrew hasn't been tried,
+only MacPorts.
 
 The pin is commit `f532be3d3d70` of [kanjitalk755/macemu](https://github.com/kanjitalk755/macemu),
 the maintained fork, and its SHA-256 is that of the archive GitHub generates for it. If
