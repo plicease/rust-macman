@@ -62,7 +62,7 @@ impl Model {
         }
     }
 
-    /// Known ROM checksums; a Macintosh ROM stores its own in its first 4 bytes.
+    /// Known ROM checksums. All but the Twig43 store theirs in their first 4 bytes.
     pub fn rom_checksums(self) -> &'static [u32] {
         match self {
             Model::Twig43 => &[0x27F4_E04B],
@@ -76,6 +76,29 @@ impl Model {
             Model::II => &[0x9779_D2C4, 0x9722_1136],
             Model::IIx => &[0x9722_1136],
         }
+    }
+
+    /// Whether `rom` starts with a genuine ROM for this model. This is the test
+    /// Mini vMac applies (`ROM_IsValid`): the sum of the image's 16-bit words
+    /// must be a known one, and must match the header on models that store it.
+    pub fn accepts_rom(self, rom: &[u8]) -> bool {
+        // The Classic's 512K ROM only checksums its first half.
+        let summed = match self {
+            Model::Classic => 256 * 1024,
+            _ => self.rom_size() as usize,
+        };
+        if (rom.len() as u64) < self.rom_size() {
+            return false;
+        }
+        let sum = rom[4..summed]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .fold(0u32, |sum, word| {
+                sum.wrapping_add(u32::from(u16::from_be_bytes(*word)))
+            });
+        let header = u32::from_be_bytes([rom[0], rom[1], rom[2], rom[3]]);
+        self.rom_checksums().contains(&sum) && (self == Model::Twig43 || sum == header)
     }
 
     pub fn default_memory(self) -> &'static str {
@@ -164,6 +187,62 @@ mod tests {
         }
         assert_eq!("SE".parse::<Model>().unwrap(), Model::Se);
         assert!("lisa".parse::<Model>().is_err());
+    }
+
+    /// A synthetic image with a valid checksum and no Apple code.
+    fn rom_with(checksum: u32, size: usize, summed: usize) -> Vec<u8> {
+        let mut rom = vec![0u8; size];
+        rom[..4].copy_from_slice(&checksum.to_be_bytes());
+        let mut remaining = checksum;
+        for word in rom[4..summed].as_chunks_mut::<2>().0 {
+            let value = remaining.min(0xFFFF) as u16;
+            *word = value.to_be_bytes();
+            remaining -= u32::from(value);
+        }
+        assert_eq!(remaining, 0);
+        rom
+    }
+
+    #[test]
+    fn rom_checks_follow_the_emulator() {
+        let plus = rom_with(0x4D1F_8172, 128 * 1024, 128 * 1024);
+        assert!(Model::Plus.accepts_rom(&plus));
+        assert!(Model::Mac512Ke.accepts_rom(&plus));
+        assert!(!Model::Se.accepts_rom(&plus), "short for the SE");
+        assert!(
+            !Model::Mac128K.accepts_rom(&plus),
+            "first 64K sums differently"
+        );
+
+        // Correct header, damaged body.
+        let mut damaged = plus.clone();
+        damaged[1000] ^= 1;
+        assert!(!Model::Plus.accepts_rom(&damaged));
+
+        // Correct sum, wrong header.
+        let mut mislabelled = plus.clone();
+        mislabelled[3] ^= 1;
+        assert!(!Model::Plus.accepts_rom(&mislabelled));
+
+        // Trailing data is outside the checked region.
+        let mut trailing = plus;
+        trailing.extend_from_slice(&[0xAA; 7504]);
+        assert!(Model::Plus.accepts_rom(&trailing));
+    }
+
+    #[test]
+    fn classic_sums_only_the_first_256k() {
+        let mut classic = rom_with(0xA49F_9914, 512 * 1024, 256 * 1024);
+        classic[300 * 1024] = 0xFF;
+        assert!(Model::Classic.accepts_rom(&classic));
+        assert!(!Model::Classic.accepts_rom(&classic[..256 * 1024]));
+    }
+
+    #[test]
+    fn twig43_stores_no_header_checksum() {
+        let mut rom = rom_with(0x27F4_E04B, 64 * 1024, 64 * 1024);
+        rom[..4].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+        assert!(Model::Twig43.accepts_rom(&rom));
     }
 
     #[test]

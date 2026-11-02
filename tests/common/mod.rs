@@ -6,11 +6,18 @@ use std::path::{Path, PathBuf};
 pub const PLUS_ROM_CHECKSUM: u32 = 0x4D1F_8172;
 pub const II_ROM_CHECKSUM: u32 = 0x9779_D2C4;
 
-/// A fake ROM carrying a real model's checksum header, but no Apple code.
+/// A synthetic ROM that passes the real checksum test, with no Apple code.
 pub fn write_rom(dir: &Path, name: &str, checksum: u32, size: usize) -> PathBuf {
     let path = dir.join(name);
     let mut bytes = vec![0u8; size];
     bytes[..4].copy_from_slice(&checksum.to_be_bytes());
+    let mut remaining = checksum;
+    for word in bytes[4..].as_chunks_mut::<2>().0 {
+        let value = remaining.min(0xFFFF) as u16;
+        *word = value.to_be_bytes();
+        remaining -= u32::from(value);
+    }
+    assert_eq!(remaining, 0, "image too small to reach the checksum");
     fs::write(&path, bytes).unwrap();
     path
 }

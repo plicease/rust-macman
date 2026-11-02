@@ -30,6 +30,10 @@ macman use mac-plus
 macman run
 ```
 
+`macman rom add` checks a ROM the way Mini vMac does, so a damaged or truncated file is
+refused at import. If a valid ROM is followed by extra data, as some `vMac.ROM` files
+are, macman stores just the ROM and tells you. Your file isn't changed.
+
 `macman create` copies the system image, so each machine boots its own private
 disk and the registered image stays untouched. The first `run` of a hardware
 configuration compiles Mini vMac; later runs, and other machines with the same
