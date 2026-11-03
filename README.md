@@ -670,8 +670,21 @@ media alone needs no machines:
 macman export --media macos-9.0.4 --media sys6-install-1 -o media.tar.gz
 ```
 
-`macman export --all -o everything.tar.gz` takes every machine, ROM, system image, and
-medium, whether or not a machine uses it, and works with no machines at all. On the other host,
+ROMs come with the machines that use them. To take others, or ROMs alone, name them with
+`--rom NAME`, which repeats, or take every registered ROM with `--all-roms`; each is
+registered under its own name on import, used or not. `--all-machines` takes every machine
+with the ROMs they use, and nothing else:
+
+```sh
+macman export --rom plus-v3 --rom maciix -o roms.tar.gz
+macman export --all-machines --system system-6.0.8 -o machines.tar.gz
+macman export --all-roms --all-systems -o registries.tar.gz
+```
+
+The selectors add up, so an archive holds everything any of them asks for, and each file
+in it once. `macman export --all -o everything.tar.gz` takes every machine, ROM, system
+image, and medium, whether or not a machine uses it, and works with no machines at all; it
+can't be combined with the others, which it already covers. On the other host,
 `system list` shows the imported images, and `create --system` uses them.
 
 Export refuses a machine whose disks are in use, so close the emulator first. Import

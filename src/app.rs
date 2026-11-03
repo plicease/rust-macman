@@ -223,6 +223,9 @@ impl App {
             Command::Export {
                 names,
                 all,
+                all_machines,
+                roms,
+                all_roms,
                 systems,
                 all_systems,
                 media,
@@ -235,8 +238,16 @@ impl App {
                         .map(|system| system.name)
                         .collect())
                 };
+                let mut rom_names = roms;
+                if all || all_roms {
+                    rom_names.extend(
+                        registry::list_roms(&self.paths)?
+                            .into_iter()
+                            .map(|rom| rom.name),
+                    );
+                }
                 let selection = archive::Selection {
-                    machines: if all {
+                    machines: if all || all_machines {
                         list_dir(&self.paths.machines())?
                     } else {
                         names
@@ -254,16 +265,14 @@ impl App {
                     } else {
                         media
                     },
-                    all_roms: all,
+                    roms: rom_names,
                 };
-                let empty = selection.machines.is_empty()
+                if selection.machines.is_empty()
+                    && selection.roms.is_empty()
                     && selection.systems.is_empty()
-                    && selection.media.is_empty();
-                if all && empty && registry::list_roms(&self.paths)?.is_empty() {
+                    && selection.media.is_empty()
+                {
                     bail!("there are no machines, ROMs, system images, or media to export");
-                }
-                if !all && empty {
-                    bail!("there are no machines, system images, or media to export");
                 }
                 let exported = archive::export(&self.paths, &selection, &output)?;
                 println!(

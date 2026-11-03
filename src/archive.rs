@@ -138,8 +138,9 @@ pub struct Selection {
     pub systems: Vec<String>,
     /// Registered media, by name.
     pub media: Vec<String>,
-    /// Every registered ROM, whether or not a machine here uses it.
-    pub all_roms: bool,
+    /// Registered ROMs to register on import by these names, whether or not a
+    /// machine here uses them.
+    pub roms: Vec<String>,
 }
 
 /// How many of each an archive holds.
@@ -242,12 +243,7 @@ pub fn export(paths: &Paths, selection: &Selection, output: &Path) -> Result<Exp
         if let Some(settings) = &mut machine.sheepshaver {
             settings.shared_folder = None;
         }
-        let rom_sha256 = add_rom(
-            &mut manifest,
-            &mut blobs,
-            &machine.hardware.rom,
-            selection.all_roms,
-        )?;
+        let rom_sha256 = add_rom(&mut manifest, &mut blobs, &machine.hardware.rom, false)?;
 
         let mut contents = Vec::new();
         for (path, disk) in machine.disk_paths(paths)? {
@@ -266,10 +262,10 @@ pub fn export(paths: &Paths, selection: &Selection, output: &Path) -> Result<Exp
             machine,
         });
     }
-    if selection.all_roms {
-        for rom in registry::list_roms(paths)? {
-            add_rom(&mut manifest, &mut blobs, &rom.name, true)?;
-        }
+    // After the machines', so a machine's ROM named here too is registered.
+    for name in selection.roms.iter().collect::<BTreeSet<_>>() {
+        validate_name("ROM", name)?;
+        add_rom(&mut manifest, &mut blobs, name, true)?;
     }
     for (image, file) in systems {
         registry::verify(&file, "system image", &image.name, &image.sha256)?;

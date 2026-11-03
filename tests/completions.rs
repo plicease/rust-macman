@@ -315,6 +315,8 @@ fn bash_completes_names() {
         complete_line "macman run --media disk-1 --media "
         complete_line "macman create new --media "
         complete_line "macman export --media "
+        complete_line "macman export --rom "
+        complete_line "macman export --all-machines --rom p"
     "#;
     let output = in_shell(root.path(), "bash", &[], check, &[&file]);
     let expected = "\
@@ -336,6 +338,8 @@ macman run alpha --media -> disk-1
 macman run --media disk-1 --media -> disk-1
 macman create new --media -> disk-1
 macman export --media -> disk-1
+macman export --rom -> plus-v3
+macman export --all-machines --rom p-> plus-v3
 ";
     assert_eq!(output, expected);
 
@@ -366,6 +370,7 @@ fn zsh_completes_names() {
         ":ROM:_macman_names roms'",
         ":SYSTEM:_macman_names systems'",
         ":MEDIA:_macman_names media'",
+        "'*--rom=[Also export this registered ROM, used or not, to register under its name (repeatable)]:ROM:_macman_names roms'",
         "'*::names:_macman_names machines'",
     ] {
         assert!(text.contains(expected), "zsh lacks {expected}");
@@ -400,6 +405,7 @@ fn fish_completes_names() {
         r#"complete -c macman -n "__fish_macman_using_subcommand system; and __fish_seen_subcommand_from remove" -f -a "(macman __complete-names systems)""#,
         r#"complete -c macman -n "__fish_macman_using_subcommand media; and __fish_seen_subcommand_from info" -f -a "(macman __complete-names media)""#,
         r#"complete -c macman -n "__fish_macman_using_subcommand run" -l media -r -f -a "(macman __complete-names media)""#,
+        r#"complete -c macman -n "__fish_macman_using_subcommand export" -l rom -r -f -a "(macman __complete-names roms)""#,
     ] {
         assert!(text.contains(expected), "fish lacks {expected}");
     }
