@@ -7,7 +7,8 @@ use crate::backend::{
 };
 use crate::backend::{basilisk2, sheepshaver};
 use crate::cli::{
-    Cli, Command, ConfigCommand, CreateArgs, DiskCommand, RomCommand, RunArgs, SystemCommand,
+    Cli, Command, ConfigCommand, CreateArgs, DiskCommand, NameKind, RomCommand, RunArgs,
+    SystemCommand,
 };
 use crate::disk::{self, Classification, DiskFormat, ImageLock, LockMode, Session, SessionRecord};
 use crate::fsutil::{
@@ -1333,12 +1334,41 @@ pub fn print_completions(shell: clap_complete::Shell, json: bool) -> Result<u8> 
     if json {
         bail!("--json doesn't apply to `macman completions`, which prints a shell script");
     }
-    let script = crate::cli::completion_script(shell);
+    let script = crate::completion::script(shell);
     let mut stdout = std::io::stdout().lock();
     std::io::Write::write_all(&mut stdout, &script)
         .and_then(|()| std::io::Write::flush(&mut stdout))
         .context("cannot write the completion script")?;
     Ok(0)
+}
+
+/// `macman __complete-names`: the names of one kind, one per line, for a
+/// completion script. It reads only directory listings, and on any trouble
+/// prints nothing, because a shell would show an error mid-line.
+pub fn print_names(paths: &Paths, kind: NameKind) {
+    let registered = |dir: PathBuf| -> Vec<String> {
+        list_dir(&dir)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|file| file.strip_suffix(".toml").map(str::to_string))
+            .collect()
+    };
+    let mut names = match kind {
+        NameKind::Machines => list_dir(&paths.machines())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|name| paths.machine(name).join("machine.toml").is_file())
+            .collect(),
+        NameKind::Roms => registered(paths.roms()),
+        NameKind::Systems => registered(paths.systems()),
+    };
+    names.sort();
+    let mut stdout = std::io::stdout().lock();
+    for name in names {
+        if writeln!(stdout, "{name}").is_err() {
+            return;
+        }
+    }
 }
 
 fn without_json(command: &Command) -> Option<&'static str> {

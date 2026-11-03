@@ -4,6 +4,7 @@ pub mod app;
 pub mod archive;
 pub mod backend;
 pub mod cli;
+pub mod completion;
 pub mod disk;
 pub mod fsutil;
 pub mod machine;

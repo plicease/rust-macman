@@ -3,10 +3,63 @@
 use crate::machine::{Cpu, Network};
 use crate::model::ALL_MODELS;
 use clap::builder::{PossibleValue, TypedValueParser};
-use clap::{CommandFactory, Parser, Subcommand, ValueHint};
+use clap::{Parser, Subcommand, ValueHint};
 use clap_complete::Shell;
 use std::ffi::OsStr;
 use std::path::PathBuf;
+
+/// Mark arguments that take a registered name. No argument needs these hints
+/// for what they really mean, so `crate::completion` can find them, in the
+/// definition and in generated scripts, and complete names there instead.
+pub(crate) const MACHINE: ValueHint = ValueHint::Username;
+pub(crate) const ROM: ValueHint = ValueHint::Hostname;
+pub(crate) const SYSTEM: ValueHint = ValueHint::EmailAddress;
+
+/// The command completion scripts run for names. It isn't a subcommand,
+/// because every shell's script would then offer it.
+pub const COMPLETE_NAMES: &str = "__complete-names";
+
+/// What `macman __complete-names` lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameKind {
+    Machines,
+    Roms,
+    Systems,
+}
+
+impl NameKind {
+    pub const ALL: [Self; 3] = [Self::Machines, Self::Roms, Self::Systems];
+
+    /// The kind an argument marked with `hint` takes, if any.
+    pub fn of(hint: ValueHint) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.hint() == hint)
+    }
+
+    pub fn hint(self) -> ValueHint {
+        match self {
+            Self::Machines => MACHINE,
+            Self::Roms => ROM,
+            Self::Systems => SYSTEM,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Machines => "machines",
+            Self::Roms => "roms",
+            Self::Systems => "systems",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "machines" => Some(Self::Machines),
+            "roms" => Some(Self::Roms),
+            "systems" => Some(Self::Systems),
+            _ => None,
+        }
+    }
+}
 
 /// The backends a machine can name, for completion. A test checks it against
 /// what this macman really has.
@@ -40,13 +93,6 @@ fn backends() -> Suggest {
 
 fn models() -> Suggest {
     Suggest(|| ALL_MODELS.iter().map(|model| model.name()).collect())
-}
-
-/// The completion script for `shell`, generated from this definition.
-pub fn completion_script(shell: Shell) -> Vec<u8> {
-    let mut script = Vec::new();
-    clap_complete::generate(shell, &mut Cli::command(), "macman", &mut script);
-    script
 }
 
 #[derive(Debug, Parser)]
@@ -90,7 +136,10 @@ pub enum Command {
     /// Create a machine from a ROM and a private copy of a system image
     Create(CreateArgs),
     /// Set the default machine
-    Use { name: String },
+    Use {
+        #[arg(value_name = "MACHINE", value_hint = MACHINE)]
+        name: String,
+    },
     /// Show the default machine
     Current,
     /// Launch a machine (the current one by default)
@@ -99,10 +148,14 @@ pub enum Command {
     #[command(subcommand)]
     Config(ConfigCommand),
     /// Copy a machine and its private disks
-    Clone { source: String, dest: String },
+    Clone {
+        #[arg(value_name = "MACHINE", value_hint = MACHINE)]
+        source: String,
+        dest: String,
+    },
     /// Write machines, with their ROMs and disks, to an archive for another host
     Export {
-        #[arg(required_unless_present = "all", value_name = "NAME")]
+        #[arg(required_unless_present = "all", value_name = "MACHINE", value_hint = MACHINE)]
         names: Vec<String>,
         /// Export every machine
         #[arg(long, conflicts_with = "names")]
@@ -124,6 +177,7 @@ pub enum Command {
     },
     /// Remove a machine; registered ROMs and system images are kept
     Remove {
+        #[arg(value_name = "MACHINE", value_hint = MACHINE)]
         name: String,
         /// Delete the machine's private disks without prompting
         #[arg(long)]
@@ -168,6 +222,7 @@ pub enum SystemCommand {
     List,
     /// Delete a registered system image; machines made from it keep their own disks
     Remove {
+        #[arg(value_name = "SYSTEM", value_hint = SYSTEM)]
         name: String,
         /// Delete it without prompting
         #[arg(long)]
@@ -207,11 +262,13 @@ pub struct CreateArgs {
     #[arg(long, value_parser = models(), hide_possible_values = true)]
     pub model: Option<String>,
     /// Name of an imported ROM
-    #[arg(long)]
+    #[arg(long, value_name = "ROM", value_hint = ROM)]
     pub rom: String,
     /// Name of a registered system image, cloned into the machine
     #[arg(
         long,
+        value_name = "SYSTEM",
+        value_hint = SYSTEM,
         required_unless_present = "disk_size",
         conflicts_with = "disk_size"
     )]
@@ -251,6 +308,7 @@ pub struct CreateArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct RunArgs {
+    #[arg(value_name = "MACHINE", value_hint = MACHINE)]
     pub name: Option<String>,
     /// Attach an extra disk for this run only (repeatable)
     #[arg(long = "disk", value_name = "FILE", value_hint = ValueHint::FilePath)]
@@ -270,13 +328,17 @@ pub struct RunArgs {
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
     /// Print a machine's configuration (the current one by default)
-    Show { name: Option<String> },
+    Show {
+        #[arg(value_name = "MACHINE", value_hint = MACHINE)]
+        name: Option<String>,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::paths::Paths;
+    use clap::CommandFactory;
 
     #[test]
     fn completion_offers_the_backends_this_macman_has() {

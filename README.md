@@ -95,8 +95,10 @@ Mac first, or use Control Mode: hold Ctrl and press Q, then Y.
 
 `macman completions SHELL` prints a completion script for `zsh`, `bash`, `fish`,
 `powershell`, or `elvish`. It covers subcommands, options, backend, model, CPU, and
-network names, and file and folder arguments. It doesn't complete machine or ROM
-names yet. It changes nothing. Install the script yourself.
+network names, and file and folder arguments. In zsh, bash, and fish, it also
+completes the names of your machines, ROMs, and system images, such as after
+`macman run`. The script asks the `macman` on your `PATH` for these when you press
+Tab, so they're always current. It changes nothing. Install the script yourself.
 
 For zsh, put the script in a folder on `fpath`, and add that folder to `fpath` before
 `compinit` runs:

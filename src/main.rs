@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
 use clap::error::ErrorKind;
-use macman::app::{App, print_completions};
-use macman::cli::{Cli, Command};
+use macman::app::{App, print_completions, print_names};
+use macman::cli::{COMPLETE_NAMES, Cli, Command, NameKind};
 use macman::default_backends;
 use macman::paths::Paths;
 use macman::report::error_json;
@@ -13,6 +13,7 @@ fn run(cli: Cli) -> Result<u8> {
     if let Command::Completions { shell } = cli.command {
         return print_completions(shell, cli.json);
     }
+
     let paths = Paths::from_env()?;
     let backends = default_backends(&paths)?;
     App::new(paths, backends).execute(cli)
@@ -26,7 +27,26 @@ fn wants_json() -> bool {
         .any(|arg| arg == "--json")
 }
 
+/// `macman __complete-names KIND`, for completion scripts: names on stdout,
+/// and never an error, because no names is the worst completion should do.
+fn complete_names() -> Option<ExitCode> {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_none_or(|first| first != COMPLETE_NAMES) {
+        return None;
+    }
+    if let [_, kind] = args.as_slice()
+        && let Some(kind) = kind.to_str().and_then(NameKind::parse)
+        && let Ok(paths) = Paths::from_env()
+    {
+        print_names(&paths, kind);
+    }
+    Some(ExitCode::SUCCESS)
+}
+
 fn main() -> ExitCode {
+    if let Some(code) = complete_names() {
+        return code;
+    }
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         // Help and the version are asked for, so they print as they always do.
