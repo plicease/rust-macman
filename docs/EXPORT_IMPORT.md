@@ -95,6 +95,39 @@ it doesn't look for an existing machine with the archive's `id`, so the original
 involved at all. If `NAME` exists, that's a conflict. Importing the same archive with
 `--rename` again is therefore refused, not `unchanged`.
 
+### `--dry-run`
+
+`macman import FILE --dry-run` shows what an import would do, and changes nothing. It
+reads and checks the whole archive the way an import does, including every blob's size
+and digest. It then decides each ROM and machine with the same code and rules, and
+stops short of writing anything. With `--rename`, it previews that copy.
+
+Each line says what an import would do: `would import`, `would recover`, and `would
+reuse` for ROMs, then `would import`, `unchanged`, `conflict`, or `failed` for each
+machine, with its reason. All of them are reported, not just the first problem. A
+rejected archive gives the same error as a real import.
+
+A dry run doesn't register ROMs or machines, finish a partial ROM registration, or
+clear an abandoned `staging/`. It also creates no directories or lock files in macman's
+data directory. To decide, it needs the ROMs' contents. It unpacks only those, into a
+private temporary directory that it removes before exiting. Disks are verified as they
+stream past, and then discarded. If an import has ever run, the dry run holds a
+shared lock on `import.lock` while it reads, so it doesn't overlap a real import.
+Comparing a machine with its local copy takes the same shared locks on the local disks,
+but only through lock files that already exist. A disk with no lock file has no holder.
+
+The result is how an import would go against macman's data as it is now. Something can
+change before you import: another import, a machine started or edited, or a ROM
+registered. If it does, the real import decides afresh, and its outcome can differ.
+
+Exit status is the same as an import's:
+- 0 when nothing would be left unresolved.
+- 1 when any machine would conflict or fail, or the archive is refused.
+- 2 for arguments that can't be parsed.
+
+`--json` works with `--dry-run`, and its fields are in [JSON.md](JSON.md). An import
+without `--dry-run` refuses `--json`.
+
 ## Safety
 
 **Export** takes shared locks on all disks of all the machines before reading any of

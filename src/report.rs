@@ -6,6 +6,7 @@
 //! Internal types aren't serialized as they are, except a machine's own
 //! definition in [`MachineConfig`], which is its `machine.toml` as JSON.
 
+use crate::archive::{ImportReport, Outcome, RomOutcome};
 use crate::backend::{Check, CheckLevel};
 use crate::disk::{DiskFormat, Partition};
 use crate::machine::Machine;
@@ -242,6 +243,101 @@ pub struct MachineConfig {
 #[derive(Debug, Serialize)]
 pub struct Current {
     pub current: String,
+}
+
+/// `import --dry-run`: what an import would do. With `dry_run` false, the same
+/// fields would say what one did.
+#[derive(Debug, Serialize)]
+pub struct ImportResult {
+    pub dry_run: bool,
+    pub roms: Vec<RomImport>,
+    pub machines: Vec<MachineImport>,
+    pub imported: usize,
+    pub unchanged: usize,
+    pub unresolved: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RomImport {
+    /// Its name in the archive.
+    pub name: String,
+    pub outcome: RomStatus,
+    /// The registered ROM the machines use, when it's already here.
+    pub local: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RomStatus {
+    Imported,
+    Recovered,
+    Unchanged,
+    Reused,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MachineImport {
+    /// The name it has, or would have, here.
+    pub name: String,
+    pub outcome: ImportStatus,
+    /// Why, for a conflict or failure.
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportStatus {
+    Imported,
+    Unchanged,
+    Conflict,
+    Failed,
+}
+
+impl From<&ImportReport> for ImportResult {
+    fn from(report: &ImportReport) -> Self {
+        Self {
+            dry_run: report.dry_run,
+            roms: report
+                .roms
+                .iter()
+                .map(|(name, outcome)| {
+                    let (outcome, local) = match outcome {
+                        RomOutcome::Imported => (RomStatus::Imported, None),
+                        RomOutcome::Recovered => (RomStatus::Recovered, Some(name.clone())),
+                        RomOutcome::Unchanged { local } => {
+                            (RomStatus::Unchanged, Some(local.clone()))
+                        }
+                        RomOutcome::Reused { local } => (RomStatus::Reused, Some(local.clone())),
+                    };
+                    RomImport {
+                        name: name.clone(),
+                        outcome,
+                        local,
+                    }
+                })
+                .collect(),
+            machines: report
+                .machines
+                .iter()
+                .map(|machine| {
+                    let (outcome, reason) = match &machine.outcome {
+                        Outcome::Imported => (ImportStatus::Imported, None),
+                        Outcome::Unchanged => (ImportStatus::Unchanged, None),
+                        Outcome::Conflict(reason) => (ImportStatus::Conflict, Some(reason.clone())),
+                        Outcome::Failed(reason) => (ImportStatus::Failed, Some(reason.clone())),
+                    };
+                    MachineImport {
+                        name: machine.name.clone(),
+                        outcome,
+                        reason,
+                    }
+                })
+                .collect(),
+            imported: report.imported(),
+            unchanged: report.unchanged(),
+            unresolved: report.unresolved(),
+        }
+    }
 }
 
 #[cfg(test)]

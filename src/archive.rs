@@ -223,10 +223,28 @@ pub struct MachineResult {
     pub outcome: Outcome,
 }
 
+/// What became of one ROM in an import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RomOutcome {
+    Imported,
+    /// Its file was registered, but not its metadata, which was finished.
+    Recovered,
+    /// Already registered under the same name, which the machine uses.
+    Unchanged {
+        local: String,
+    },
+    /// Already registered under another name, which the machine uses.
+    Reused {
+        local: String,
+    },
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ImportReport {
+    /// Whether this is what an import would do, rather than what it did.
+    pub dry_run: bool,
     /// What became of each ROM, by its name in the archive.
-    pub roms: BTreeMap<String, String>,
+    pub roms: BTreeMap<String, RomOutcome>,
     pub machines: Vec<MachineResult>,
 }
 
@@ -259,14 +277,23 @@ impl Drop for StagingDir {
 
 /// Import everything possible from `archive`. An `Err` means the archive was
 /// rejected as a whole, and nothing changed.
+///
+/// With `dry_run`, decide everything the same way, but change nothing: report
+/// what an import would do now. Only the ROMs are unpacked, to a private
+/// temporary directory, because deciding needs their contents; disks are
+/// verified as they're read, and discarded.
 pub fn import(
     paths: &Paths,
     backends: &Backends,
     archive: &Path,
     rename: Option<&str>,
+    dry_run: bool,
 ) -> Result<ImportReport> {
     if let Some(name) = rename {
         validate_name("machine", name)?;
+    }
+    if dry_run {
+        return preview(paths, backends, archive, rename);
     }
 
     // One import at a time, so anything already in staging is abandoned.
@@ -292,7 +319,55 @@ pub fn import(
 
     let staging = StagingDir(paths.staging());
     fs::create_dir_all(staging.0.join("blobs")).context("cannot create the staging directory")?;
-    let manifest = unpack(archive, &staging.0.join("blobs"))
+    decide_all(paths, backends, archive, rename, &staging.0, false)
+}
+
+/// [`import`] with `dry_run`.
+fn preview(
+    paths: &Paths,
+    backends: &Backends,
+    archive: &Path,
+    rename: Option<&str>,
+) -> Result<ImportReport> {
+    // A shared hold on the import lock keeps a real import from starting
+    // meanwhile, if one ever has; if none has, there's no lock to hold.
+    let _lock = match File::open(paths.data_dir.join("import.lock")) {
+        Ok(lock) => {
+            match lock.try_lock_shared() {
+                Ok(()) => {}
+                Err(TryLockError::WouldBlock) => bail!("another macman import is running"),
+                Err(TryLockError::Error(error)) => {
+                    return Err(error).context("cannot take the import lock");
+                }
+            }
+            Some(HeldLock::new(lock))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("cannot open the import lock"),
+    };
+
+    let staging = StagingDir(std::env::temp_dir().join(format!("macman-preview-{}", new_id())));
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder
+        .create(staging.0.join("blobs"))
+        .context("cannot create a temporary directory")?;
+    decide_all(paths, backends, archive, rename, &staging.0, true)
+}
+
+/// Unpack `archive` into `staging`, and decide each machine, importing it
+/// unless this is a `dry_run`.
+fn decide_all(
+    paths: &Paths,
+    backends: &Backends,
+    archive: &Path,
+    rename: Option<&str>,
+    staging: &Path,
+    dry_run: bool,
+) -> Result<ImportReport> {
+    let manifest = unpack(archive, &staging.join("blobs"), dry_run)
         .with_context(|| format!("cannot import {}", archive.display()))?;
 
     if rename.is_some() && manifest.machines.len() != 1 {
@@ -302,15 +377,19 @@ pub fn import(
         );
     }
 
-    let mut report = ImportReport::default();
+    let mut report = ImportReport {
+        dry_run,
+        ..ImportReport::default()
+    };
     for entry in &manifest.machines {
         let context = Importing {
             paths,
             backends,
-            staging: &staging.0,
+            staging,
             manifest: &manifest,
             entry,
             rename,
+            dry_run,
         };
         let (name, outcome) = context.run(&mut report.roms);
         report.machines.push(MachineResult { name, outcome });
@@ -323,8 +402,9 @@ fn is_sha256(text: &str) -> bool {
 }
 
 /// Read the whole archive into `blobs`, verifying everything. Nothing outside
-/// `blobs` is written, and only under hash-derived names.
-fn unpack(archive: &Path, blobs: &Path) -> Result<Manifest> {
+/// `blobs` is written, and only under hash-derived names. With `only_roms`,
+/// everything is still verified, but only ROMs are kept.
+fn unpack(archive: &Path, blobs: &Path, only_roms: bool) -> Result<Manifest> {
     let file = File::open(archive).context("cannot read the archive")?;
     let mut tar = tar::Archive::new(GzDecoder::new(file));
     let mut entries = tar.entries().context("not a macman archive")?;
@@ -335,11 +415,17 @@ fn unpack(archive: &Path, blobs: &Path) -> Result<Manifest> {
         .context("not a macman archive")?;
     let manifest = read_manifest(first)?;
     let expected = validate(&manifest)?;
+    let roms: BTreeSet<_> = manifest
+        .roms
+        .iter()
+        .map(|rom| rom.sha256.as_str())
+        .collect();
 
     let mut seen = BTreeSet::new();
     for entry in entries {
         let entry = entry.context("the archive is damaged")?;
-        unpack_blob(entry, &expected, &mut seen, blobs)?;
+        let keep = |sha256: &str| !only_roms || roms.contains(sha256);
+        unpack_blob(entry, &expected, &mut seen, blobs, keep)?;
     }
     if let Some(missing) = expected.keys().find(|sha256| !seen.contains(*sha256)) {
         bail!("the archive is incomplete: {missing} is missing");
@@ -494,6 +580,7 @@ fn unpack_blob<R: Read>(
     expected: &BTreeMap<String, u64>,
     seen: &mut BTreeSet<String>,
     blobs: &Path,
+    keep: impl Fn(&str) -> bool,
 ) -> Result<()> {
     require_regular(&entry)?;
     let path = entry.path_bytes().into_owned();
@@ -518,12 +605,18 @@ fn unpack_blob<R: Read>(
         );
     }
 
-    let target = blobs.join(sha256);
-    let mut output = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&target)
-        .with_context(|| format!("cannot stage {sha256}"))?;
+    let mut output: Box<dyn Write> = if keep(sha256) {
+        let target = blobs.join(sha256);
+        Box::new(
+            OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&target)
+                .with_context(|| format!("cannot stage {sha256}"))?,
+        )
+    } else {
+        Box::new(io::sink())
+    };
     let mut reader = HashingReader {
         inner: entry.take(size),
         hasher: Sha256::new(),
@@ -591,6 +684,8 @@ struct Importing<'a> {
     manifest: &'a Manifest,
     entry: &'a ArchivedMachine,
     rename: Option<&'a str>,
+    /// Decide, but change nothing.
+    dry_run: bool,
 }
 
 impl Importing<'_> {
@@ -598,7 +693,7 @@ impl Importing<'_> {
         self.staging.join("blobs").join(sha256)
     }
 
-    fn run(&self, roms: &mut BTreeMap<String, String>) -> (String, Outcome) {
+    fn run(&self, roms: &mut BTreeMap<String, RomOutcome>) -> (String, Outcome) {
         let name = self.rename.unwrap_or(&self.entry.machine.name).to_string();
         let outcome = self
             .decide(&name, roms)
@@ -606,7 +701,7 @@ impl Importing<'_> {
         (name, outcome)
     }
 
-    fn decide(&self, name: &str, roms: &mut BTreeMap<String, String>) -> Result<Outcome> {
+    fn decide(&self, name: &str, roms: &mut BTreeMap<String, RomOutcome>) -> Result<Outcome> {
         let machine = &self.entry.machine;
         let backend = self.backends.get(&machine.emulator.backend)?;
         backend.validate(machine)?;
@@ -626,7 +721,9 @@ impl Importing<'_> {
             let outcome = self.compare(&local)?;
             if outcome == Outcome::Unchanged {
                 roms.entry(rom.name.clone())
-                    .or_insert_with(|| format!("unchanged rom {}", local.hardware.rom));
+                    .or_insert_with(|| RomOutcome::Unchanged {
+                        local: local.hardware.rom.clone(),
+                    });
             }
             return Ok(outcome);
         }
@@ -646,15 +743,35 @@ impl Importing<'_> {
         let incoming = registry::rom_from_blob(&blob, &rom.name, &rom.sha256)?;
         backend.check_rom(machine, &incoming, &blob)?;
         let mut existing = self.local_rom(rom)?;
+        if existing.is_none()
+            && self.dry_run
+            && matches!(
+                roms.get(&rom.name),
+                Some(RomOutcome::Imported | RomOutcome::Recovered)
+            )
+        {
+            // A machine before this one would have registered it.
+            existing = Some(incoming.clone());
+        }
         if existing.is_none() && registry::rom_exists(self.paths, &rom.name) {
-            if !registry::recover_rom(self.paths, &incoming)? {
+            let recovered = if self.dry_run {
+                registry::can_recover_rom(self.paths, &incoming)?
+            } else {
+                registry::recover_rom(self.paths, &incoming)?
+            };
+            if !recovered {
                 return Ok(Outcome::Conflict(format!(
                     "a different ROM is already named {:?}; nothing was changed",
                     rom.name
                 )));
             }
-            roms.insert(rom.name.clone(), format!("recovered rom {}", rom.name));
+            roms.insert(rom.name.clone(), RomOutcome::Recovered);
             existing = Some(incoming.clone());
+        }
+        if self.dry_run {
+            roms.entry(rom.name.clone())
+                .or_insert_with(|| rom_outcome(&incoming, existing.as_ref()));
+            return Ok(Outcome::Imported);
         }
 
         let built = self.staging.join("machines").join(name);
@@ -697,7 +814,7 @@ impl Importing<'_> {
         incoming: registry::Rom,
         existing: Option<registry::Rom>,
         built: &Path,
-    ) -> Result<String> {
+    ) -> Result<RomOutcome> {
         let mut machine = self.entry.machine.clone();
         machine.name = name.to_string();
         if self.rename.is_some() {
@@ -733,11 +850,7 @@ impl Importing<'_> {
             return Err(error);
         }
 
-        Ok(match existing {
-            None => format!("imported rom {}", incoming.name),
-            Some(rom) if rom.name == incoming.name => format!("unchanged rom {}", rom.name),
-            Some(rom) => format!("reused rom {} as {}", incoming.name, rom.name),
-        })
+        Ok(rom_outcome(&incoming, existing.as_ref()))
     }
 
     fn find_by_id(&self) -> Result<Option<Machine>> {
@@ -775,7 +888,12 @@ impl Importing<'_> {
 
         let mut locks = Vec::new();
         for (path, _) in local.disk_paths(self.paths)? {
-            match disk::lock_image(self.paths, &path, LockMode::Shared) {
+            let lock = if self.dry_run {
+                disk::probe_image_lock(self.paths, &path, LockMode::Shared)
+            } else {
+                disk::lock_image(self.paths, &path, LockMode::Shared).map(Some)
+            };
+            match lock {
                 Ok(lock) => locks.push(lock),
                 Err(_) if !path.exists() => return Ok(diverged("disk")),
                 Err(_) => {
@@ -793,5 +911,19 @@ impl Importing<'_> {
             }
         }
         Ok(Outcome::Unchanged)
+    }
+}
+
+/// What becomes of the ROM `incoming` when a machine is imported, given the
+/// registered ROM with the same contents, if there is one.
+fn rom_outcome(incoming: &registry::Rom, existing: Option<&registry::Rom>) -> RomOutcome {
+    match existing {
+        None => RomOutcome::Imported,
+        Some(rom) if rom.name == incoming.name => RomOutcome::Unchanged {
+            local: rom.name.clone(),
+        },
+        Some(rom) => RomOutcome::Reused {
+            local: rom.name.clone(),
+        },
     }
 }

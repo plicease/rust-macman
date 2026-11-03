@@ -104,20 +104,27 @@ pub fn add_rom_blob(paths: &Paths, blob: &Path, rom: &Rom) -> Result<()> {
 /// if `rom`, as described by [`rom_from_blob`], is certainly what was stored.
 /// Returns false, having changed nothing, for anything less clear-cut.
 pub fn recover_rom(paths: &Paths, rom: &Rom) -> Result<bool> {
-    let file = rom_path(paths, &rom.name);
-    let metadata = sidecar(&file);
-    let is_plain_file = file
-        .symlink_metadata()
-        .is_ok_and(|found| found.file_type().is_file());
-    if !is_plain_file || metadata.symlink_metadata().is_ok() || sha256_file(&file)? != rom.sha256 {
+    if !can_recover_rom(paths, rom)? {
         return Ok(false);
     }
+    let metadata = sidecar(&rom_path(paths, &rom.name));
     match write_toml_new(&metadata, rom) {
         Ok(()) => Ok(true),
         // Whatever else was registering this name finished first.
         Err(_) if metadata.symlink_metadata().is_ok() => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+/// Whether [`recover_rom`] would finish this registration, changing nothing.
+pub fn can_recover_rom(paths: &Paths, rom: &Rom) -> Result<bool> {
+    let file = rom_path(paths, &rom.name);
+    let is_plain_file = file
+        .symlink_metadata()
+        .is_ok_and(|found| found.file_type().is_file());
+    Ok(is_plain_file
+        && sidecar(&file).symlink_metadata().is_err()
+        && sha256_file(&file)? == rom.sha256)
 }
 
 /// Undo [`add_rom_blob`].
