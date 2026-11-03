@@ -151,10 +151,10 @@ These parts of the smoke test have been seen to work on that host:
   cleanly unmounted.
 - Installing from a CD, below, and then cloning, exporting, and importing the installed
   machine, whose copies are byte for byte the same and boot.
-- `slirp` networking, a shared folder, and a read-only disk mounted in a running guest.
+- `slirp` networking, a shared folder, a read-only disk mounted in a running guest, and
+  sound on a real device.
 
-These haven't been tested: sound on a real device, killing macman, and rebuilding a damaged
-build.
+These haven't been tested: killing macman, and rebuilding a damaged build.
 
 ### Installing from a CD
 
