@@ -1,7 +1,7 @@
 //! Portable machine archives: `macman export` and `macman import`.
 //!
 //! An archive is a gzipped tar holding `manifest.toml`, first, followed by
-//! `blobs/<sha256>` for each distinct ROM, system image, or disk. Addressing blobs by content
+//! `blobs/<sha256>` for each distinct ROM, system image, medium, or disk. Addressing blobs by content
 //! dedupes them, and leaves exactly two valid forms of entry name. No name,
 //! path, or permission from an archive is ever used to reach the filesystem
 //! without validation. See `docs/EXPORT_IMPORT.md`.
@@ -16,6 +16,7 @@ use crate::machine::{
     Basilisk2Settings, Disk, Display, Machine, SCHEMA_VERSION, SheepShaverSettings, SystemInfo,
     new_id, publish_dir,
 };
+use crate::media::{self, LocalMedia, Media};
 use crate::model::Model;
 use crate::paths::Paths;
 use crate::registry;
@@ -30,8 +31,10 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-/// The newest format this reads, and writes when an archive needs it.
-pub const FORMAT_VERSION: u32 = 2;
+/// The newest format this reads, and writes when an archive needs it: one
+/// with registered media. Format 2 has no media, and is written without them.
+pub const FORMAT_VERSION: u32 = 3;
+const WITHOUT_MEDIA_FORMAT: u32 = 2;
 /// What an archive of machines alone is written as, so that older versions of
 /// macman, which read only this, can still import it. Format 2 adds system
 /// images and ROMs registered for their own sake, which those would ignore.
@@ -50,6 +53,9 @@ struct Manifest {
     roms: Vec<ArchivedRom>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     systems: Vec<ArchivedSystem>,
+    /// Registered media, with what `media add` found in them (format 3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    media: Vec<Media>,
     #[serde(default)]
     machines: Vec<ArchivedMachine>,
 }
@@ -130,6 +136,8 @@ pub struct Selection {
     pub machines: Vec<String>,
     /// Registered system images, by name.
     pub systems: Vec<String>,
+    /// Registered media, by name.
+    pub media: Vec<String>,
     /// Every registered ROM, whether or not a machine here uses it.
     pub all_roms: bool,
 }
@@ -140,6 +148,7 @@ pub struct Exported {
     pub machines: usize,
     pub roms: usize,
     pub systems: usize,
+    pub media: usize,
 }
 
 /// Write `selection` to a new archive at `output`.
@@ -172,11 +181,20 @@ pub fn export(paths: &Paths, selection: &Selection, output: &Path) -> Result<Exp
         locks.push(lock);
         systems.push((image, file));
     }
+    let mut media = Vec::new();
+    for name in selection.media.iter().collect::<BTreeSet<_>>() {
+        let (medium, file) = media::load_media(paths, name)?;
+        let lock = disk::lock_image(paths, &file, LockMode::Shared)
+            .with_context(|| format!("cannot export media {name:?}"))?;
+        locks.push(lock);
+        media.push((medium, file));
+    }
 
     let mut manifest = Manifest {
         format_version: FORMAT_VERSION,
         roms: Vec::new(),
         systems: Vec::new(),
+        media: Vec::new(),
         machines: Vec::new(),
     };
     let mut blobs: BTreeMap<String, PathBuf> = BTreeMap::new();
@@ -267,8 +285,18 @@ pub fn export(paths: &Paths, selection: &Selection, output: &Path) -> Result<Exp
             source_sha256: image.source_sha256,
         });
     }
-    if manifest.systems.is_empty() && !manifest.roms.iter().any(|rom| rom.register) {
-        manifest.format_version = MACHINES_ONLY_FORMAT;
+    for (medium, file) in media {
+        // The archive's own digest covers what's written, so this only stops
+        // a medium damaged here from being passed on as good.
+        registry::verify(&file, "media", &medium.name, &medium.sha256)?;
+        blobs.insert(medium.sha256.clone(), file);
+        manifest.media.push(medium);
+    }
+    if manifest.media.is_empty() {
+        manifest.format_version = WITHOUT_MEDIA_FORMAT;
+        if manifest.systems.is_empty() && !manifest.roms.iter().any(|rom| rom.register) {
+            manifest.format_version = MACHINES_ONLY_FORMAT;
+        }
     }
 
     // Don't produce something that a later import is bound to refuse.
@@ -285,6 +313,7 @@ pub fn export(paths: &Paths, selection: &Selection, output: &Path) -> Result<Exp
         machines: manifest.machines.len(),
         roms: manifest.roms.len(),
         systems: manifest.systems.len(),
+        media: manifest.media.len(),
     })
 }
 
@@ -368,7 +397,7 @@ pub enum RomOutcome {
     Failed(String),
 }
 
-/// What became of one system image in an import.
+/// What became of one system image, or one medium, in an import.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SystemOutcome {
     Imported,
@@ -394,18 +423,25 @@ pub struct ImportReport {
     pub roms: BTreeMap<String, RomOutcome>,
     /// In the archive's order.
     pub systems: Vec<SystemResult>,
+    /// In the archive's order.
+    pub media: Vec<SystemResult>,
     pub machines: Vec<MachineResult>,
 }
 
 impl ImportReport {
-    /// Machines and system images, counted by outcome.
+    /// Machines, system images, and media, counted by outcome.
     fn count(
         &self,
         machine: impl Fn(&Outcome) -> bool,
         system: impl Fn(&SystemOutcome) -> bool,
     ) -> usize {
         let machines = self.machines.iter().filter(|m| machine(&m.outcome)).count();
-        let systems = self.systems.iter().filter(|s| system(&s.outcome)).count();
+        let systems = self
+            .systems
+            .iter()
+            .chain(&self.media)
+            .filter(|s| system(&s.outcome))
+            .count();
         machines + systems
     }
 
@@ -423,7 +459,7 @@ impl ImportReport {
         )
     }
 
-    /// Conflicts and failures of machines and system images, and of ROMs
+    /// Conflicts and failures of machines, system images, and media, and of ROMs
     /// registered for their own sake.
     pub fn unresolved(&self) -> usize {
         let roms = self
@@ -589,6 +625,14 @@ fn decide_all(
             outcome,
         });
     }
+    for medium in &manifest.media {
+        let outcome = register_media(paths, &blobs, medium, dry_run)
+            .unwrap_or_else(|error| SystemOutcome::Failed(format!("{error:#}")));
+        report.media.push(SystemResult {
+            name: medium.name.clone(),
+            outcome,
+        });
+    }
     Ok(report)
 }
 
@@ -703,6 +747,66 @@ fn register_system(
     }
 }
 
+/// Bring in a medium under its own name, as for a system image. A preview
+/// needs no blob, as a medium is compared by its digest.
+fn register_media(
+    paths: &Paths,
+    blobs: &Path,
+    medium: &Media,
+    dry_run: bool,
+) -> Result<SystemOutcome> {
+    let file = media::media_file(paths, &medium.name);
+    // As `media remove` takes an exclusive lock, this keeps it from being
+    // removed while it's compared. A preview makes no lock files.
+    let _lock = if file.exists() {
+        let held = if dry_run {
+            disk::probe_image_lock(paths, &file, LockMode::Shared)
+        } else {
+            disk::lock_image(paths, &file, LockMode::Shared).map(Some)
+        };
+        match held {
+            Ok(lock) => lock,
+            Err(_) => {
+                return Ok(SystemOutcome::Conflict(format!(
+                    "media {:?} is in use, so it can't be compared; try again when it's free",
+                    medium.name
+                )));
+            }
+        }
+    } else {
+        None
+    };
+    let taken = || {
+        SystemOutcome::Conflict(format!(
+            "different media is already named {:?}; nothing was changed",
+            medium.name
+        ))
+    };
+    match media::local_media(paths, medium)? {
+        LocalMedia::Same => Ok(SystemOutcome::Unchanged),
+        LocalMedia::Different => Ok(taken()),
+        LocalMedia::Unfinished if dry_run => Ok(SystemOutcome::Recovered),
+        LocalMedia::Unfinished => Ok(if media::recover_media(paths, medium)? {
+            SystemOutcome::Recovered
+        } else {
+            taken()
+        }),
+        LocalMedia::Absent if dry_run => Ok(SystemOutcome::Imported),
+        LocalMedia::Absent => {
+            match media::add_media_blob(paths, &blobs.join(&medium.sha256), medium) {
+                Ok(()) => Ok(SystemOutcome::Imported),
+                Err(_) if media::media_exists(paths, &medium.name) => {
+                    Ok(SystemOutcome::Conflict(format!(
+                        "media {:?} appeared during the import; nothing was changed",
+                        medium.name
+                    )))
+                }
+                Err(error) => Err(error),
+            }
+        }
+    }
+}
+
 fn is_sha256(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
@@ -710,7 +814,7 @@ fn is_sha256(text: &str) -> bool {
 /// Read the whole archive into `blobs`, verifying everything. Nothing outside
 /// `blobs` is written, and only under hash-derived names. With `only_registry`,
 /// everything is still verified, but only ROMs and system images are kept, as
-/// deciding needs them; machines' disks are discarded.
+/// deciding needs them; machines' disks and media are discarded.
 fn unpack(archive: &Path, blobs: &Path, only_registry: bool) -> Result<Manifest> {
     let file = File::open(archive).context("cannot read the archive")?;
     let mut tar = tar::Archive::new(GzDecoder::new(file));
@@ -863,6 +967,26 @@ fn validate(manifest: &Manifest) -> Result<BTreeMap<String, u64>> {
             bail!(
                 "the manifest has unprintable details for system image {:?}",
                 system.name
+            );
+        }
+    }
+
+    let mut media_names = BTreeSet::new();
+    for medium in &manifest.media {
+        validate_name("media", &medium.name)?;
+        expect(&medium.sha256, medium.size)?;
+        if !media_names.insert(medium.name.as_str()) {
+            bail!("the manifest lists media {:?} twice", medium.name);
+        }
+        // They're printed by `media list`, so nothing in them may steer a terminal.
+        let printable = [&medium.version, &medium.source]
+            .into_iter()
+            .flatten()
+            .all(|text| !text.chars().any(char::is_control));
+        if !printable {
+            bail!(
+                "the manifest has unprintable details for media {:?}",
+                medium.name
             );
         }
     }

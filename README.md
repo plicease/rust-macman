@@ -94,9 +94,10 @@ takes no room at first; elsewhere it's a full copy. It lives in the run's sessio
 directory, and if macman is killed, the next `run` removes it.
 
 Other commands: `list [--builds]`, `current`, `rom list`, `system list`, `system remove`,
-`config show`, `config edit`, `clone`, `export`, `import`, `remove`, and `doctor`. Add `--verbose` for build and launch
-logs. Add `--json` to `list`, `doctor`, `rom list`, `system list`, `disk info`, `config show`, or
-`current` for output that scripts can read; [docs/JSON.md](docs/JSON.md) has the fields.
+`media list`, `media info`, `media remove`, `config show`, `config edit`, `clone`, `export`,
+`import`, `remove`, and `doctor`. Add `--verbose` for build and launch logs. Add `--json` to
+`list`, `doctor`, `rom list`, `system list`, `media list`, `media info`, `disk info`,
+`config show`, or `current` for output that scripts can read; [docs/JSON.md](docs/JSON.md) has the fields.
 
 `rom list` shows each ROM's name, size, kind, and the start of its hash, then the
 backends that can start from it, such as `minivmac` or `basilisk2`, or `unknown` for one
@@ -444,6 +445,62 @@ a time, and macman refuses a second run that names it.
 If the installer stops at "Updating Apple hard disk drivers", start it again with that
 option turned off under Options. The emulator's disk isn't an Apple drive.
 
+## Installation media
+
+Instead of giving a CD's path on every run, register it once as media, along with
+installer floppies and other images you boot or read from for a while:
+
+```sh
+macman media add Mac_OS_9.0.4.toast --name macos-9.0.4 --version "Mac OS 9.0.4"
+macman media add "System 6 Install 1.image" --name sys6-install-1
+macman media add "System 6 Install 2.image" --name sys6-install-2
+macman media list
+macman media info macos-9.0.4
+
+macman create ss904 --backend sheepshaver --rom newworld --disk-size 1G --media macos-9.0.4
+macman run ss904 --media macos-9.0.4
+
+macman run plus-6 --media sys6-install-1 --media sys6-install-2
+```
+
+Media are registry entries like ROMs and system images, and different from both. A
+system image is a bootable volume that `create` clones into a machine's own writable
+disk. A medium is kept exactly as it was given, the whole image with its partition map,
+because an installer may check its own disc, and nothing ever writes to it: macman
+stores a read-only copy, and the file you registered from is left as it is. Removing a
+medium with `macman media remove NAME` changes no machine.
+
+`media add` works out from the contents, never the file name, how each image is
+attached:
+
+| Kind | Found for | `run --media` attaches it |
+| --- | --- | --- |
+| `cdrom` | A partition map with an HFS volume, ISO 9660, or HFS larger than a floppy | As a CD, read-only, as `--cdrom` does |
+| `floppy` | A raw MFS or HFS volume up to 1440K, or a Disk Copy 4.2 image | As a disk, from a read-only throwaway copy |
+| `disk` | Given with `--kind disk`, or an unrecognized image | As a floppy is |
+
+`--kind` overrides what's found, for instance `--kind disk` for a partitioned hard disk
+image, but a `cdrom` must still hold HFS or ISO 9660. An image macman doesn't recognize
+is refused unless you add `--any-format`. `media list` shows each one's kind, size,
+format, whether it has boot blocks, and the version you gave with `--version`, which is
+for display only and never guessed. `media info` also shows the partitions, and reads
+the whole image to check it against the SHA-256 it was registered with.
+
+`run --media NAME` repeats, and its media come after any `--disk` and `--cdrom` files,
+in the order given. That's how a multi-floppy installer gets all its disks: Mini vMac
+mounts each in its own drive, up to as many as the model has. A CD needs a backend that takes `--cdrom`, so Mini vMac
+refuses one. `create --media NAME` checks the media against the new machine before it's
+made, then prints the `run` command to use. The media aren't saved with the machine, so
+a plain `run` afterwards starts from its own disk, and installing the system is up to
+you in the guest.
+
+Media names and paths never mix: `--media` takes only registered names, and `--cdrom` and
+`--disk` only paths. Shell completion offers registered media names after `--media`, and
+`media info` and `media remove`.
+
+Installation CDs and floppies are copyrighted like ROMs and System Software; register
+your own, and don't redistribute them.
+
 ## Moving machines between hosts
 
 `macman export` writes machines to an archive, with each one's current disks and the
@@ -464,14 +521,21 @@ macman export wombat-6 --system system-6.0.8 -o wombat.tar.gz
 macman export --all-systems -o systems.tar.gz
 ```
 
-`macman export --all -o everything.tar.gz` takes every machine, ROM, and system image,
-whether or not a machine uses it, and works with no machines at all. On the other host,
+Media are taken the same way, with `--media NAME` or `--all-media`, and an archive of
+media alone needs no machines:
+
+```sh
+macman export --media macos-9.0.4 --media sys6-install-1 -o media.tar.gz
+```
+
+`macman export --all -o everything.tar.gz` takes every machine, ROM, system image, and
+medium, whether or not a machine uses it, and works with no machines at all. On the other host,
 `system list` shows the imported images, and `create --system` uses them.
 
 Export refuses a machine whose disks are in use, so close the emulator first. Import
 never replaces anything: importing the same archive again reports `unchanged`, and a
-machine, ROM, or system image that differs from what's already there is reported as a
-conflict and left alone, while the rest of the archive still imports. `macman import` exits with
+machine, ROM, system image, or medium that differs from what's already there is reported
+as a conflict and left alone, while the rest of the archive still imports. `macman import` exits with
 status 1 if anything was left unresolved. To keep both, import a single-machine
 archive as an independent copy:
 

@@ -7,8 +7,8 @@ use crate::backend::{
 };
 use crate::backend::{basilisk2, minivmac, sheepshaver};
 use crate::cli::{
-    Cli, Command, ConfigCommand, CreateArgs, DiskCommand, NameKind, RomCommand, RunArgs,
-    SystemCommand,
+    Cli, Command, ConfigCommand, CreateArgs, DiskCommand, MediaCommand, NameKind, RomCommand,
+    RunArgs, SystemCommand,
 };
 use crate::disk::{self, Classification, DiskFormat, ImageLock, LockMode, Session, SessionRecord};
 use crate::fsutil::{
@@ -19,13 +19,14 @@ use crate::machine::{
     Basilisk2Settings, Config, Disk, Display, EmulatorConfig, Hardware, Machine, SCHEMA_VERSION,
     SheepShaverSettings, SystemInfo, new_id, publish_dir,
 };
+use crate::media::{self, MediaFormat, MediaKind};
 use crate::model::{Model, parse_display};
 use crate::paths::Paths;
 use crate::registry::{self, PowerPcRom};
 use crate::report::{
     BuildDetails, BuildEntry, BuildList, Current, DiskInfo, DisplayReport, DoctorReport, Format,
-    ImportResult, Layout, MachineConfig, MachineDetails, MachineEntry, MachineList,
-    PartitionReport, RomEntry, RomList, SystemEntry, SystemList, print_json,
+    ImportResult, Layout, MachineConfig, MachineDetails, MachineEntry, MachineList, MediaEntry,
+    MediaInfo, MediaList, PartitionReport, RomEntry, RomList, SystemEntry, SystemList, print_json,
 };
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
@@ -35,6 +36,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
 const SYSTEM_DISK: &str = "system.dsk";
+
+/// A disk attached for one run, given by path or as registered media.
+struct ExtraDisk {
+    path: PathBuf,
+    writable: bool,
+    any_format: bool,
+}
 /// How a run holds its CD images. The emulators open them read-only, so runs
 /// may share them, except on macOS, where each emulator takes an exclusive lock
 /// on every image it opens, and one started second would quietly go without.
@@ -134,6 +142,39 @@ impl App {
             Command::System(SystemCommand::Remove { name, yes }) => {
                 self.remove_system(&name, yes)?
             }
+            Command::Media(MediaCommand::Add {
+                file,
+                name,
+                kind,
+                version,
+                any_format,
+            }) => {
+                let options = media::AddOptions {
+                    kind,
+                    version: version.as_deref(),
+                    any_format,
+                };
+                let medium = media::add_media(&self.paths, &file, &name, &options)?;
+                println!(
+                    "Registered media {name}: {}, {}, {}",
+                    medium.kind.as_str(),
+                    medium.format.describe(),
+                    if medium.bootable {
+                        "with boot blocks"
+                    } else {
+                        "no boot blocks"
+                    }
+                );
+                if medium.format == MediaFormat::Unrecognized {
+                    eprintln!(
+                        "note: macman doesn't recognize what's on {name}, so only an emulator \
+                         can tell whether it works"
+                    );
+                }
+            }
+            Command::Media(MediaCommand::List) => self.list_media(json)?,
+            Command::Media(MediaCommand::Info { name }) => return self.media_info(&name, json),
+            Command::Media(MediaCommand::Remove { name, yes }) => self.remove_media(&name, yes)?,
             Command::Disk(DiskCommand::Info { file }) => self.disk_info(&file, json)?,
             Command::Disk(DiskCommand::Extract {
                 source,
@@ -158,6 +199,8 @@ impl App {
                 all,
                 systems,
                 all_systems,
+                media,
+                all_media,
                 output,
             } => {
                 let every_system = || -> Result<Vec<String>> {
@@ -177,21 +220,33 @@ impl App {
                     } else {
                         systems
                     },
+                    media: if all || all_media {
+                        media::list_media(&self.paths)?
+                            .into_iter()
+                            .map(|medium| medium.name)
+                            .collect()
+                    } else {
+                        media
+                    },
                     all_roms: all,
                 };
-                let empty = selection.machines.is_empty() && selection.systems.is_empty();
+                let empty = selection.machines.is_empty()
+                    && selection.systems.is_empty()
+                    && selection.media.is_empty();
                 if all && empty && registry::list_roms(&self.paths)?.is_empty() {
-                    bail!("there are no machines, ROMs, or system images to export");
+                    bail!("there are no machines, ROMs, system images, or media to export");
                 }
                 if !all && empty {
-                    bail!("there are no machines or system images to export");
+                    bail!("there are no machines, system images, or media to export");
                 }
                 let exported = archive::export(&self.paths, &selection, &output)?;
                 println!(
-                    "Exported {} machine(s), {} ROM(s), and {} system image(s) to {}",
+                    "Exported {} machine(s), {} ROM(s), {} system image(s), and {} media \
+                     to {}",
                     exported.machines,
                     exported.roms,
                     exported.systems,
+                    exported.media,
                     output.display()
                 );
             }
@@ -240,6 +295,18 @@ impl App {
                 SystemOutcome::Unchanged => println!("unchanged system {name}"),
                 SystemOutcome::Conflict(reason) => println!("conflict system {name}: {reason}"),
                 SystemOutcome::Failed(reason) => println!("failed system {name}: {reason}"),
+            }
+        }
+        for result in &report.media {
+            let name = &result.name;
+            match &result.outcome {
+                SystemOutcome::Imported if dry_run => println!("would import media {name}"),
+                SystemOutcome::Imported => println!("imported media {name}"),
+                SystemOutcome::Recovered if dry_run => println!("would recover media {name}"),
+                SystemOutcome::Recovered => println!("recovered media {name}"),
+                SystemOutcome::Unchanged => println!("unchanged media {name}"),
+                SystemOutcome::Conflict(reason) => println!("conflict media {name}: {reason}"),
+                SystemOutcome::Failed(reason) => println!("failed media {name}: {reason}"),
             }
         }
         for result in &report.machines {
@@ -498,28 +565,119 @@ impl App {
         Ok(())
     }
 
+    fn list_media(&self, json: bool) -> Result<()> {
+        let media: Vec<MediaEntry> = media::list_media(&self.paths)?
+            .into_iter()
+            .map(MediaEntry::from)
+            .collect();
+        if json {
+            return print_json(&MediaList { media });
+        }
+        let rows: Vec<Vec<String>> = media
+            .into_iter()
+            .map(|medium| {
+                vec![
+                    medium.name,
+                    medium.kind.as_str().to_string(),
+                    format!("{}K", medium.size / 1024),
+                    medium.format.describe().to_string(),
+                    if medium.bootable { "boot blocks" } else { "-" }.to_string(),
+                    medium.version.unwrap_or_else(|| "-".to_string()),
+                ]
+            })
+            .collect();
+        print_table(&rows, &[2]);
+        Ok(())
+    }
+
+    fn media_info(&self, name: &str, json: bool) -> Result<u8> {
+        let (medium, file) = media::load_media(&self.paths, name)?;
+        let _guard = disk::lock_image(&self.paths, &file, LockMode::Shared)?;
+        let verified = sha256_file(&file)? == medium.sha256;
+        let layout = layout_of(&file)?;
+        let changed = || {
+            anyhow::anyhow!(
+                "media {name:?} doesn't match its digest, so it changed since it was \
+                 registered; remove it and register it again"
+            )
+        };
+        if json {
+            print_json(&MediaInfo {
+                media: MediaEntry::from(medium),
+                verified,
+                layout,
+            })?;
+            // One document on stdout, so the report says it, and the code.
+            return Ok(u8::from(!verified));
+        }
+        println!("Name: {}", medium.name);
+        let given = if medium.kind_given {
+            "as registered"
+        } else {
+            "as found"
+        };
+        println!("Kind: {} ({given})", medium.kind.as_str());
+        println!("Format: {}", medium.format.describe());
+        println!("Size: {} bytes", medium.size);
+        println!(
+            "Boot blocks: {}",
+            if medium.bootable {
+                "yes; a Mac may start from it"
+            } else {
+                "none; a Mac can't start from it"
+            }
+        );
+        println!(
+            "Version: {}",
+            medium.version.as_deref().unwrap_or("not given")
+        );
+        if let Some(source) = &medium.source {
+            println!("Registered from: {source}");
+        }
+        println!("SHA-256: {}", medium.sha256);
+        if let Layout::Partitioned { partitions } = &layout {
+            println!("Partitions:");
+            for p in partitions {
+                let volume = match (p.in_bounds, p.volume) {
+                    (false, _) => "out of bounds",
+                    (true, Some(Format::Hfs)) => "HFS",
+                    (true, Some(Format::Mfs)) => "MFS",
+                    (true, Some(Format::DiskCopy42)) => "Disk Copy 4.2",
+                    (true, None) => "-",
+                };
+                println!(
+                    "  {:>3}  {:<24} {:>12} bytes  {volume}",
+                    p.index, p.kind, p.length
+                );
+            }
+        }
+        if !verified {
+            return Err(changed());
+        }
+        println!("Verified: it matches its digest");
+        Ok(0)
+    }
+
+    fn remove_media(&self, name: &str, yes: bool) -> Result<()> {
+        validate_name("media", name)?;
+        if !yes && media::media_exists(&self.paths, name) {
+            confirm(
+                &format!(
+                    "Delete media {name:?}? Machines installed from it keep their disks, and \
+                     the file it was registered from is untouched."
+                ),
+                &format!("removing media {name:?} deletes it; pass --yes to confirm"),
+            )?;
+        }
+        media::remove_media(&self.paths, name)?;
+        println!("Removed media {name}");
+        Ok(())
+    }
+
     fn disk_info(&self, file: &Path, json: bool) -> Result<()> {
         let _guard = disk::lock_image(&self.paths, file, LockMode::Shared)?;
         let size = fs::metadata(file)?.len();
-        let layout = match disk::classify(file)? {
-            Classification::Supported(DiskFormat::DiskCopy42) => {
-                let (offset, length, volume) = disk::disk_copy_contents(file)?;
-                Layout::DiskCopy42 {
-                    data_offset: offset,
-                    data_length: length,
-                    volume: volume.map(Format::from),
-                }
-            }
-            Classification::Supported(format) => Layout::Volume {
-                volume: format.into(),
-            },
-            Classification::Partitioned(partitions) => Layout::Partitioned {
-                partitions: partitions.iter().map(PartitionReport::from).collect(),
-            },
-            Classification::Blank => Layout::Blank,
-            Classification::Unsupported(what) => Layout::Unsupported { description: what },
-            Classification::Unrecognized => Layout::Unrecognized,
-        };
+        let layout = layout_of(file)?;
         if json {
             return print_json(&DiskInfo {
                 file: file.display().to_string(),
@@ -527,47 +685,7 @@ impl App {
                 layout,
             });
         }
-        println!("{}: {size} bytes", file.display());
-        let name = |format: Format| match format {
-            Format::Mfs => "MFS",
-            Format::Hfs => "HFS",
-            Format::DiskCopy42 => "Disk Copy 4.2",
-        };
-        match layout {
-            Layout::DiskCopy42 {
-                data_offset,
-                data_length,
-                volume,
-            } => {
-                println!("Format: Disk Copy 4.2, read-only in Mini vMac");
-                println!("Data: {data_length} bytes at offset {data_offset}");
-                println!("Volume: {}", volume.map_or("none recognized", name));
-            }
-            Layout::Volume { volume } => println!("Format: raw {} volume", name(volume)),
-            Layout::Partitioned { partitions } => {
-                println!("Format: partitioned disk, not mountable by Mini vMac as it stands");
-                println!(
-                    "{:>3}  {:<24} {:>12} {:>12}  Volume",
-                    "#", "Type", "Offset", "Length"
-                );
-                for p in &partitions {
-                    let volume = match (p.in_bounds, p.volume) {
-                        (false, _) => "out of bounds",
-                        (true, Some(format)) => name(format),
-                        (true, None) => "-",
-                    };
-                    println!(
-                        "{:>3}  {:<24} {:>12} {:>12}  {volume}",
-                        p.index, p.kind, p.offset, p.length
-                    );
-                }
-            }
-            Layout::Blank => println!("Format: blank"),
-            Layout::Unsupported { description } => {
-                println!("Format: {description}; not supported")
-            }
-            Layout::Unrecognized => println!("Format: not recognized"),
-        }
+        print_layout(file, size, layout);
         Ok(())
     }
 
@@ -645,6 +763,20 @@ impl App {
             _ => bail!("give --system or --disk-size"),
         };
 
+        // Checked now, so a machine isn't made around media it can't use. They
+        // aren't saved with it: a later plain `run` boots its own disk.
+        for name in &args.media {
+            let (medium, file) = media::load_media(&self.paths, name)?;
+            media::check_size(&medium, &file)?;
+            if medium.kind == MediaKind::Cdrom && !backend.installs_from_cd() {
+                bail!(
+                    "media {name:?} is a CD, which {} can't attach on this host; register a \
+                     floppy, or pick another --backend",
+                    backend.name()
+                );
+            }
+        }
+
         let (width, height, depth) = match (&args.display, model) {
             (Some(display), _) => parse_display(display)?,
             (None, Some(model)) => model.default_display(),
@@ -698,13 +830,30 @@ impl App {
             }
             BootDisk::Blank(size) => create_blank_disk(&dir.join(SYSTEM_DISK), *size),
         })?;
+        let name = &args.name;
+        let run = if args.media.is_empty() {
+            format!("macman run {name} --cdrom FILE")
+        } else {
+            let media: Vec<String> = args.media.iter().map(|m| format!("--media {m}")).collect();
+            format!("macman run {name} {}", media.join(" "))
+        };
         match boot_disk {
-            BootDisk::Template(_) => println!("Created machine {}", args.name),
+            BootDisk::Template(_) if args.media.is_empty() => {
+                println!("Created machine {name}")
+            }
+            BootDisk::Template(_) => {
+                println!("Created machine {name}; attach its media with `{run}`")
+            }
             BootDisk::Blank(size) => println!(
-                "Created machine {} with a blank {size}-byte boot disk; install onto it with \
-                 `macman run {} --cdrom FILE`",
-                args.name, args.name
+                "Created machine {name} with a blank {size}-byte boot disk; install onto it \
+                 with `{run}`"
             ),
+        }
+        if !args.media.is_empty() {
+            println!(
+                "The media aren't saved with the machine, so a plain `macman run {name}` starts \
+                 from its own disk; the installer itself is up to you"
+            );
         }
         Ok(())
     }
@@ -842,6 +991,33 @@ impl App {
         registry::verify(&rom_path, "ROM", &rom.name, &rom.sha256)?;
         backend.check_rom(&machine, &rom, &rom_path)?;
 
+        // Registered media join the CDs and disks given by path, each by its kind.
+        // A medium is never written, so a disk one goes as a throwaway copy.
+        let mut cd_paths = args.cdroms.clone();
+        let mut extra: Vec<ExtraDisk> = args
+            .disks
+            .iter()
+            .map(|path| ExtraDisk {
+                path: path.clone(),
+                writable: !args.readonly,
+                any_format: args.any_format,
+            })
+            .collect();
+        let mut attaching = Vec::new();
+        for name in &args.media {
+            let (medium, file) = media::load_media(&self.paths, name)?;
+            media::check_size(&medium, &file)?;
+            attaching.push(format!("{name} ({})", medium.kind.as_str()));
+            match medium.kind {
+                MediaKind::Cdrom => cd_paths.push(file),
+                MediaKind::Floppy | MediaKind::Disk => extra.push(ExtraDisk {
+                    path: file,
+                    writable: false,
+                    any_format: medium.format == MediaFormat::Unrecognized,
+                }),
+            }
+        }
+
         let saved_disks = machine.disk_paths(&self.paths)?;
         let ephemeral = args.ephemeral(machine.ephemeral);
         if ephemeral && !saved_disks.iter().any(|(_, saved)| saved.boot) {
@@ -857,12 +1033,13 @@ impl App {
             drop(disk::lock_image(&self.paths, path, LockMode::Shared)?);
             backend.check_disk(path, writable(saved))?;
             if saved.boot
-                && args.cdroms.is_empty()
+                && cd_paths.is_empty()
+                && extra.is_empty()
                 && disk::classify(path)? == Classification::Blank
             {
                 eprintln!(
                     "note: the boot disk of {name} is blank, so it will stop at a question \
-                     mark; install onto it with `macman run {name} --cdrom FILE`"
+                     mark; install onto it with `macman run {name} --media NAME` or `--cdrom FILE`"
                 );
             }
             if saved_disk_format(backend, path)? == Some(disk::DiskFormat::DiskCopy42)
@@ -871,26 +1048,28 @@ impl App {
                 disk::warn_disk_copy_read_only(path);
             }
         }
-        for path in &args.disks {
+        for disk in &extra {
+            let path = &disk.path;
             drop(disk::lock_image(&self.paths, path, LockMode::Shared)?);
-            backend.check_disk(path, !args.readonly)?;
+            backend.check_disk(path, disk.writable)?;
             let partitioned = matches!(disk::classify(path)?, Classification::Partitioned(_));
             if !(partitioned && backend.mounts_partitioned_disks()) {
-                disk::check_attachable(path, args.any_format, !args.readonly)?;
+                disk::check_attachable(path, disk.any_format, disk.writable)?;
             }
         }
-        if !args.cdroms.is_empty() && !backend.installs_from_cd() {
+        if !cd_paths.is_empty() && !backend.installs_from_cd() {
             bail!(
-                "--cdrom isn't available for {} on this host; try --disk",
+                "--cdrom isn't available for {} on this host, nor is CD media; try --disk, or \
+                 floppy media",
                 backend.name()
             );
         }
         let mut volumes = Vec::new();
-        for path in &args.cdroms {
+        for path in &cd_paths {
             drop(disk::lock_image(&self.paths, path, CD_LOCK)?);
             volumes.push(disk::check_cd_image(path)?);
         }
-        backend.validate_disks(&machine, saved_disks.len() + args.disks.len())?;
+        backend.validate_disks(&machine, saved_disks.len() + extra.len())?;
         let repair_copy = self.offer_boot_disk_repair(&machine, ephemeral)?;
 
         if verbose && backend.revision() != machine.emulator.revision {
@@ -930,12 +1109,24 @@ impl App {
             }
             disks.push(self.attach(&session, &mut locks, path, !disk.readonly, disks.len())?);
         }
-        for path in &args.disks {
-            disks.push(self.attach(&session, &mut locks, path, !args.readonly, disks.len())?);
+        for disk in &extra {
+            disks.push(self.attach(
+                &session,
+                &mut locks,
+                &disk.path,
+                disk.writable,
+                disks.len(),
+            )?);
+        }
+        if !attaching.is_empty() {
+            println!(
+                "Attaching media {}, read-only; nothing the guest does changes it",
+                attaching.join(", ")
+            );
         }
         // Not copied, as these are big, and the emulator opens them read-only.
         let mut cdroms: Vec<CdImage> = Vec::new();
-        for (path, volume) in args.cdroms.iter().zip(volumes) {
+        for (path, volume) in cd_paths.iter().zip(volumes) {
             locks.push(disk::lock_image(&self.paths, path, CD_LOCK)?);
             cdroms.push(CdImage {
                 path: fs::canonicalize(path)
@@ -1525,6 +1716,73 @@ pub fn print_completions(shell: clap_complete::Shell, json: bool) -> Result<u8> 
     Ok(0)
 }
 
+/// What `disk info` and `media info` show of an image's layout.
+fn layout_of(file: &Path) -> Result<Layout> {
+    Ok(match disk::classify(file)? {
+        Classification::Supported(DiskFormat::DiskCopy42) => {
+            let (offset, length, volume) = disk::disk_copy_contents(file)?;
+            Layout::DiskCopy42 {
+                data_offset: offset,
+                data_length: length,
+                volume: volume.map(Format::from),
+            }
+        }
+        Classification::Supported(format) => Layout::Volume {
+            volume: format.into(),
+        },
+        Classification::Partitioned(partitions) => Layout::Partitioned {
+            partitions: partitions.iter().map(PartitionReport::from).collect(),
+        },
+        Classification::Blank => Layout::Blank,
+        Classification::Unsupported(what) => Layout::Unsupported { description: what },
+        Classification::Unrecognized => Layout::Unrecognized,
+    })
+}
+
+fn print_layout(file: &Path, size: u64, layout: Layout) {
+    println!("{}: {size} bytes", file.display());
+    let name = |format: Format| match format {
+        Format::Mfs => "MFS",
+        Format::Hfs => "HFS",
+        Format::DiskCopy42 => "Disk Copy 4.2",
+    };
+    match layout {
+        Layout::DiskCopy42 {
+            data_offset,
+            data_length,
+            volume,
+        } => {
+            println!("Format: Disk Copy 4.2, read-only in Mini vMac");
+            println!("Data: {data_length} bytes at offset {data_offset}");
+            println!("Volume: {}", volume.map_or("none recognized", name));
+        }
+        Layout::Volume { volume } => println!("Format: raw {} volume", name(volume)),
+        Layout::Partitioned { partitions } => {
+            println!("Format: partitioned disk, not mountable by Mini vMac as it stands");
+            println!(
+                "{:>3}  {:<24} {:>12} {:>12}  Volume",
+                "#", "Type", "Offset", "Length"
+            );
+            for p in &partitions {
+                let volume = match (p.in_bounds, p.volume) {
+                    (false, _) => "out of bounds",
+                    (true, Some(format)) => name(format),
+                    (true, None) => "-",
+                };
+                println!(
+                    "{:>3}  {:<24} {:>12} {:>12}  {volume}",
+                    p.index, p.kind, p.offset, p.length
+                );
+            }
+        }
+        Layout::Blank => println!("Format: blank"),
+        Layout::Unsupported { description } => {
+            println!("Format: {description}; not supported")
+        }
+        Layout::Unrecognized => println!("Format: not recognized"),
+    }
+}
+
 /// `macman __complete-names`: the names of one kind, one per line, for a
 /// completion script. It reads only directory listings, and on any trouble
 /// prints nothing, because a shell would show an error mid-line.
@@ -1544,6 +1802,7 @@ pub fn print_names(paths: &Paths, kind: NameKind) {
             .collect(),
         NameKind::Roms => registered(paths.roms()),
         NameKind::Systems => registered(paths.systems()),
+        NameKind::Media => registered(paths.media()),
     };
     names.sort();
     let mut stdout = std::io::stdout().lock();
@@ -1562,7 +1821,10 @@ fn without_json(command: &Command) -> Option<&'static str> {
         | Command::System(SystemCommand::List)
         | Command::Disk(DiskCommand::Info { .. })
         | Command::Current
+        | Command::Media(MediaCommand::List | MediaCommand::Info { .. })
         | Command::Config(ConfigCommand::Show { .. }) => return None,
+        Command::Media(MediaCommand::Add { .. }) => "media add",
+        Command::Media(MediaCommand::Remove { .. }) => "media remove",
         Command::Rom(RomCommand::Add { .. }) => "rom add",
         Command::System(SystemCommand::Add { .. }) => "system add",
         Command::System(SystemCommand::Remove { .. }) => "system remove",

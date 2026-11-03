@@ -1,22 +1,22 @@
 # Export and import
 
-`macman export` and `macman import` move machines, ROMs, and system images between
+`macman export` and `macman import` move machines, ROMs, system images, and media between
 hosts. They transfer an archive once; they aren't sync, and they never merge.
 
-Apple ROMs and System Software are copyrighted, and an archive contains both. Archives
-are for moving your own machines between your own computers, not for public
-redistribution.
+Apple ROMs, System Software, and installation media are copyrighted, and an archive
+contains them. Archives are for moving your own machines between your own computers, not
+for public redistribution.
 
 ## Archive format
 
 An archive is a gzipped tar. Its first entry is `manifest.toml`, and the rest are
-`blobs/<sha256>`, one for each distinct ROM, system image, or disk, named after the
+`blobs/<sha256>`, one for each distinct ROM, system image, medium, or disk, named after the
 SHA-256 of its contents. Anything with the same bytes therefore shares a blob: machines
 on one ROM, identical disks, two names for one system image, and a fresh machine's disk
 and the image it was created from.
 
 ```toml
-format_version = 2
+format_version = 3
 
 [[roms]]
 name = "plus-v3"
@@ -32,6 +32,16 @@ version = "6.0.8"    # what `system add` recorded, when it did
 extracted_from = "partition 3 (Apple_HFS)"
 source_sha256 = "..."
 
+[[media]]
+name = "macos-9.0.4"
+sha256 = "..."
+size = 681574400
+kind = "cdrom"       # cdrom, floppy, or disk
+format = "partitioned"
+bootable = true
+source = "Mac OS 9.0.4.toast"
+version = "Mac OS 9.0.4"   # only if given to `media add`
+
 [[machines]]
 rom_sha256 = "..."
 
@@ -46,9 +56,10 @@ size = 819200
 
 `format_version` changes whenever older versions of macman couldn't read an archive
 correctly, and they refuse it and ask to be upgraded. Format 2 adds `systems` and
-`register`, which format 1 readers would quietly drop. An archive with neither, which
-is any export of machines alone, is still written as format 1, so older versions of
-macman import it as before. This version reads both.
+`register`, which format 1 readers would quietly drop, and format 3 adds `media`. Each
+archive is written in the oldest format that holds it: one without media is format 2,
+and one of machines alone is format 1, so older versions of macman import them as
+before. This version reads all three.
 
 ## What an archive holds
 
@@ -56,16 +67,22 @@ A machine brings its current private disks and the one ROM it uses. Its definiti
 doesn't record which system image it was created from, and its disk has changed since,
 so no system image comes with it. Those are chosen separately:
 
-| Command | Machines | ROMs | System images |
-| --- | --- | --- | --- |
-| `export NAME...` | Those named | The ones they use | None |
-| `export NAME... --system SYS...` | Those named | The ones they use | Those named |
-| `export --system SYS...` | None | None | Those named |
-| `export [NAME...] --all-systems` | Those named, if any | The ones they use | All |
-| `export --all` | All | All, used or not | All |
+| Command | Machines | ROMs | System images | Media |
+| --- | --- | --- | --- | --- |
+| `export NAME...` | Those named | The ones they use | None | None |
+| `export NAME... --system SYS...` | Those named | The ones they use | Those named | None |
+| `export --system SYS...` | None | None | Those named | None |
+| `export [NAME...] --all-systems` | Those named, if any | The ones they use | All | None |
+| `export --media MEDIA...` | None | None | None | Those named |
+| `export [NAME...] --all-media` | Those named, if any | The ones they use | None | All |
+| `export --all` | All | All, used or not | All | All |
 
-`--all` works with no machines, and is refused only when there's nothing at all to
-export. It can't be combined with names, `--system`, or `--all-systems`. With `--all`,
+`--system` and `--media` mix with machine names and each other, so one archive can hold
+a machine and the CD it was installed from. Neither brings in anything else: a
+media-only archive holds just those media, and imports with no machines in it. A name
+that isn't registered stops the export. `--all` works with no machines, and is refused
+only when there's nothing at all to export. It can't be combined with names, `--system`,
+`--all-systems`, `--media`, or `--all-media`. With `--all`,
 every registered name has its own entry, so a ROM registered twice under different
 names arrives under both, sharing one blob. Without it, a machine's ROM has one entry
 for its contents, as in format 1.
@@ -122,6 +139,12 @@ own name, so each name in the archive can be used afterwards. Its metadata comes
 the archive, so `system list` shows what it did on the source host. A conflict affects
 only that image.
 
+Media are matched the same way, by name and then contents, with the same outcomes:
+`imported`, `unchanged`, `recovered`, or `conflict media NAME`, and never overwritten.
+An imported medium is the archive's bytes exactly, stored read-only like one registered
+here, with the metadata `media add` recorded on the source host. A dry run decides
+media from their digests without unpacking them.
+
 For each machine:
 
 | Local state | Outcome |
@@ -141,8 +164,8 @@ by, and which revision a copy records, provided both run as the same one here. T
 Nothing is merged or overwritten, and there's no `--replace`. Conflicts and failures
 affect only that machine, image, or ROM: the others still import, the summary says
 what happened to each, and the exit status is 1 if anything is unresolved. The summary
-counts machines and system images; its unresolved count also includes ROMs registered
-for their own sake. An archive that's damaged,
+counts machines, system images, and media; its unresolved count also includes ROMs
+registered for their own sake. An archive that's damaged,
 hostile, or from a newer format is refused as a whole, before anything changes.
 
 ### `--rename`

@@ -297,6 +297,59 @@ fn readonly_disk_is_a_read_only_throwaway_copy() {
 }
 
 #[test]
+fn floppy_media_go_as_read_only_copies_in_order_and_a_cd_is_refused() {
+    let (h, mock) = Harness::mock();
+    for name in ["install-1", "install-2"] {
+        let file = write_disk(h.dir(), &format!("{name}.image"));
+        h.cmd(&["media", "add", file.to_str().unwrap(), "--name", name])
+            .unwrap();
+    }
+    let stored = h.paths.media().join("install-1.img");
+    let before = sha256_file(&stored).unwrap();
+    mock.0.borrow_mut().during = Some(Box::new(|launch: &Launch| {
+        // Boot disk, then the media in the order given.
+        assert_eq!(launch.disks.len(), 3);
+        for disk in &launch.disks[1..] {
+            assert!(!disk.writable);
+            assert!(disk.path.starts_with(&launch.workdir));
+        }
+        assert!(launch.disks[1].path.ends_with("1-install-2.img"));
+        assert!(launch.disks[2].path.ends_with("2-install-1.img"));
+    }));
+    h.cmd(&[
+        "run",
+        "plus-a",
+        "--media",
+        "install-2",
+        "--media",
+        "install-1",
+    ])
+    .unwrap();
+    assert_eq!(mock.0.borrow().launches.len(), 1);
+    assert_eq!(sha256_file(&stored).unwrap(), before);
+    assert_eq!(Machine::load(&h.paths, "plus-a").unwrap().disks.len(), 1);
+
+    // Mini vMac has no CD drive, which `create` says before making anything.
+    let (cd, _) = write_partitioned_disk(h.dir(), "cd.toast");
+    h.cmd(&["media", "add", cd.to_str().unwrap(), "--name", "cd"])
+        .unwrap();
+    let error = h
+        .cmd(&["run", "plus-a", "--media", "cd"])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("isn't available"), "{error}");
+    let error = h
+        .cmd(&[
+            "create", "b", "--model", "plus", "--rom", "plus", "--system", "sys", "--media", "cd",
+        ])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("is a CD"), "{error}");
+    assert!(!h.paths.machine("b").exists());
+    assert_eq!(mock.0.borrow().launches.len(), 1);
+}
+
+#[test]
 fn extra_disk_without_readonly_is_the_real_writable_file() {
     let (h, mock) = Harness::mock();
     let disk = write_disk(h.dir(), "data.dsk");

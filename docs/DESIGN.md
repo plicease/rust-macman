@@ -102,6 +102,9 @@ Use XDG paths on Linux and macOS, respecting `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
     plus-v3.rom
   systems/
     system-6.0.8.dsk
+  media/
+    macos-9.0.4.img     # read-only, the whole image as registered
+    macos-9.0.4.toml
   machines/
     wombat-6/
       machine.toml
