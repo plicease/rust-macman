@@ -2083,3 +2083,26 @@ fn only_roms_registered_for_their_own_sake_may_share_contents() {
     };
     assert_refused(&with_manifest(&archive, edit), "lists ROM \"other\" twice");
 }
+
+#[test]
+fn the_ephemeral_setting_travels_and_counts_as_configuration() {
+    let source = Host::with_two_machines();
+    let definition = source
+        .definition("plus-a")
+        .replace("ephemeral = false", "ephemeral = true");
+    source.write_definition("plus-a", &definition);
+    let archive = source.export(&["plus-a"], "plus.tar.gz");
+
+    let target = Host::new();
+    target.ok(&["import", &archive]);
+    assert!(target.definition("plus-a").contains("ephemeral = true\n"));
+    assert!(target.ok(&["list"]).contains("ephemeral"));
+
+    // Turning it off here makes the two copies differ.
+    let local = target
+        .definition("plus-a")
+        .replace("ephemeral = true", "ephemeral = false");
+    target.write_definition("plus-a", &local);
+    let output = target.fails(&["import", &archive]);
+    assert!(output.contains("different configuration"), "{output}");
+}

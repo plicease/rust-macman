@@ -54,7 +54,8 @@ nothing, and fail with an error as above.
       "model": "plus",
       "memory": "4M",
       "display": {"width": 512, "height": 342, "depth": 1, "scale": 2, "fullscreen": false},
-      "system_version": "6.0.8"
+      "system_version": "6.0.8",
+      "ephemeral": false
     }
   ]
 }
@@ -69,6 +70,7 @@ nothing, and fail with an error as above.
 | `memory` | string | As configured, such as `4M` |
 | `display` | object | `width`, `height`, `depth`, and `scale` are numbers; `fullscreen` is a boolean |
 | `system_version` | string or null | The system version, for display only |
+| `ephemeral` | boolean | Whether a plain `run` boots a temporary copy of the boot disk; the machine's setting, not that of a run under way |
 
 A machine whose definition can't be read has only `name`, `current`, and `error`, a string.
 

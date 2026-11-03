@@ -38,6 +38,8 @@ Then check each of these:
 | Hold Ctrl and press Q, then Y | Exit code 0, and the `sessions` directory is empty. |
 | `macman list --builds` | One Plus build. |
 | `macman run iix-71 --disk "extra disk.dsk" --readonly` | Boots System 7.1 in color with the extra disk mounted. |
+| Note the hash of `plus-6`'s `system.dsk`. `macman run plus-6 -e`, save a file to the startup disk in the guest, restart the guest, and shut down | Says it boots from a temporary copy. The file is still there after the restart, the run ends with exit code 0, and the `system.dsk` hash is unchanged. |
+| `macman run plus-6 -e` again | The file isn't there: the run starts from the saved disk. |
 | End `macman.exe` while the emulator runs, then `macman run iix-71` | Warns about the earlier run, then refuses the disk as in use. |
 | Close the emulator, and compare the extra disk's hash | The hash is unchanged. |
 | The next `macman run` | Clears the notice left by the abandoned session. |

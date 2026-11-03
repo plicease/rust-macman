@@ -157,6 +157,7 @@ fn machines_are_listed_with_typed_fields() {
     assert_eq!(b["display"]["scale"], 2);
     assert_eq!(b["display"]["fullscreen"], false);
     assert_eq!(b["system_version"], "6.0.8");
+    assert_eq!(b["ephemeral"], false);
     assert!(b.get("error").is_none());
 }
 
@@ -232,6 +233,7 @@ fn config_show_and_current_report_the_machine() {
     assert_eq!(machine["emulator"]["backend"], "minivmac");
     assert_eq!(machine["hardware"]["model"], "plus");
     assert_eq!(machine["disks"][0]["boot"], true);
+    assert_eq!(machine["ephemeral"], false);
 }
 
 #[test]

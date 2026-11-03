@@ -33,6 +33,61 @@ pub fn atomic_copy(src: &Path, dst: &Path) -> Result<()> {
     atomic_copy_range(src, 0, length, dst)
 }
 
+/// Copy `src` to a new, writable, independent file at `dst`, which must not
+/// exist. Where the file system can, the copy shares blocks with `src` until
+/// either is written (a reflink, or a clone on APFS), so it's quick and takes
+/// no room at first; elsewhere it's a full copy. Never a hard link, so writes
+/// to the copy can't reach `src`.
+pub fn independent_copy(src: &Path, dst: &Path) -> Result<()> {
+    if dst.symlink_metadata().is_ok() {
+        bail!("{} already exists", dst.display());
+    }
+    let tmp = temp_sibling(dst)?;
+    let result = (|| -> Result<()> {
+        if !reflink(src, &tmp)? {
+            // The standard library clones on macOS, and lets the kernel copy
+            // on Linux, which keeps holes on some file systems.
+            fs::copy(src, &tmp)?;
+        }
+        let mut perms = fs::metadata(&tmp)?.permissions();
+        if perms.readonly() {
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            fs::set_permissions(&tmp, perms)?;
+        }
+        File::open(&tmp)?.sync_all()?;
+        publish_new(&tmp, dst)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result.with_context(|| format!("cannot copy {} to {}", src.display(), dst.display()))
+}
+
+/// Make `dst` a reflink of `src`, returning false, with nothing at `dst`,
+/// where the file system can't.
+#[cfg(target_os = "linux")]
+fn reflink(src: &Path, dst: &Path) -> Result<bool> {
+    use std::os::fd::AsRawFd;
+    let source = File::open(src)?;
+    let target = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)?;
+    // SAFETY: both descriptors are open for as long as the call lasts.
+    let cloned = unsafe { libc::ioctl(target.as_raw_fd(), libc::FICLONE, source.as_raw_fd()) } == 0;
+    drop(target);
+    if !cloned {
+        fs::remove_file(dst)?;
+    }
+    Ok(cloned)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reflink(_src: &Path, _dst: &Path) -> Result<bool> {
+    Ok(false)
+}
+
 /// As [`atomic_copy`], for `length` bytes of `src` starting at `offset`.
 pub fn atomic_copy_range(src: &Path, offset: u64, length: u64, dst: &Path) -> Result<()> {
     atomic_copy_range_checked(src, offset, length, dst, |_| Ok(()))
@@ -360,6 +415,28 @@ impl Drop for HeldLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_independent_copy_is_writable_and_never_reaches_its_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("boot.dsk");
+        fs::write(&source, vec![7u8; 64 * 1024]).unwrap();
+        let mut perms = fs::metadata(&source).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&source, perms).unwrap();
+
+        let copy = dir.path().join("copy.dsk");
+        independent_copy(&source, &copy).unwrap();
+        assert!(!fs::metadata(&copy).unwrap().permissions().readonly());
+        fs::write(&copy, b"guest").unwrap();
+        assert_eq!(fs::read(&source).unwrap(), vec![7u8; 64 * 1024]);
+
+        let error = independent_copy(&source, &copy).unwrap_err();
+        assert!(format!("{error:#}").contains("already exists"), "{error:#}");
+        assert_eq!(fs::read(&copy).unwrap(), b"guest");
+        let leftovers = fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(leftovers, 2, "no temporary file is left");
+    }
 
     #[cfg(unix)]
     #[test]

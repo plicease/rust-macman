@@ -580,6 +580,7 @@ mod tests {
             schema_version: 1,
             name: "beige".into(),
             id: None,
+            ephemeral: false,
             emulator: EmulatorConfig {
                 backend: BACKEND_NAME.into(),
                 revision: macemu::pin().revision,

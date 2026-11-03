@@ -314,6 +314,9 @@ pub struct CreateArgs {
     /// Host folder to show the guest as a volume (Basilisk II and SheepShaver only)
     #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
     pub shared_folder: Option<PathBuf>,
+    /// Run on a temporary copy of the boot disk by default, discarding the guest's changes
+    #[arg(long)]
+    pub ephemeral: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -333,6 +336,27 @@ pub struct RunArgs {
     /// SheepShaver, and Basilisk II on Linux)
     #[arg(long = "cdrom", value_name = "FILE", value_hint = ValueHint::FilePath)]
     pub cdroms: Vec<PathBuf>,
+    /// Boot from a writable temporary copy of the boot disk, discarded when the run ends;
+    /// other disks keep their changes
+    #[arg(short, long, conflicts_with = "no_ephemeral")]
+    pub ephemeral: bool,
+    /// Use the saved boot disk, even on a machine set to be ephemeral
+    #[arg(long)]
+    pub no_ephemeral: bool,
+}
+
+impl RunArgs {
+    /// Whether this run's boot disk is a temporary copy: as the flags say, or
+    /// else as the machine is set.
+    pub fn ephemeral(&self, machine_default: bool) -> bool {
+        if self.ephemeral {
+            true
+        } else if self.no_ephemeral {
+            false
+        } else {
+            machine_default
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]

@@ -134,7 +134,7 @@ For each machine:
 | The ROM's name is taken by a different ROM, or by an unclear partial registration | `conflict` |
 | Backend, hardware, or ROM unusable here, or a revision not known to be interchangeable with this host's | `failed` |
 
-The comparison includes the backend, hardware, display, and disk settings, and the
+The comparison includes the backend, hardware, display, disk, and `ephemeral` settings, and the
 contents of every disk. It ignores file locations, timestamps, which name the ROM goes
 by, and which revision a copy records, provided both run as the same one here. The comparison finds the local machine by `id`, even if it has been renamed.
 
