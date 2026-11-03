@@ -106,6 +106,13 @@ pub enum SystemCommand {
     },
     /// List registered system images
     List,
+    /// Delete a registered system image; machines made from it keep their own disks
+    Remove {
+        name: String,
+        /// Delete it without prompting
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -128,7 +135,7 @@ pub enum DiskCommand {
 #[derive(Debug, clap::Args)]
 pub struct CreateArgs {
     pub name: String,
-    /// Emulator: minivmac (the default) or basilisk2
+    /// Emulator: minivmac (the default), basilisk2, or sheepshaver
     #[arg(long)]
     pub backend: Option<String>,
     /// Hardware model, such as plus, se, classic, ii, or iix (Mini vMac only)
@@ -138,8 +145,16 @@ pub struct CreateArgs {
     #[arg(long)]
     pub rom: String,
     /// Name of a registered system image, cloned into the machine
-    #[arg(long)]
-    pub system: String,
+    #[arg(
+        long,
+        required_unless_present = "disk_size",
+        conflicts_with = "disk_size"
+    )]
+    pub system: Option<String>,
+    /// Start with a blank boot disk of this size, such as 1G, to install onto from
+    /// `macman run --cdrom` (SheepShaver, and Basilisk II on Linux)
+    #[arg(long, value_name = "SIZE")]
+    pub disk_size: Option<String>,
     /// Memory size, such as 4M (default depends on the model)
     #[arg(long)]
     pub memory: Option<String>,
@@ -158,13 +173,13 @@ pub struct CreateArgs {
     /// Leave out the FPU (Basilisk II only, and not with a 68040)
     #[arg(long)]
     pub no_fpu: bool,
-    /// Turn off sound (Basilisk II only)
+    /// Turn off sound (Basilisk II and SheepShaver only)
     #[arg(long)]
     pub no_sound: bool,
-    /// Guest networking (Basilisk II only; default none)
+    /// Guest networking (Basilisk II and SheepShaver only; default none)
     #[arg(long, value_enum)]
     pub network: Option<Network>,
-    /// Host folder to show the guest as a volume (Basilisk II only)
+    /// Host folder to show the guest as a volume (Basilisk II and SheepShaver only)
     #[arg(long, value_name = "DIR")]
     pub shared_folder: Option<PathBuf>,
 }
@@ -181,6 +196,10 @@ pub struct RunArgs {
     /// Attach --disk files whose format macman does not recognize
     #[arg(long, requires = "disks")]
     pub any_format: bool,
+    /// Attach a CD image, read-only, for this run only, and start from it (repeatable;
+    /// SheepShaver, and Basilisk II on Linux)
+    #[arg(long = "cdrom", value_name = "FILE")]
+    pub cdroms: Vec<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]

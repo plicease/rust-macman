@@ -13,7 +13,8 @@ use crate::fsutil::{
     temp_sibling, validate_name, windows_can_name,
 };
 use crate::machine::{
-    Basilisk2Settings, Disk, Display, Machine, SCHEMA_VERSION, SystemInfo, new_id, publish_dir,
+    Basilisk2Settings, Disk, Display, Machine, SCHEMA_VERSION, SheepShaverSettings, SystemInfo,
+    new_id, publish_dir,
 };
 use crate::model::Model;
 use crate::paths::Paths;
@@ -116,6 +117,9 @@ pub fn export(paths: &Paths, names: &[String], output: &Path) -> Result<usize> {
         }
         if let Some(settings) = &mut machine.basilisk2 {
             // It's a path on this host, and may say more than the owner meant to.
+            settings.shared_folder = None;
+        }
+        if let Some(settings) = &mut machine.sheepshaver {
             settings.shared_folder = None;
         }
         let (rom, rom_path) = registry::load_rom(paths, &machine.hardware.rom)?;
@@ -546,6 +550,8 @@ struct Fingerprint<'a> {
     system: &'a SystemInfo,
     /// Without the shared folder, which belongs to a host, not the machine.
     basilisk2: Option<Basilisk2Settings>,
+    /// As for Basilisk II.
+    sheepshaver: Option<SheepShaverSettings>,
     disks: &'a [Disk],
 }
 
@@ -566,6 +572,13 @@ impl<'a> Fingerprint<'a> {
                 shared_folder: None,
                 ..settings
             }),
+            sheepshaver: machine
+                .sheepshaver
+                .clone()
+                .map(|settings| SheepShaverSettings {
+                    shared_folder: None,
+                    ..settings
+                }),
             disks: &machine.disks,
         }
     }

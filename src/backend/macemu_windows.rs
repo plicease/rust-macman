@@ -19,12 +19,19 @@
 //!   system code page, so a path outside ASCII would fail, and silently.
 //!   [`MANIFEST`] has Windows make those calls read UTF-8 as well. Short names
 //!   won't do: NTFS keeps characters like `ë` in them.
+//!
+//! SheepShaver's Windows port shares its startup's habits and its disk code,
+//! so what's here about launching serves both; [`super::sheepshaver_windows`]
+//! builds it.
 
-use super::minivmac::{make_tool, short_path};
+use super::minivmac::{gcc_target, is_mingw_x64, make_tool, short_path};
 use super::source::SourcePin;
+use super::{LaunchRequest, macemu::first_line};
+use crate::fsutil::{atomic_copy, without_verbatim_prefix};
 use anyhow::{Context, Result, bail};
+use std::ffi::OsString;
 use std::fs::{self, File};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 
@@ -32,8 +39,13 @@ pub const EXECUTABLE: &str = "BasiliskII.exe";
 pub const BUILD_DIRECTORY: &str = "BasiliskII/src/Windows";
 /// Part of the build key. Change it when the steps here change what's built.
 pub const RECIPE: &str = "recipe 1";
+/// The session's copy of the ROM.
+const ROM_COPY: &str = "rom";
+/// `Sys_open` reads a disk's size as 32 bits.
+pub(super) const MAX_DISK: u64 = 1 << 32;
+const MAX_PATH: usize = 260;
 /// Windows 10 version 1903 and later honor this for the narrow API.
-const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+pub(super) const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
   <application>
     <windowsSettings>
@@ -124,7 +136,7 @@ pub const SOURCES: &[&str] = &[
     "cpustbl.cpp",
     "cpudefs.cpp",
 ];
-/// `Makefile.in`'s `SLIRP_SRCS`.
+/// `Makefile.in`'s `SLIRP_SRCS`, which SheepShaver's has too.
 pub const SLIRP_SOURCES: &[&str] = &[
     "bootp",
     "cksum",
@@ -156,7 +168,7 @@ pub const CROSS_PLATFORM_SOURCES: &[&str] = &[
     "video_blit.h",
 ];
 /// What `sdl2-config --static-libs` lists, as linked from `Makefile.in`'s `LIBS`.
-const LIBRARIES: &str = "-lws2_32 -lwsock32 -liphlpapi -lmingw32 $(SDL)/lib/libSDL2main.a \
+pub(super) const LIBRARIES: &str = "-lws2_32 -lwsock32 -liphlpapi -lmingw32 $(SDL)/lib/libSDL2main.a \
                          $(SDL)/lib/libSDL2.a -mwindows -lm -ldinput8 -ldxguid -ldxerr8 -luser32 \
                          -lgdi32 -lwinmm -limm32 -lole32 -loleaut32 -lshell32 -lsetupapi \
                          -lversion -luuid";
@@ -181,9 +193,82 @@ pub fn sdl_pin() -> SourcePin {
     }
 }
 
+/// What a build depends on besides the source: the compiler, SDL, and `recipe`.
+pub fn toolchain_identity(sdl_pin: &SourcePin, recipe: &str) -> Result<String> {
+    let hint = "install a C++ compiler (run `macman doctor`)";
+    let compiler = first_line("g++", &["--version"]).context(hint)?;
+    let target = gcc_target()?;
+    if !is_mingw_x64(&target) {
+        bail!("gcc targets {target}, not 64-bit Windows; run `macman doctor`");
+    }
+    Ok(format!(
+        "{target} {compiler} SDL {} {recipe}",
+        sdl_pin.sha256
+    ))
+}
+
+/// What the emulator can open, or why it can't. A session's own disk goes by
+/// its name, which keeps it short.
+fn disk_path(disk: &Path, workdir: &Path, label: &str) -> Result<PathBuf> {
+    let path = match disk.strip_prefix(workdir) {
+        Ok(name) => name.to_path_buf(),
+        Err(_) => without_verbatim_prefix(disk),
+    };
+    // Bytes, in UTF-8, not characters: that's what its buffers hold.
+    if path.to_string_lossy().len() >= MAX_PATH {
+        bail!(
+            "{} is too long for {label}, which handles paths under {MAX_PATH} bytes; move it to \
+             a shorter path",
+            disk.display()
+        );
+    }
+    Ok(path)
+}
+
+/// The emulator's arguments, with `preferences` already in the session. The
+/// ROM is copied there, so that everything of the session's goes by its name.
+pub(super) fn arguments(
+    request: &LaunchRequest<'_>,
+    preferences: &str,
+    label: &str,
+) -> Result<Vec<OsString>> {
+    atomic_copy(request.rom, &request.workdir.join(ROM_COPY))?;
+    let mut arguments: Vec<OsString> = vec![
+        "--config".into(),
+        preferences.into(),
+        "--rom".into(),
+        ROM_COPY.into(),
+    ];
+    for disk in request.disks {
+        let mut value = OsString::from(if disk.writable { "" } else { "*" });
+        value.push(disk_path(&disk.path, request.workdir, label)?);
+        arguments.extend(["--disk".into(), value]);
+    }
+    Ok(arguments)
+}
+
+/// Refuse a disk whose size `Sys_open` would misread.
+pub(super) fn check_disk_size(path: &Path, label: &str) -> Result<()> {
+    if fs::metadata(path)?.len() >= MAX_DISK {
+        bail!(
+            "{} is too big for {label} on Windows, which handles disks under 4G",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// `extfs` is ignored, and `enableextfs` shows the guest whole drives.
+pub(super) fn refuse_shared_folder(label: &str) -> Result<()> {
+    bail!(
+        "shared folders aren't available with {label} on Windows, where it can only show the \
+         guest whole drives"
+    )
+}
+
 /// `text` with one `from` turned into `to`, or an error if upstream's source
 /// isn't what this was written against.
-fn replace_once(text: &str, from: &str, to: &str, file: &str) -> Result<String> {
+pub(super) fn replace_once(text: &str, from: &str, to: &str, file: &str) -> Result<String> {
     if !text.contains(from) {
         bail!("{file} lacks the expected code");
     }
@@ -238,18 +323,20 @@ fn allocate_upwards(text: &str) -> Result<String> {
     )
 }
 
-/// Print errors the way Unix does without a GUI, for macman to read.
-fn report_errors(text: &str) -> Result<String> {
+/// Print errors the way Unix does without a GUI, for macman to read. There's
+/// an `ErrorAlert` for each of `formats`, in order, each for its string type.
+pub(super) fn report_errors(text: &str, formats: &[&str]) -> Result<String> {
     const FILE: &str = "main_windows.cpp";
     const SILENT: &str = "\tif (PrefsFindBool(\"nogui\"))\n\t\treturn;\n\n\tVideoQuitFullScreen();";
-    let print = |format: &str| {
-        format!(
+    let mut text = text.to_string();
+    for format in formats {
+        let print = format!(
             "\tif (PrefsFindBool(\"nogui\")) {{\n\t\tprintf(\"ERROR: {format}\\n\", text);\n\
              \t\treturn;\n\t}}\n\n\tVideoQuitFullScreen();"
-        )
-    };
-    let text = replace_once(text, SILENT, &print("%s"), FILE)?;
-    replace_once(&text, SILENT, &print("%ls"), FILE)
+        );
+        text = replace_once(&text, SILENT, &print, FILE)?;
+    }
+    Ok(text)
 }
 
 fn stem(source: &str) -> &str {
@@ -295,7 +382,7 @@ fn makefile(sdl: &str, jobs: usize) -> String {
 }
 
 /// Run `command` in `directory`, with its output in `log` unless `stdout` is set.
-fn run(
+pub(super) fn run(
     what: &str,
     command: &mut Command,
     directory: &Path,
@@ -322,7 +409,7 @@ fn run(
 /// Unpack one archive into `directory`. It's piped, as GNU tar would read
 /// `C:\...` as a remote host, and `exclude` keeps out what isn't needed, which
 /// includes macemu's symbolic links, which Windows would refuse.
-fn unpack(archive: &Path, directory: &Path, exclude: &[&str], log: &File) -> Result<()> {
+pub(super) fn unpack(archive: &Path, directory: &Path, exclude: &[&str], log: &File) -> Result<()> {
     let mut tar = Command::new("tar");
     tar.args(["xzf", "-", "--strip-components=1"]);
     for pattern in exclude {
@@ -332,7 +419,7 @@ fn unpack(archive: &Path, directory: &Path, exclude: &[&str], log: &File) -> Res
     run("tar", &mut tar, directory, source.into(), None, log)
 }
 
-fn edit(file: &Path, change: impl Fn(&str) -> Result<String>) -> Result<()> {
+pub(super) fn edit(file: &Path, change: impl Fn(&str) -> Result<String>) -> Result<()> {
     let text =
         fs::read_to_string(file).with_context(|| format!("cannot read {}", file.display()))?;
     fs::write(file, change(&text)?).with_context(|| format!("cannot write {}", file.display()))
@@ -360,7 +447,9 @@ pub fn build(archive: &Path, sdl_archive: &Path, src: &Path, log: &File) -> Resu
             .with_context(|| format!("cannot copy {}", source.display()))?;
     }
     edit(&dir.join("vm_alloc.cpp"), allocate_upwards)?;
-    edit(&dir.join("main_windows.cpp"), report_errors)?;
+    edit(&dir.join("main_windows.cpp"), |text| {
+        report_errors(text, &["%s", "%ls"])
+    })?;
     fs::write(dir.join("BasiliskII.manifest"), MANIFEST)?;
     edit(&dir.join("BasiliskII.rc"), |text| {
         Ok(format!("{text}{MANIFEST_RESOURCE}"))
@@ -422,17 +511,23 @@ pub fn build(archive: &Path, sdl_archive: &Path, src: &Path, log: &File) -> Resu
     let jobs = thread::available_parallelism().map_or(1, |jobs| jobs.get());
     let sdl_from_build = "../../../sdl/x86_64-w64-mingw32";
     fs::write(dir.join("GNUmakefile"), makefile(sdl_from_build, jobs))?;
+    make(&dir, src, log, "Basilisk II")
+}
+
+/// Run the `GNUmakefile` in `dir`, under `src`, which is as found by
+/// [`short_path`].
+pub(super) fn make(dir: &Path, src: &Path, log: &File, label: &str) -> Result<()> {
     run(
         "make",
         &mut Command::new(make_tool()),
-        &dir,
+        dir,
         Stdio::null(),
         None,
         log,
     )
     .with_context(|| {
         if src.to_string_lossy().is_ascii() {
-            String::from("cannot compile Basilisk II")
+            format!("cannot compile {label}")
         } else {
             format!(
                 "MinGW make can't work in {}, which has no ASCII short name; set XDG_CACHE_HOME \
@@ -475,7 +570,7 @@ mod tests {
     #[test]
     fn errors_are_printed_for_both_string_types() {
         let body = "\tif (PrefsFindBool(\"nogui\"))\n\t\treturn;\n\n\tVideoQuitFullScreen();\n";
-        let text = report_errors(&format!("char {body}wide {body}")).unwrap();
+        let text = report_errors(&format!("char {body}wide {body}"), &["%s", "%ls"]).unwrap();
         assert!(text.contains(r#"printf("ERROR: %s\n", text);"#), "{text}");
         assert!(text.contains(r#"printf("ERROR: %ls\n", text);"#), "{text}");
     }
@@ -485,7 +580,45 @@ mod tests {
         let error = allocate_upwards("something else").unwrap_err();
         assert!(error.to_string().contains("vm_alloc.cpp"), "{error}");
         assert!(config_header("something else").is_err());
-        assert!(report_errors("something else").is_err());
+        assert!(report_errors("something else", &["%s"]).is_err());
+    }
+
+    #[test]
+    fn a_session_disk_goes_by_its_name() {
+        let session = Path::new("session");
+        assert_eq!(
+            disk_path(&session.join("1-app.dsk"), session, "E").unwrap(),
+            Path::new("1-app.dsk")
+        );
+    }
+
+    /// Longer ones would be cut short and open the wrong file, or none. This
+    /// counts bytes, so 90 characters of Japanese are just over the limit.
+    #[test]
+    fn a_path_must_fit_the_emulator_s_buffers_in_bytes() {
+        let session = Path::new("session");
+        let fits = PathBuf::from(format!("{}.dsk", "x".repeat(MAX_PATH - 5)));
+        assert_eq!(disk_path(&fits, session, "E").unwrap(), fits);
+        for name in [
+            format!("{}.dsk", "x".repeat(MAX_PATH - 4)),
+            format!("{}.dsk", "日".repeat(MAX_PATH / 3)),
+        ] {
+            let error = disk_path(Path::new(&name), session, "E")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("too long for E"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_disk_whose_size_would_be_misread_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.dsk");
+        File::create(&path).unwrap().set_len(MAX_DISK).unwrap();
+        let error = check_disk_size(&path, "E").unwrap_err().to_string();
+        assert!(error.contains("under 4G"), "{error}");
+        File::create(&path).unwrap().set_len(MAX_DISK - 1).unwrap();
+        check_disk_size(&path, "E").unwrap();
     }
 
     #[test]

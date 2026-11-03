@@ -13,9 +13,11 @@ pub mod registry;
 
 use anyhow::Result;
 use backend::Backends;
-use backend::basilisk2::{self, Basilisk2};
+use backend::basilisk2::Basilisk2;
+use backend::macemu;
 use backend::macemu_windows;
 use backend::minivmac::{MiniVmac, SourcePin};
+use backend::sheepshaver::SheepShaver;
 use machine::Config;
 use paths::Paths;
 
@@ -31,8 +33,16 @@ pub fn default_backends(paths: &Paths) -> Result<Backends> {
         Box::new(
             Basilisk2::new(
                 paths.clone(),
-                basilisk2::pin(),
+                macemu::pin(),
                 config.basilisk2.source_archive,
+            )
+            .with_sdl(macemu_windows::sdl_pin(), config.sdl.source_archive.clone()),
+        ),
+        Box::new(
+            SheepShaver::new(
+                paths.clone(),
+                macemu::pin(),
+                config.sheepshaver.source_archive,
             )
             .with_sdl(macemu_windows::sdl_pin(), config.sdl.source_archive),
         ),

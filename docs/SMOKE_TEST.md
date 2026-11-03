@@ -141,3 +141,71 @@ On macOS, these replace the matching steps:
 | `macman doctor` before installing anything | Names the missing tools and libraries, including MPFR, as warnings until a machine needs them. |
 | Kill `macman` with `kill -9` while the emulator runs | The emulator carries on. `macman run q7` warns about the earlier run, then refuses, saying the disk is held by a Basilisk II that outlived macman. |
 | Quit that emulator, then `macman run q7` | Boots. |
+| On Linux or macOS: `macman create qn --backend basilisk2 --rom quadra --disk-size 1G --memory 128M`, then `macman run qn --cdrom MacOS8_1.iso` | Starts from the CD, and offers to initialize the disk. Install, with "Update Apple Hard Disk Drivers" off under Options, then Shut Down. |
+| On Linux: `macman run qn` | Starts Mac OS 8.1 from its own disk. The ISO's hash is unchanged. |
+| On Linux: make two data discs with `genisoimage -o a.iso DIR` and `genisoimage -J -o b.iso DIR`, then `macman run qn --cdrom a.iso --cdrom b.iso` | Starts from its own disk, and both discs mount with their files, not as audio CDs. |
+| On Windows: `macman create ... --disk-size 1G`, or `macman run q7 --cdrom MacOS8_1.iso` | Refused, saying it isn't available on this host. |
+
+## SheepShaver
+
+Run this on Linux x86-64, Windows x86-64, or macOS ARM64, the candidate hosts. It has been
+run in part, with Mac OS 8.1 and 9.0.4 on Linux and 9.0.4 on Windows and macOS, and
+[PLATFORMS.md](PLATFORMS.md#sheepshaver) lists what passed and what's left. On Windows, set
+up the directories as at the top of this file, skip the `vm.mmap_min_addr` steps, use the
+Windows steps under [Basilisk II](#basilisk-ii) for killing processes, and expect a shared
+folder, `--disk-size`, and `--cdrom` to be refused. Update it with what you find, and
+expect to adjust the backend. It needs a PowerPC ROM and a system image of your own, and it
+uses separate directories, so it doesn't touch your machines.
+
+```sh
+root="$(mktemp -d)/smoke Zoë"
+export XDG_CONFIG_HOME="$root/config" XDG_DATA_HOME="$root/data" XDG_CACHE_HOME="$root/cache"
+
+macman doctor
+macman rom add "Mac OS ROM" --name ppc
+macman system add macos9.img --name mac-os-9 --version 9.0.4
+macman create p9 --backend sheepshaver --rom ppc --system mac-os-9 --memory 128M
+macman create p9b --backend sheepshaver --rom ppc --system mac-os-9 --memory 256M
+```
+
+| Step | Expected |
+|---|---|
+| `macman doctor` | Names any missing tools, and reports `vm.mmap_min_addr`. |
+| `macman run p9` with `vm.mmap_min_addr` above 0 | Downloads and builds, then fails, naming the `sysctl` that fixes it. If it boots instead, the requirement is wrong: remove it. |
+| `sudo sysctl vm.mmap_min_addr=0`, then `macman run p9` | Boots to the Finder. Note what the ROM and guest were. A New World ROM has crashed with Mac OS 8.1, so pair it with 8.5 or later. |
+| The same run, with speakers or headphones on | The startup chime plays on the host's real sound device. |
+| While it runs, in a second terminal: `macman run p9` | Refused, because the disk is in use. |
+| While it runs: `macman doctor` | The machine is still reported as runnable. |
+| In the guest, save a file, then choose Shut Down | Exit code 0, the `sessions` directory is empty, and the file is there on the next run. |
+| The desktop | Shows the boot disk and Trash, and no `Unix` volume. |
+| Monitors control panel | Offers depths up to the desktop's. |
+| `pkill -KILL SheepShaver` | `macman run` warns that it was killed, and fails; `macman doctor` reports the abnormal run. |
+| `macman run p9b --verbose` | Says it's using the cached emulator, warns once about the earlier run, and boots with 256M. |
+| `macman list --builds` | One SheepShaver build. |
+| Change a byte of the cached `SheepShaver`, then `macman doctor` | Reports the build as damaged. The next run rebuilds it. |
+| `macman run p9 --disk "extra disk.dsk" --readonly` | Mounts the extra disk locked, and its hash stays the same. |
+| `macman run p9 --disk MacOS9.iso --readonly` | The CD mounts in the guest. |
+| Kill `macman` with `kill -9` while the emulator runs | The emulator stops at once. The next `macman run` warns about the earlier run. |
+| `macman create ps --backend sheepshaver ... --shared-folder "a folder" --network slirp`, then run it | A `Unix` volume holds that folder's files and no others, and the guest gets an address by DHCP. |
+| `macman create px --backend sheepshaver --rom <a Quadra ROM> ...` | Refused, naming the ROMs it needs. |
+| Run a ROM macman accepts but the emulator refuses | `macman run` fails, though the emulator exits 0. |
+| A later guest, if you have one: Mac OS 8.x and 9.0.4 | Boots to the Finder. List every combination tried in PLATFORMS.md, and say which weren't. |
+| `macman import` an archive of `p9` into empty directories, then `macman run p9` | No compiling until the run, and then it boots. |
+| `macman create pn --backend sheepshaver --rom ppc --disk-size 1G --memory 256M`, then `macman run pn` | A sparse 1G disk. The Mac stops at a question mark, and macman says to use `--cdrom`. |
+| `macman run pn --cdrom MacOS9.iso` | Starts from the CD, which shows as a CD, and offers to initialize the disk. Install onto it, turning off "Update Apple Hard Disk Drivers" under Options, then Shut Down. |
+| `macman run pn` | Starts from its own disk. The ISO's hash is unchanged. |
+| `macman run pn --cdrom MacOS9.iso` again | Starts from the CD, even though the disk has a system. |
+| `macman run pn --cdrom a.iso --cdrom b.iso`, with the data discs above | Starts from its own disk, and both discs mount with their files, not as audio CDs. |
+| `macman run pn --cdrom a.iso --cdrom MacOS9.iso` | Starts from the 9.0.4 CD, though it was named second. |
+| `sudo sysctl vm.mmap_min_addr=65536`, or your distribution's value | Puts the host back as it was. |
+
+On macOS, skip the `vm.mmap_min_addr` steps, and these replace the matching steps:
+
+| Step | Expected |
+|---|---|
+| `macman doctor` before installing anything | Names the missing tools and SDL, as warnings until a machine needs them, and says nothing of `vm.mmap_min_addr`. |
+| `macman run p9` | Downloads, builds, and boots to the Finder. |
+| Kill `macman` with `kill -9` while the emulator runs | The emulator carries on. `macman run p9` warns about the earlier run, then refuses, saying the disk is held by a SheepShaver that outlived macman. |
+| Quit that emulator, then `macman run p9` | Boots. |
+| While `pn` runs with `--cdrom MacOS9.iso`: `macman run p9 --cdrom MacOS9.iso` | Refused, because the CD image is in use. |
+| On data discs: make them with `hdiutil makehybrid -iso -joliet -o a.iso DIR` | As on Linux. |

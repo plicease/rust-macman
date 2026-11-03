@@ -45,29 +45,36 @@
 //!   warning that stays in its buffer, and show no disk, so macman tries the
 //!   lock first, to refuse with a reason.
 
-use super::minivmac::{MANIFEST, Manifest};
-use super::minivmac::{gcc_target, is_mingw_x64, macos_toolchain_identity};
+use super::macemu::{
+    self, Build, MACOS, disk_argument, display_check, library_checks, megabytes,
+    run_configure_build, supervise, tool_checks,
+};
 use super::source::{self, Source, SourcePin, tool_exists};
-use super::{Check, EmulatorBackend, Executable, LaunchRequest, macemu_windows};
+use super::{CdImage, Check, EmulatorBackend, Executable, LaunchRequest, macemu_windows};
 use crate::disk::{self, Classification, DiskFormat};
-use crate::fsutil::{atomic_copy, sha256_bytes, sha256_file, without_verbatim_prefix, write_toml};
+use crate::fsutil::sha256_bytes;
 use crate::machine::{Basilisk2Settings, Cpu, Display, Machine, Network};
 use crate::paths::Paths;
 use crate::registry::{self, Rom};
 use anyhow::{Context, Result, bail};
 use std::ffi::OsString;
-use std::fs::{self, File, TryLockError};
-use std::io::{BufRead, BufReader};
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::thread;
+use std::process::{Command, ExitStatus};
 
 pub const BACKEND_NAME: &str = "basilisk2";
 pub const DEFAULT_MEMORY: &str = "32M";
 pub const DEFAULT_DISPLAY: (u32, u32, u32) = (640, 480, 8);
 const LABEL: &str = "Basilisk II";
 const WINDOWS: bool = cfg!(all(windows, target_arch = "x86_64"));
-const MACOS: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+/// Where `run --cdrom` and `create --disk-size` have been tried. On Windows the
+/// emulator finds CDs its own way, which hasn't been.
+const INSTALLS_FROM_CD: bool = cfg!(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64"),
+));
+/// The reference number of the CD driver (`CDROMRefNum`).
+const CDROM_DRIVER: i32 = -62;
 const EXECUTABLE: &str = if WINDOWS {
     macemu_windows::EXECUTABLE
 } else {
@@ -79,13 +86,6 @@ const BUILD_DIRECTORY: &str = if WINDOWS {
     "BasiliskII/src/Unix"
 };
 const PREFERENCES: &str = "prefs";
-/// The session's copy of the ROM, on Windows.
-const ROM_COPY: &str = "rom";
-/// Windows reads a disk's size as 32 bits (`Sys_open`).
-const WINDOWS_MAX_DISK: u64 = 1 << 32;
-const WINDOWS_MAX_PATH: usize = 260;
-/// How `ErrorAlert` reports without a GUI (`STR_SHELL_ERROR_PREFIX`).
-const ERROR_PREFIX: &str = "ERROR: ";
 /// `modelid` is the Gestalt ID less 6. Mac OS 8 needs a 68040 model, and the
 /// Quadra 900 is upstream's; older systems expect the IIci that's its default.
 const MODEL_ID_IICI: u32 = 5;
@@ -101,34 +101,16 @@ const HOST: Option<&str> = if WINDOWS {
 };
 const UNSUPPORTED_HOST: &str = "the Basilisk II backend supports only Linux x86-64, Windows \
                                 x86-64, and macOS ARM64 hosts; see docs/PLATFORMS.md";
-/// SDL for video and sound, and no GTK, whose dialogs would wait for a click
-/// in place of the `ERROR:` lines macman reads.
-const CONFIGURE_OPTIONS: &[&str] = &[
-    "--enable-sdl-video",
-    "--enable-sdl-audio",
-    "--with-gtk=no",
-    "--with-esd=no",
-];
 const MACOS_CONFIGURE_OPTIONS: &[&str] = &[
     "--enable-sdl-video",
     "--enable-sdl-audio",
     "--with-gtk=no",
     "--with-esd=no",
+    "--with-bincue",
     "--disable-jit-compiler",
 ];
 /// What an ARM64 macOS build links with, by `pkg-config` name, and for people.
 const MACOS_LIBRARIES: &[(&str, &str)] = &[("sdl2", "SDL"), ("gmp", "GMP"), ("mpfr", "MPFR")];
-
-/// A commit, as macemu's releases are rare. The archive is one GitHub generates
-/// from it, and the fork is the one that's maintained.
-pub fn pin() -> SourcePin {
-    const COMMIT: &str = "f532be3d3d70b70f272b52050ce0889a4025d624";
-    SourcePin {
-        revision: COMMIT[..12].into(),
-        url: format!("https://github.com/kanjitalk755/macemu/archive/{COMMIT}.tar.gz"),
-        sha256: "dc987af49d9664c3c0453ae6480b8c027d064b8881d39dd7b701e35d1399687e".into(),
-    }
-}
 
 pub struct Basilisk2 {
     paths: Paths,
@@ -194,73 +176,26 @@ impl Basilisk2 {
 
     fn build(&self, key: &str, toolchain: &str, verbose: bool) -> Result<()> {
         let archive = self.source().fetch()?;
-        let work = self
-            .paths
-            .build_work()
-            .join(format!("{key}-{}", std::process::id()));
-        // Whatever a prior crash left behind is unusable.
-        let _ = fs::remove_dir_all(&work);
-        let src = work.join("src");
-        fs::create_dir_all(&src)
-            .with_context(|| format!("cannot create build directory {}", src.display()))?;
-        fs::create_dir_all(self.paths.build_logs())?;
-        let log_path = self.paths.build_logs().join(format!("{key}.log"));
-
-        eprintln!("Building {LABEL} {}...", self.pin.revision);
-        let result = if WINDOWS {
-            self.sdl_source().fetch().and_then(|sdl| {
-                let log = File::create(&log_path).context("cannot create build log")?;
-                macemu_windows::build(&archive, &sdl, &src, &log)
-            })
-        } else {
-            run_build(&archive, &src, &log_path)
+        let build = Build {
+            paths: &self.paths,
+            backend: BACKEND_NAME,
+            label: LABEL,
+            revision: &self.pin.revision,
+            host: HOST.context(UNSUPPORTED_HOST)?,
+            toolchain,
+            options: build_options(),
+            directory: BUILD_DIRECTORY,
+            executable: EXECUTABLE,
         };
-        if verbose && let Ok(log) = fs::read_to_string(&log_path) {
-            eprint!("{log}");
-        }
-        let built = src.join(BUILD_DIRECTORY).join(EXECUTABLE);
-        let result = result.and_then(|()| {
-            if built.is_file() {
-                Ok(())
+        build.run(key, verbose, |src, log_path| {
+            if WINDOWS {
+                let sdl = self.sdl_source().fetch()?;
+                let log = File::create(log_path).context("cannot create build log")?;
+                macemu_windows::build(&archive, &sdl, src, &log)
             } else {
-                bail!("the build produced no executable")
+                run_build(&archive, src, log_path)
             }
-        });
-        if let Err(error) = result {
-            let _ = fs::remove_dir_all(&work);
-            return Err(error.context(format!(
-                "{LABEL} build failed; see {} (rerun with --verbose to print it), and run \
-                 `macman doctor`",
-                log_path.display()
-            )));
-        }
-
-        // Publish by renaming a complete directory into place.
-        let publish = work.join("publish");
-        fs::create_dir_all(&publish)?;
-        fs::rename(&built, publish.join(EXECUTABLE))?;
-        fs::copy(&log_path, publish.join("build.log"))?;
-        write_toml(
-            &publish.join(MANIFEST),
-            &Manifest {
-                backend: BACKEND_NAME.into(),
-                revision: self.pin.revision.clone(),
-                host: HOST.context(UNSUPPORTED_HOST)?.into(),
-                toolchain: toolchain.into(),
-                options: build_options().iter().map(|s| s.to_string()).collect(),
-                executable: EXECUTABLE.into(),
-                executable_sha256: sha256_file(&publish.join(EXECUTABLE))?,
-                bundle: None,
-                bundle_sha256: None,
-            },
-        )?;
-        let dest = self.paths.builds().join(key);
-        fs::create_dir_all(self.paths.builds())?;
-        // A damaged earlier build would block the rename.
-        let _ = fs::remove_dir_all(&dest);
-        fs::rename(&publish, &dest).context("cannot publish build")?;
-        let _ = fs::remove_dir_all(&work);
-        Ok(())
+        })
     }
 }
 
@@ -270,111 +205,34 @@ fn build_options() -> &'static [&'static str] {
     } else if MACOS {
         MACOS_CONFIGURE_OPTIONS
     } else {
-        CONFIGURE_OPTIONS
+        macemu::CONFIGURE_OPTIONS
     }
 }
 
-/// What the compiler needs to be told to find the libraries, on macOS.
-fn macos_library_flags(option: &str) -> String {
-    let packages = MACOS_LIBRARIES.iter().map(|(package, _)| *package);
-    let args: Vec<&str> = std::iter::once(option).chain(packages).collect();
-    first_line("pkg-config", &args).unwrap_or_default()
-}
-
-/// Unpack and compile, per upstream's README, with `configure` separate from
-/// `autogen.sh` so that it gets macman's options.
 fn run_build(archive: &Path, src: &Path, log_path: &Path) -> Result<()> {
-    let log = File::create(log_path).context("cannot create build log")?;
-    let jobs = thread::available_parallelism().map_or(1, |jobs| jobs.get());
-    let script = format!(
-        "set -e\n\
-         tar xzf \"$1\" --strip-components=1\n\
-         cd {BUILD_DIRECTORY}\n\
-         NO_CONFIGURE=1 sh ./autogen.sh\n\
-         sh ./configure {}\n\
-         make -j{jobs}\n",
-        build_options().join(" ")
-    );
-    let mut command = Command::new("bash");
-    if MACOS {
-        // `gcc` may be a real GCC from a package manager, not Apple's clang.
-        command
-            .env("CC", "clang")
-            .env("CXX", "clang++")
-            .env("CPPFLAGS", macos_library_flags("--cflags-only-I"))
-            .env("LDFLAGS", macos_library_flags("--libs-only-L"));
-    }
-    let status = command
-        .arg("-c")
-        .arg(script)
-        .arg("macman-build")
-        .arg(archive)
-        .current_dir(src)
-        .stdin(Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log)
-        .status()
-        .context("cannot run bash")?;
-    if !status.success() {
-        bail!("build script exited with {status}");
-    }
-    Ok(())
+    let command = if MACOS {
+        macemu::macos_build_command(MACOS_LIBRARIES)
+    } else {
+        Command::new("bash")
+    };
+    run_configure_build(
+        command,
+        archive,
+        src,
+        log_path,
+        BUILD_DIRECTORY,
+        build_options(),
+    )
 }
 
-/// The first line of a command's output, if it runs and succeeds.
-fn first_line(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .ok()
-        .filter(|output| output.status.success())?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    Some(text.lines().next().unwrap_or("").trim().to_string())
-}
-
-/// `g++` compiles most of it, and `gcc` the rest. SDL is linked dynamically,
-/// but a new version may change what `configure` finds.
 fn toolchain_identity(sdl_pin: &SourcePin) -> Result<String> {
     if MACOS {
-        return Ok(format!(
-            "{} {} {}",
-            macos_toolchain_identity()?,
-            macos_library_versions(),
-            macos_library_flags("--libs-only-L"),
-        ));
+        return macemu::macos_toolchain_identity(MACOS_LIBRARIES);
     }
-    let hint = "install a C++ compiler (run `macman doctor`)";
-    let compiler = first_line("g++", &["--version"]).context(hint)?;
     if WINDOWS {
-        let target = gcc_target()?;
-        if !is_mingw_x64(&target) {
-            bail!("gcc targets {target}, not 64-bit Windows; run `macman doctor`");
-        }
-        let recipe = macemu_windows::RECIPE;
-        return Ok(format!(
-            "{target} {compiler} SDL {} {recipe}",
-            sdl_pin.sha256
-        ));
+        return macemu_windows::toolchain_identity(sdl_pin, macemu_windows::RECIPE);
     }
-    let sdl = first_line("pkg-config", &["--modversion", "sdl2"]);
-    Ok(format!("{compiler} SDL {}", sdl.as_deref().unwrap_or("?")))
-}
-
-/// A build links these dynamically, so it's only good for the ones it saw.
-fn macos_library_versions() -> String {
-    MACOS_LIBRARIES
-        .iter()
-        .map(|(package, name)| {
-            let version = first_line("pkg-config", &["--modversion", package]);
-            format!("{name} {}", version.as_deref().unwrap_or("?"))
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn megabytes(memory: &str) -> Option<u32> {
-    memory.strip_suffix('M')?.parse().ok()
+    macemu::linux_toolchain_identity()
 }
 
 /// `main_unix.cpp` caps RAM at 1023M, and rounds down to whole megabytes.
@@ -426,8 +284,20 @@ fn cpu_level(cpu: Cpu) -> u32 {
 /// Upstream's default is `/`, a read-write volume of the whole host, and
 /// `ExtFSInit` gives up on a path it can't `stat`. A shared folder replaces it
 /// from the command line.
-fn preferences(machine: &Machine) -> String {
+///
+/// A run with a CD image turns `nocdrom` off, which installs the CD driver,
+/// and sets `bootdriver` to it, so the Mac starts from the CD through PRAM, if
+/// one can start it (see [`macemu::starts_from_cd`]). The emulator then adds
+/// the host's drive too, which can't be prevented: `/dev/cdrom` on Linux, and
+/// on macOS whatever CD media the host has.
+fn preferences(machine: &Machine, cdroms: &[CdImage]) -> String {
     let settings = settings(machine);
+    let cdrom = !cdroms.is_empty();
+    let bootdriver = if macemu::starts_from_cd(cdroms) {
+        CDROM_DRIVER
+    } else {
+        0
+    };
     let display = &machine.display;
     let megabytes = megabytes(&machine.hardware.memory).unwrap_or(0);
     let model_id = match settings.cpu {
@@ -447,11 +317,11 @@ fn preferences(machine: &Machine) -> String {
          displaycolordepth {depth}\n\
          mag_rate {scale}\n\
          nosound {nosound}\n\
-         nocdrom true\n\
+         nocdrom {nocdrom}\n\
          jit false\n\
          idlewait true\n\
          bootdrive 0\n\
-         bootdriver 0\n\
+         bootdriver {bootdriver}\n\
          extfs \n\
          {host}",
         name = machine.name,
@@ -463,6 +333,7 @@ fn preferences(machine: &Machine) -> String {
         depth = display.depth,
         scale = display.scale,
         nosound = !settings.sound,
+        nocdrom = !cdrom,
         // Without these, Windows would offer the host's drives and media.
         host = if WINDOWS {
             "enableextfs false\npollmedia false\n"
@@ -476,9 +347,8 @@ fn preferences(machine: &Machine) -> String {
     text
 }
 
-/// The emulator's arguments. A `*` before a disk asks for read-only, on top of
-/// the throwaway copy already being a read-only file.
-fn arguments(request: &LaunchRequest<'_>, preferences: &Path) -> Vec<OsString> {
+/// The emulator's arguments.
+fn arguments(request: &LaunchRequest<'_>, preferences: &Path, cdroms: &[PathBuf]) -> Vec<OsString> {
     let mut arguments: Vec<OsString> = vec![
         "--config".into(),
         preferences.into(),
@@ -486,114 +356,15 @@ fn arguments(request: &LaunchRequest<'_>, preferences: &Path) -> Vec<OsString> {
         request.rom.into(),
     ];
     for disk in request.disks {
-        let mut value = OsString::from(if disk.writable { "" } else { "*" });
-        value.push(&disk.path);
-        arguments.extend(["--disk".into(), value]);
+        arguments.extend(["--disk".into(), disk_argument(disk)]);
+    }
+    for cdrom in cdroms {
+        arguments.extend(["--cdrom".into(), cdrom.into()]);
     }
     if let Some(folder) = settings(request.machine).shared_folder {
         arguments.extend(["--extfs".into(), folder.into()]);
     }
     arguments
-}
-
-/// What Basilisk II can open on Windows, or why it can't. A session's own disk
-/// goes by its name there, which keeps it short.
-fn windows_disk_path(disk: &Path, workdir: &Path) -> Result<PathBuf> {
-    let path = match disk.strip_prefix(workdir) {
-        Ok(name) => name.to_path_buf(),
-        Err(_) => without_verbatim_prefix(disk),
-    };
-    // Bytes, in UTF-8, not characters: that's what its buffers hold.
-    if path.to_string_lossy().len() >= WINDOWS_MAX_PATH {
-        bail!(
-            "{} is too long for Basilisk II, which handles paths under {WINDOWS_MAX_PATH} bytes; \
-             move it to a shorter path",
-            disk.display()
-        );
-    }
-    Ok(path)
-}
-
-/// The arguments on Windows: see the module comment for why they're different.
-fn windows_arguments(request: &LaunchRequest<'_>) -> Result<Vec<OsString>> {
-    atomic_copy(request.rom, &request.workdir.join(ROM_COPY))?;
-    let mut arguments: Vec<OsString> = vec![
-        "--config".into(),
-        PREFERENCES.into(),
-        "--rom".into(),
-        ROM_COPY.into(),
-    ];
-    for disk in request.disks {
-        let mut value = OsString::from(if disk.writable { "" } else { "*" });
-        value.push(windows_disk_path(&disk.path, request.workdir)?);
-        arguments.extend(["--disk".into(), value]);
-    }
-    Ok(arguments)
-}
-
-/// Refuse a disk that an emulator holds, which macman's own locks can't show
-/// once the macman that started it has gone. A file system without locks can't
-/// be held, and the emulator goes on without them there too.
-fn refuse_held_disk(disk: &Path) -> Result<()> {
-    let file = File::open(disk).with_context(|| format!("cannot open {}", disk.display()))?;
-    if let Err(TryLockError::WouldBlock) = file.try_lock() {
-        bail!(
-            "{} is held by a Basilisk II that outlived macman; quit that emulator first",
-            disk.display()
-        );
-    }
-    Ok(())
-}
-
-/// Have the kernel stop the emulator if macman dies, because the locks on its
-/// disks are about to go too. It has to be `SIGKILL`: SDL turns `SIGTERM` into
-/// the window closing, which only asks the guest whether to shut down.
-#[cfg(target_os = "linux")]
-fn die_with_macman(command: &mut Command) {
-    die_with_parent(command, std::process::id());
-}
-
-/// The signal is only armed once `prctl` runs, and a parent that dies sooner
-/// never sends it. So the child compares its parent with `parent`, as noted
-/// before spawning, and goes no further if macman has already gone.
-#[cfg(target_os = "linux")]
-fn die_with_parent(command: &mut Command, parent: u32) {
-    use std::os::unix::process::CommandExt;
-    // SAFETY: `prctl` and `getppid` are async-signal-safe, and nothing else
-    // runs in the child.
-    unsafe {
-        command.pre_exec(move || {
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::getppid() as u32 != parent {
-                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
-            }
-            Ok(())
-        });
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn die_with_macman(_command: &mut Command) {}
-
-/// Read the emulator's output until it closes, returning its error lines.
-fn watch_output(child: &mut Child, verbose: bool) -> Result<Vec<String>> {
-    let mut errors = Vec::new();
-    let mut output = BufReader::new(child.stdout.take().context("no emulator output")?);
-    let mut line = Vec::new();
-    while output.read_until(b'\n', &mut line)? != 0 {
-        let text = String::from_utf8_lossy(&line);
-        let text = text.trim_end();
-        if verbose {
-            println!("{text}");
-        }
-        if let Some(error) = text.strip_prefix(ERROR_PREFIX) {
-            errors.push(error.to_string());
-        }
-        line.clear();
-    }
-    Ok(errors)
 }
 
 impl EmulatorBackend for Basilisk2 {
@@ -632,10 +403,7 @@ impl EmulatorBackend for Basilisk2 {
             bail!("a 68040 always has an FPU; pick --cpu 68030 to leave it out");
         }
         if WINDOWS && settings.shared_folder.is_some() {
-            bail!(
-                "shared folders aren't available with Basilisk II on Windows, where it can only \
-                 show the guest whole drives"
-            );
+            macemu_windows::refuse_shared_folder(LABEL)?;
         }
         Ok(())
     }
@@ -665,11 +433,8 @@ impl EmulatorBackend for Basilisk2 {
     }
 
     fn check_disk(&self, path: &Path, writable: bool) -> Result<()> {
-        if WINDOWS && fs::metadata(path)?.len() >= WINDOWS_MAX_DISK {
-            bail!(
-                "{} is too big for Basilisk II on Windows, which handles disks under 4G",
-                path.display()
-            );
+        if WINDOWS {
+            macemu_windows::check_disk_size(path, LABEL)?;
         }
         if writable && disk::classify(path)? == Classification::Supported(DiskFormat::DiskCopy42) {
             bail!(
@@ -683,6 +448,10 @@ impl EmulatorBackend for Basilisk2 {
 
     fn needs_unmounted_boot_volume(&self) -> bool {
         true
+    }
+
+    fn installs_from_cd(&self) -> bool {
+        INSTALLS_FROM_CD
     }
 
     fn mounts_partitioned_disks(&self) -> bool {
@@ -706,44 +475,24 @@ impl EmulatorBackend for Basilisk2 {
             bail!("the shared folder {} is missing", folder.display());
         }
         if MACOS {
-            for disk in request.disks {
-                refuse_held_disk(&disk.path)?;
+            let disks = request.disks.iter().map(|disk| &disk.path);
+            for path in disks.chain(request.cdroms.iter().map(|cdrom| &cdrom.path)) {
+                macemu::refuse_held_disk(path, LABEL)?;
             }
         }
         let file = request.workdir.join(PREFERENCES);
-        fs::write(&file, preferences(request.machine))
+        fs::write(&file, preferences(request.machine, request.cdroms))
             .with_context(|| format!("cannot write {}", file.display()))?;
 
         let arguments = if WINDOWS {
-            windows_arguments(request)?
+            macemu_windows::arguments(request, PREFERENCES, LABEL)?
         } else {
-            arguments(request, &file)
+            let cdroms = macemu::cd_paths(request.workdir, request.cdroms)?;
+            arguments(request, &file, &cdroms)
         };
         let mut command = Command::new(&request.executable.path);
-        command
-            .args(arguments)
-            .current_dir(request.workdir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped());
-        die_with_macman(&mut command);
-        if request.verbose {
-            eprintln!("Launching {command:?}");
-        }
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("cannot start {}", request.executable.path.display()))?;
-        let errors = watch_output(&mut child, request.verbose);
-        let status = child.wait().context("cannot wait for the emulator")?;
-        match errors?.as_slice() {
-            [] => Ok(status),
-            errors if status.success() => {
-                bail!("Basilisk II refused to run: {}", errors.join("; "))
-            }
-            errors => {
-                eprintln!("Basilisk II reported: {}", errors.join("; "));
-                Ok(status)
-            }
-        }
+        command.args(arguments).current_dir(request.workdir);
+        supervise(command, LABEL, request.verbose)
     }
 
     fn doctor(&self) -> Vec<Check> {
@@ -785,41 +534,16 @@ impl EmulatorBackend for Basilisk2 {
             "aclocal",
             "pkg-config",
         ];
-        // Mini vMac's checks already cover Apple's tools.
-        const MACOS_TOOLS: &[&str] = &["autoconf", "aclocal", "pkg-config"];
         let (tools, libraries, install) = if MACOS {
-            (MACOS_TOOLS, MACOS_LIBRARIES, MACOS_INSTALL)
+            (macemu::MACOS_TOOLS, MACOS_LIBRARIES, MACOS_INSTALL)
         } else {
             (LINUX_TOOLS, &MACOS_LIBRARIES[..1], LINUX_INSTALL)
         };
-        for tool in tools {
-            if tool_exists(tool) {
-                checks.push(Check::ok(format!("{tool} found, for Basilisk II")));
-            } else {
-                checks.push(Check::fail(
-                    format!("{tool} not found, which Basilisk II needs"),
-                    install,
-                ));
-            }
-        }
-        for (package, name) in libraries {
-            match first_line("pkg-config", &["--modversion", package]) {
-                Some(version) => checks.push(Check::ok(format!("{name} {version} found"))),
-                None => checks.push(Check::fail(
-                    format!("{name} headers not found, which Basilisk II needs"),
-                    install,
-                )),
-            }
-        }
+        checks.extend(tool_checks(tools, LABEL, install));
+        checks.extend(library_checks(libraries, LABEL, install));
         checks.push(self.source().check());
-        if !MACOS
-            && std::env::var_os("DISPLAY").is_none()
-            && std::env::var_os("WAYLAND_DISPLAY").is_none()
-        {
-            checks.push(Check::warn(
-                "neither DISPLAY nor WAYLAND_DISPLAY is set",
-                "Basilisk II opens a window; run macman from a graphical session",
-            ));
+        if !MACOS {
+            checks.extend(display_check(LABEL));
         }
         checks
     }
@@ -829,10 +553,11 @@ impl EmulatorBackend for Basilisk2 {
 mod tests {
     use super::*;
     use crate::backend::ResolvedDisk;
+    use crate::disk::CdVolume;
     use crate::machine::{EmulatorConfig, Hardware};
 
     fn backend() -> Basilisk2 {
-        Basilisk2::new(Paths::under(Path::new("/nonexistent")), pin(), None)
+        Basilisk2::new(Paths::under(Path::new("/nonexistent")), macemu::pin(), None)
     }
 
     fn machine() -> Machine {
@@ -842,7 +567,7 @@ mod tests {
             id: None,
             emulator: EmulatorConfig {
                 backend: BACKEND_NAME.into(),
-                revision: pin().revision,
+                revision: macemu::pin().revision,
             },
             hardware: Hardware {
                 model: None,
@@ -858,6 +583,7 @@ mod tests {
             },
             system: Default::default(),
             basilisk2: Some(Basilisk2Settings::default()),
+            sheepshaver: None,
             disks: vec![],
         }
     }
@@ -868,7 +594,7 @@ mod tests {
 
     #[test]
     fn translates_a_machine_to_preferences() {
-        let text = preferences(&machine());
+        let text = preferences(&machine(), &[]);
         let mut expected = vec![
             "nogui true",
             "title quadra",
@@ -894,6 +620,27 @@ mod tests {
     }
 
     #[test]
+    fn a_cd_turns_on_its_driver_and_is_what_starts() {
+        let hfs = CdImage {
+            path: "/installer.iso".into(),
+            volume: CdVolume::Hfs,
+        };
+        let iso = CdImage {
+            path: "/data.iso".into(),
+            volume: CdVolume::Iso9660,
+        };
+        let text = preferences(&machine(), &[iso.clone(), hfs]);
+        for line in ["nocdrom false", "bootdriver -62"] {
+            assert!(text.lines().any(|l| l == line), "{line}: {text}");
+        }
+        // Starting from a disc with no HFS would fail, and leave it unmounted.
+        let text = preferences(&machine(), &[iso]);
+        for line in ["nocdrom false", "bootdriver 0"] {
+            assert!(text.lines().any(|l| l == line), "{line}: {text}");
+        }
+    }
+
+    #[test]
     fn options_reach_the_preferences() {
         let mut m = machine();
         m.display.fullscreen = true;
@@ -904,7 +651,7 @@ mod tests {
             network: Network::Slirp,
             shared_folder: None,
         });
-        let text = preferences(&m);
+        let text = preferences(&m, &[]);
         for line in [
             "cpu 3",
             "fpu false",
@@ -919,7 +666,7 @@ mod tests {
 
     #[test]
     fn the_guest_gets_no_host_files_unless_it_is_given_a_folder() {
-        let text = preferences(&machine());
+        let text = preferences(&machine(), &[]);
         assert!(
             text.lines().any(|line| line.trim_end() == "extfs"),
             "{text}"
@@ -929,7 +676,7 @@ mod tests {
     #[test]
     fn no_preference_line_can_hold_a_path_or_outgrow_the_parser() {
         // Names are checked elsewhere; the longest here is the title.
-        for line in preferences(&machine()).lines() {
+        for line in preferences(&machine(), &[]).lines() {
             assert!(line.len() < 256, "{line}");
             assert!(!line.contains('/') || line.starts_with("screen"), "{line}");
         }
@@ -959,11 +706,16 @@ mod tests {
             executable: &executable,
             rom: Path::new("/roms/q.rom"),
             disks: &disks,
+            cdroms: &[],
             workdir: Path::new("/session"),
             verbose: false,
         };
         assert_eq!(
-            arguments(&request, Path::new("/session/prefs")),
+            arguments(
+                &request,
+                Path::new("/session/prefs"),
+                &[PathBuf::from("/session/cd-1.cue")]
+            ),
             [
                 "--config",
                 "/session/prefs",
@@ -973,6 +725,8 @@ mod tests {
                 "/boot disk.dsk",
                 "--disk",
                 "*/session/1-app.dsk",
+                "--cdrom",
+                "/session/cd-1.cue",
                 "--extfs",
                 "/shared folder",
             ]
@@ -1021,39 +775,6 @@ mod tests {
         assert_ne!(backend().build_key("gcc 1"), backend().build_key("gcc 2"));
     }
 
-    /// The signal goes out when the spawning thread ends, which is what macman
-    /// dying looks like from here, without killing the tests.
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn the_emulator_does_not_outlive_macman() {
-        use std::os::unix::process::ExitStatusExt;
-        let mut child = thread::spawn(|| {
-            let mut command = Command::new("sleep");
-            command.arg("60");
-            die_with_macman(&mut command);
-            command.spawn().unwrap()
-        })
-        .join()
-        .unwrap();
-        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
-    }
-
-    /// The race itself can't be staged, but its outcome can: the child sees a
-    /// parent other than the one noted, as it would if macman had just died.
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn an_emulator_whose_parent_has_already_gone_never_starts() {
-        let dir = tempfile::tempdir().unwrap();
-        let ran = dir.path().join("ran");
-        let mut command = Command::new("touch");
-        command.arg(&ran);
-        die_with_parent(&mut command, std::process::id() + 1);
-
-        let error = command.spawn().unwrap_err();
-        assert_eq!(error.raw_os_error(), Some(libc::ESRCH));
-        assert!(!ran.exists(), "it stopped before exec");
-    }
-
     #[test]
     fn a_disk_copy_image_is_only_attached_read_only() {
         let dir = tempfile::tempdir().unwrap();
@@ -1072,33 +793,6 @@ mod tests {
     }
 
     #[test]
-    fn a_windows_session_disk_goes_by_its_ascii_name() {
-        let session = Path::new("session");
-        assert_eq!(
-            windows_disk_path(&session.join("1-app.dsk"), session).unwrap(),
-            Path::new("1-app.dsk")
-        );
-    }
-
-    /// Longer ones would be cut short and open the wrong file, or none. This
-    /// counts bytes, so 90 characters of Japanese are just over the limit.
-    #[test]
-    fn a_windows_path_must_fit_the_emulator_s_buffers_in_bytes() {
-        let session = Path::new("session");
-        let fits = PathBuf::from(format!("{}.dsk", "x".repeat(WINDOWS_MAX_PATH - 5)));
-        assert_eq!(windows_disk_path(&fits, session).unwrap(), fits);
-        for name in [
-            format!("{}.dsk", "x".repeat(WINDOWS_MAX_PATH - 4)),
-            format!("{}.dsk", "日".repeat(WINDOWS_MAX_PATH / 3)),
-        ] {
-            let error = windows_disk_path(Path::new(&name), session)
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("too long"), "{error}");
-        }
-    }
-
-    #[test]
     #[cfg(windows)]
     fn a_shared_folder_is_refused_where_only_whole_drives_can_be_shared() {
         let mut m = machine();
@@ -1108,28 +802,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
-    fn windows_refuses_a_disk_whose_size_it_would_misread() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("big.dsk");
-        File::create(&path)
-            .unwrap()
-            .set_len(WINDOWS_MAX_DISK)
-            .unwrap();
-        let error = backend().check_disk(&path, true).unwrap_err().to_string();
-        assert!(error.contains("under 4G"), "{error}");
-    }
-
-    #[test]
     fn only_macos_configures_the_jit_out() {
         assert_eq!(build_options().contains(&"--disable-jit-compiler"), MACOS);
-    }
-
-    #[test]
-    fn the_pin_names_a_whole_commit() {
-        let pin = pin();
-        assert_eq!(pin.revision.len(), 12);
-        assert!(pin.url.contains(&pin.revision));
-        assert_eq!(pin.sha256.len(), 64);
     }
 }

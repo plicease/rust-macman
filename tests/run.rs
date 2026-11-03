@@ -237,6 +237,14 @@ fn launches_rom_and_private_boot_disk() {
 }
 
 #[test]
+fn a_machine_runs_after_its_system_image_is_removed() {
+    let (h, mock) = Harness::mock();
+    h.cmd(&["system", "remove", "sys", "--yes"]).unwrap();
+    h.cmd(&["run", "plus-a"]).unwrap();
+    assert_eq!(mock.0.borrow().launches.len(), 1);
+}
+
+#[test]
 fn run_defaults_to_current_machine() {
     let (h, mock) = Harness::mock();
     assert!(h.cmd(&["run"]).is_err());

@@ -10,10 +10,11 @@ mod common;
 
 use anyhow::Result;
 use clap::Parser;
-use common::{PLUS_ROM_CHECKSUM, write_disk, write_rom};
+use common::{PLUS_ROM_CHECKSUM, write_disk, write_partitioned_disk, write_rom};
 use macman::app::App;
 use macman::archive;
-use macman::backend::basilisk2::{BACKEND_NAME, Basilisk2, pin};
+use macman::backend::basilisk2::{BACKEND_NAME, Basilisk2};
+use macman::backend::macemu::pin;
 use macman::backend::source::SourcePin;
 use macman::backend::{Backends, Check, CheckLevel, EmulatorBackend, Executable, LaunchRequest};
 use macman::cli::Cli;
@@ -575,4 +576,35 @@ fn doctor_fails_for_a_missing_dependency_only_if_a_machine_needs_it() {
 
     h.create("a");
     assert_eq!(level(BACKEND_NAME), CheckLevel::Fail);
+}
+
+#[test]
+fn a_blank_machine_installs_from_a_cd_it_does_not_keep() {
+    let h = harness!();
+    h.cmd(&["create", "new", "--rom", "quadra", "--disk-size", "2M"])
+        .unwrap();
+    let disk = h.paths.machine("new").join("system.dsk");
+    assert_eq!(fs::metadata(&disk).unwrap().len(), 2 << 20);
+
+    let (cd, _) = write_partitioned_disk(h.root.path(), "installer disc.iso");
+    let before = fs::read(&cd).unwrap();
+    let cd_path = cd.to_str().unwrap();
+    assert_eq!(h.cmd(&["run", "new", "--cdrom", cd_path]).unwrap(), 0);
+    let log = h.log();
+    let resolved = fs::canonicalize(&cd).unwrap();
+    assert!(
+        log.contains(&format!("--cdrom {}", resolved.display())),
+        "{log}"
+    );
+    assert!(log.contains("nocdrom false"), "{log}");
+    assert!(log.contains("bootdriver -62"), "{log}");
+    assert_eq!(fs::read(&cd).unwrap(), before);
+    assert!(fs::read(&disk).unwrap().windows(7).any(|w| w == b"written"));
+
+    fs::remove_file(&h.log).unwrap();
+    assert_eq!(h.cmd(&["run", "new"]).unwrap(), 0);
+    let log = h.log();
+    assert!(!log.contains("--cdrom"), "{log}");
+    assert!(log.contains("nocdrom true"), "{log}");
+    assert!(log.contains("bootdriver 0"), "{log}");
 }

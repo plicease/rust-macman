@@ -3,7 +3,8 @@
 A [perlbrew](https://perlbrew.pl/)-inspired manager for named classic Macintosh
 emulation environments. It creates machines from your own ROMs and bootable disk
 images, builds the right [Mini vMac](https://www.gryphel.com/c/minivmac/) for each
-one, or [Basilisk II](#basilisk-ii) for later 68k systems, and launches them with
+one, [Basilisk II](#basilisk-ii) for later 68k systems, or a preview of
+[SheepShaver](#sheepshaver) for PowerPC Mac OS, and launches them with
 disk-image safety checks.
 
 macman does not emulate anything itself, and it does not include or download Apple
@@ -65,7 +66,7 @@ macman run mac-plus --disk ./build/tico68.dsk --readonly
 With `--readonly`, the emulator gets a read-only throwaway copy, so your file can't
 change. Without it, the emulator writes to the file itself.
 
-Other commands: `list [--builds]`, `current`, `rom list`, `system list`,
+Other commands: `list [--builds]`, `current`, `rom list`, `system list`, `system remove`,
 `config show`, `clone`, `export`, `import`, `remove`, and `doctor`. Add `--verbose` for build and launch
 logs.
 
@@ -211,6 +212,122 @@ On Windows, there are a few differences:
 On macOS, if macman is killed, the emulator keeps running and holds a lock on its disks.
 `macman run` refuses them, saying why, until you quit that emulator.
 
+## SheepShaver
+
+macman can also run [SheepShaver](https://github.com/kanjitalk755/macemu), for classic
+PowerPC Mac OS, generally Mac OS 7.5.2 through 9.0.4, depending on the ROM and the guest.
+It imitates no particular Power Mac, and macman makes no claim for Mac OS 9.1 or later,
+Mac OS X, or G4 and G5 machines.
+
+**This backend is a preview.** On Linux x86-64 it has booted Mac OS 8.1 on an Old World ROM,
+and installed and booted Mac OS 9.0.4 on a New World ROM, and `slirp` networking, a shared
+folder, read-only disks, and sound on a real device work. On Windows x86-64 it has booted
+Mac OS 9.0.4, with `slirp`, full screen, and sound working, and on macOS ARM64 it has
+installed and booted Mac OS 9.0.4, with `slirp`, full screen, sound, a shared folder, and
+read-only disks working. Treat it as a preview until
+[the smoke test](docs/SMOKE_TEST.md#sheepshaver) has passed; see
+[docs/PLATFORMS.md](docs/PLATFORMS.md#sheepshaver).
+
+It's offered on Linux x86-64, Windows x86-64, and macOS ARM64. On Linux it compiles with
+the same packages as Basilisk II:
+
+```sh
+apt install build-essential autoconf automake pkg-config libsdl2-dev
+```
+
+On Windows it needs what Basilisk II does there, and builds without a JIT, so it's slower.
+A shared folder and installing from a CD aren't available, disks must be under 4G, and if
+macman is killed the emulator keeps running, with Windows keeping others off its disks. For
+sound, choose "Built-in" as the output in the guest's Sound control panel; see
+[docs/PLATFORMS.md](docs/PLATFORMS.md#sheepshaver).
+
+On macOS it needs what Basilisk II does there, less MPFR:
+
+```sh
+port install autoconf automake pkgconfig libsdl2
+brew install autoconf automake pkg-config sdl2
+```
+
+It builds without a JIT there too, so it's slower. If macman is killed, the emulator keeps running and holds a lock on its disks,
+as Basilisk II does, and macman refuses those disks until it's quit.
+
+On Linux it builds to upstream's defaults, where Mac addresses are host addresses, so it needs to
+map memory at address 0, which most distributions forbid. `macman doctor` says when that
+applies. Allowing it weakens a protection against kernel bugs, for every program, until
+the next reboot:
+
+```sh
+sudo sysctl vm.mmap_min_addr=0
+```
+
+It needs a PowerPC ROM of your own: a 4M dump from a PCI Power Mac, or a `Mac OS ROM` file
+from a System Folder or an installer, which must be under 4M. No 68k ROM will start it.
+The ROM has to suit the guest: a New World ROM crashed the emulator with Mac OS 8.1, while
+an Old World one booted it.
+
+```sh
+macman rom add "Mac OS ROM" --name newworld
+macman system add Mac-OS-9.0.4.img --name mac-os-9.0.4 --version 9.0.4
+macman create beige --backend sheepshaver --rom newworld --system mac-os-9.0.4 \
+  --memory 256M --display 1024x768x32
+```
+
+| Option | Values | Default |
+|---|---|---|
+| `--no-sound` | | sound on |
+| `--network` | `none`, `slirp` | `none` |
+| `--shared-folder DIR` | a host folder the guest can read and write | none |
+| `--memory` | `16M` to `1024M`, in whole megabytes | `64M` |
+| `--display` | 640x480 to 7680x4320, at depth 32 | `640x480x32` |
+| `--scale` | 1 to 4 | 2 |
+
+There's no `--cpu` or `--model`. Depth has to be 32, because SheepShaver starts at the
+desktop's depth and has no setting for it; pick less in the guest's Monitors control
+panel. A window bigger than the desktop is cut down to it.
+
+`macman run --disk` attaches CD images and partitioned disks, as for Basilisk II. An HFS+
+volume needs its HFS wrapper, which disks formatted by Mac OS have. `--readonly`, locks,
+`doctor`, `list --builds`, and `export` work as they do there, Disk Copy images need
+`--readonly`, the shared folder stays out of exports, and NVRAM lasts one run. On Linux,
+if macman is killed, it takes the emulator with it.
+
+## Installing from a CD
+
+On Linux and macOS, a SheepShaver or Basilisk II machine can start with a blank disk
+instead of a system image, and install from a CD image of your own:
+
+```sh
+macman create ss904 --backend sheepshaver --rom newworld --disk-size 1G --memory 256M
+macman run ss904 --cdrom Mac-OS-9.0.4.iso
+
+macman create q81 --backend basilisk2 --rom quadra --disk-size 1G --memory 128M
+macman run q81 --cdrom MacOS8_1.iso
+```
+
+Both emulators on Windows refuse both options for now, as their builds there find CDs in
+another way, which hasn't been tried. `macman run --disk` still attaches a CD image there,
+as a disk.
+
+`--disk-size` takes K, M, or G, from 1M to 2048G, and makes a sparse file of zeros. It
+isn't formatted: the guest offers to initialize it. It's the machine's own disk from then
+on, and clone, export, and locks treat it like any other.
+
+`--cdrom` attaches an image as a CD for that run only. It's never written to, and never
+copied. It takes a `.iso` or `.toast` image with an HFS volume, partitioned or not, and
+the Mac starts from it. Leave it off to start from the machine's disk. A plain ISO 9660
+image, with no HFS volume, attaches as a data disc, which the Mac reads with ISO 9660 File
+Access but can't start from, so with only such discs it starts from its own disk. It can
+be repeated: discs with HFS go first, and the first is the one the Mac starts from. An
+installer CD's own system may not read a plain ISO 9660 disc, and offers to initialize it,
+which it can't. While a CD image is attached, the guest also sees the host's
+`/dev/cdrom` on Linux, if there is one, and on macOS whatever CD media the host has.
+
+On macOS the emulator locks each CD image while it runs, so one image serves one machine at
+a time, and macman refuses a second run that names it.
+
+If the installer stops at "Updating Apple hard disk drivers", start it again with that
+option turned off under Options. The emulator's disk isn't an Apple drive.
+
 ## Moving machines between hosts
 
 `macman export` writes machines to an archive, with each one's current disks and the
@@ -255,8 +372,9 @@ source_archive = "/path/to/minivmac-36.04.src.tgz"
 
 Basilisk II is a [macemu commit](https://github.com/kanjitalk755/macemu/archive/f532be3d3d70b70f272b52050ce0889a4025d624.tar.gz),
 set the same way under `[basilisk2]`. On Windows, its SDL 2 package is set under `[sdl]`.
+SheepShaver comes from the same archive, and is set under `[sheepshaver]`.
 
 ## License
 
-macman is MIT licensed. Mini vMac and Basilisk II, which it fetches and compiles but
-does not include, are GPL-2.0.
+macman is MIT licensed. Mini vMac, Basilisk II, and SheepShaver, which it fetches and
+compiles but does not include, are GPL-2.0.

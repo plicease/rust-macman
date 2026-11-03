@@ -27,6 +27,9 @@ pub struct Machine {
     /// Settings only the Basilisk II backend has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub basilisk2: Option<Basilisk2Settings>,
+    /// Settings only the SheepShaver backend has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheepshaver: Option<SheepShaverSettings>,
     #[serde(default)]
     pub disks: Vec<Disk>,
 }
@@ -39,8 +42,8 @@ pub struct EmulatorConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hardware {
-    /// The exact Macintosh, for backends that emulate one. Basilisk II has none:
-    /// its CPU is under `[basilisk2]`, and it's not a particular machine.
+    /// The exact Macintosh, for backends that emulate one. Basilisk II and
+    /// SheepShaver have none: neither is a particular machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
     pub rom: String,
@@ -104,6 +107,29 @@ impl Default for Basilisk2Settings {
         Self {
             cpu: Cpu::default(),
             fpu: true,
+            sound: true,
+            network: Network::default(),
+            shared_folder: None,
+        }
+    }
+}
+
+/// `[sheepshaver]` in `machine.toml`. These are run-time preferences, so none
+/// of them affects the emulator build. There's no CPU or FPU to choose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SheepShaverSettings {
+    #[serde(default = "enabled")]
+    pub sound: bool,
+    #[serde(default)]
+    pub network: Network,
+    /// As for [`Basilisk2Settings::shared_folder`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_folder: Option<PathBuf>,
+}
+
+impl Default for SheepShaverSettings {
+    fn default() -> Self {
+        Self {
             sound: true,
             network: Network::default(),
             shared_folder: None,
@@ -233,6 +259,8 @@ pub struct Config {
     pub minivmac: SourceConfig,
     #[serde(default, skip_serializing_if = "SourceConfig::is_empty")]
     pub basilisk2: SourceConfig,
+    #[serde(default, skip_serializing_if = "SourceConfig::is_empty")]
+    pub sheepshaver: SourceConfig,
     /// The SDL package that Basilisk II builds with on Windows.
     #[serde(default, skip_serializing_if = "SourceConfig::is_empty")]
     pub sdl: SourceConfig,

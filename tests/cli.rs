@@ -210,6 +210,56 @@ fn clone_gets_independent_disks() {
 }
 
 #[test]
+fn other_backends_refuse_a_blank_disk_and_a_cd() {
+    let env = Env::new();
+    env.register();
+    env.create("plain");
+    let args = [
+        "create",
+        "new",
+        "--model",
+        "plus",
+        "--rom",
+        "plus-v3",
+        "--disk-size",
+        "1M",
+    ];
+    assert!(env.fails(&args).contains("--disk-size needs a backend"));
+    assert!(!env.path().join("data/macman/machines/new").exists());
+
+    let cd = write_disk(env.path(), "cd.iso");
+    let error = env.fails(&["run", "plain", "--cdrom", cd.to_str().unwrap()]);
+    assert!(
+        error.contains("--cdrom isn't available for minivmac"),
+        "{error}"
+    );
+}
+
+#[test]
+fn system_remove_needs_confirmation_and_keeps_machines() {
+    let env = Env::new();
+    env.register();
+    env.create("keeper");
+    let image = env.path().join("data/macman/systems/system-6.0.8.dsk");
+
+    let error = env.fails(&["system", "remove", "system-6.0.8"]);
+    assert!(error.contains("--yes"), "{error}");
+    assert!(image.exists());
+
+    let removed = env.ok(&["system", "remove", "system-6.0.8", "--yes"]);
+    assert!(removed.contains("Removed system image system-6.0.8"));
+    assert!(!image.exists());
+    assert!(!image.with_extension("toml").exists());
+    assert!(env.ok(&["system", "list"]).is_empty());
+    assert!(env.machine_disk("keeper").exists());
+
+    let error = env.fails(&["system", "remove", "system-6.0.8"]);
+    assert!(error.contains("no system image named"), "{error}");
+    let error = env.fails(&["system", "remove", "../escape", "--yes"]);
+    assert!(error.contains("invalid system name"), "{error}");
+}
+
+#[test]
 fn remove_needs_confirmation_and_keeps_templates() {
     let env = Env::new();
     env.register();

@@ -142,3 +142,6 @@ These export like any other, and build lazily on the destination. A machine's sh
 folder is a path on its host, so archives leave it out, and it doesn't count when
 import compares two copies. Importing onto a host that can't run Basilisk II works, and
 `macman doctor` and `macman run` then say why the machine can't start.
+
+SheepShaver machines work the same way, under the same rules, and may be imported onto
+hosts that can't run them.

@@ -3,7 +3,7 @@
 **Status:** Design proposal  
 **Initial implementation:** Rust CLI, Linux x86-64 host  
 **Initial backend:** Mini vMac  
-**Later backends:** Basilisk II, with SheepShaver in future  
+**Later backends:** Basilisk II, and SheepShaver as a preview  
 **Distribution:** GitHub source/releases; no crates.io publication required
 
 ## 1. Summary
@@ -28,7 +28,7 @@ Mini vMac is the first emulator backend. Its build-time configuration variants m
 - Emulating Macintosh hardware directly.
 - Redistributing Apple ROM images or System Software installers.
 - Fully automated installation of classic Mac OS from arbitrary installer media.
-- Basilisk II or SheepShaver integration (future backends only).
+- Basilisk II or SheepShaver integration (later backends).
 - GUI configuration, networking, SCSI device passthrough, advanced snapshots, or automated visual tests.
 - Guaranteeing OS/model compatibility beyond documented and tested combinations.
 - Modifying HFS volumes directly for the initial release.
@@ -71,6 +71,7 @@ macman run wombat-6 --disk ./build/tico68.dsk --readonly
 macman config show wombat-6
 macman clone wombat-6 wombat-test
 macman remove wombat-test
+macman system remove system-6.0.8
 macman export wombat-6 -o wombat-6.tar.gz
 macman export --all -o machines.tar.gz
 macman import wombat-6.tar.gz
@@ -222,6 +223,7 @@ On Windows it also differs from its Linux self. `src/backend/macemu_windows.rs` 
 - **Host files:** `extfs` is ignored, and `enableextfs` shows whole drives, so it's always off, and a shared folder is refused.
 - **Locks:** `CreateFile` opens disks with no sharing, so Windows protects them itself, and the emulator can outlive macman.
 - **Disks:** `GetFileSize` is read as 32 bits, so disks of 4G or more are refused.
+- **Installing:** `create --disk-size` and `run --cdrom` are refused here, until they're tried. On Linux and macOS they work as for SheepShaver, below.
 
 On macOS ARM64 it builds as on Linux, and differs in these ways:
 
@@ -229,7 +231,30 @@ On macOS ARM64 it builds as on Linux, and differs in these ways:
 - **FPU:** the core is MPFR's, as ARM64 has no 80-bit `long double`.
 - **Locks:** `Sys_open` takes `O_EXLOCK` on every disk file, and there's no `PR_SET_PDEATHSIG`, so the emulator can outlive macman. A second emulator's warning sits unflushed in its output and it shows no disk, so macman tries that lock before launching, and refuses with a reason.
 
-Shared code is limited to fetching a pinned source and publishing a build, in `src/backend/source.rs`. SheepShaver could use the same, but nothing here assumes so.
+### SheepShaver
+
+Read from the pinned macemu source, tested with a stand-in for the emulator, and partly checked on the real one on Linux x86-64; see [PLATFORMS.md](PLATFORMS.md#sheepshaver). The module comment in `src/backend/sheepshaver.rs` has the details. It works as Basilisk II does on Linux, and differs in these ways:
+
+- **Configuration:** a `[sheepshaver]` table holds `sound`, `network`, and `shared_folder`. There's no CPU, FPU, or model to choose.
+- **ROMs:** a 4M dump with a nanokernel it knows, or a compressed `Mac OS ROM` file under 4M.
+- **Limits:** 16M to 1024M of RAM, and at least 640x480. Depth must be 32, as it starts at the desktop's depth, and has no setting.
+- **Addressing:** on Linux, upstream's default, real addressing, which needs `vm.mmap_min_addr` to be 0. `doctor` and failed starts say so, and the requirement has been confirmed on a real run.
+- **JIT:** on, unlike Basilisk II, as the interpreter is too slow for its guests.
+- **Hosts:** Linux x86-64, Windows x86-64, and macOS ARM64.
+- **macOS:** built with `configure`, as Basilisk II is there, with SDL from `pkg-config` and no MPFR. `configure` gives the `arm-apple-darwin` host a fixed offset for Mac addresses, `0x400000000000`, so nothing is mapped at address 0. There's no JIT, as `configure` makes one only for ELF, so it's configured out and `jit` is off. The emulator locks its disks, so macman tries those locks before launching, as for Basilisk II.
+- **Installing:** on Linux and macOS, as on Windows the emulator finds CDs its own way, which hasn't been tried. On macOS the emulator takes `O_EXLOCK` on CD images as on disks, so macman locks them exclusively there, not shared, and tries the emulator's lock before launching. `create --disk-size` makes a sparse, unformatted boot disk in place of a system image's copy. `run --cdrom` passes images with `--cdrom`, not as disks, and turns `nocdrom` off and sets `bootdriver` to the CD driver's -62 for that run, so the Mac starts from the CD. The emulator opens them read-only, so they're locked shared and not copied. Turning `nocdrom` off also makes the emulator add `/dev/cdrom`. A blank or partitioned boot disk is fine for this backend, as the guest formats its own.
+- **ISO 9660 discs:** the emulator reads a CD image's table of contents with a drive `ioctl`, which fails on a file and leaves the guest seeing one audio track. HFS is found by reading blocks, so HFS discs are passed as they are. An image with only ISO 9660 is linked into the session beside a cue sheet of one `MODE1/2048` track, which the emulator reads with `--with-bincue`, so ISO 9660 File Access sees a data disc. Both emulators share this.
+
+On Windows, `src/backend/sheepshaver_windows.rs` builds it as Basilisk II is built there, with these differences:
+
+- **Build:** the tree has no `config.h`, so macman writes all of it. `MEM_BULK` keeps Mac memory in one reserved block, so there's no need for address 0. There's no JIT, as `configure.ac` turns it off on x86-64.
+- **Links:** much of the tree is symbolic links into Basilisk II's. macman unpacks the archive itself and copies what each link names, as Windows won't make links without privileges.
+- **Generated code:** `genexec.pl` lists the instruction handlers to instantiate. macman does the same in Rust, so Perl isn't needed, and refuses a decoder with templates, which the script would expand.
+- **Launch:** preferences, ROM, disks, and limits are as for Basilisk II on Windows, from shared code in `src/backend/macemu_windows.rs`.
+
+### Shared code
+
+Fetching a pinned source and publishing a build are in `src/backend/source.rs`, for every backend. What the two macemu emulators have in common is in `src/backend/macemu.rs`: the pin, the `configure` build, `doctor` lines, and launching and watching the process. Nothing about CPUs, ROMs, or guests is shared.
 
 ### Backend boundary
 
