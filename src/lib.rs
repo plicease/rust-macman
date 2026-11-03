@@ -15,6 +15,7 @@ pub mod model;
 pub mod paths;
 pub mod registry;
 pub mod report;
+pub mod settings;
 pub mod tui;
 pub mod usage;
 

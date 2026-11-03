@@ -160,13 +160,63 @@ something else changed while the editor was open.
 fails with an error, writing no escape sequences, and changes nothing; use `config show`
 to read the settings instead. It refuses `--json`.
 
+For scripts, and anywhere without a terminal, `macman config set` makes the same changes
+by name:
+
+```sh
+macman config set wombat-6 hardware.memory 4M
+macman config set wombat-6 display.width 640 display.height 480 display.depth 8
+macman config set ss904 sheepshaver.network slirp
+macman config set ephemeral true    # the current machine
+```
+
+Keys are named as in `machine.toml`. Give several `KEY VALUE` pairs to change settings
+that only work together, such as a display's width and height or a CPU and its FPU: they
+are applied together, and then the machine they make is checked once, whole, with the
+same checks `config edit` makes before it saves, so the two accept and refuse the same
+configurations. If anything is wrong, nothing is written, and the error says why, with the
+values that would work where there's a list of them. A machine name comes first, unless
+it's the current one: with an odd number of words, the first is the machine.
+
+| Key | Takes | Machines |
+| --- | --- | --- |
+| `ephemeral` | `true` or `false` | All |
+| `hardware.rom` | A registered ROM | All |
+| `hardware.memory` | A size, such as `4M` or `512K` | All |
+| `display.width`, `display.height` | Pixels | All |
+| `display.depth` | Bits per pixel | All |
+| `display.scale` | 1 to 4 | All |
+| `display.fullscreen` | `true` or `false` | All |
+| `basilisk2.cpu` | `68020`, `68030`, or `68040` | Basilisk II |
+| `basilisk2.fpu` | `true` or `false` | Basilisk II |
+| `basilisk2.sound`, `sheepshaver.sound` | `true` or `false` | That backend |
+| `basilisk2.network`, `sheepshaver.network` | `none` or `slirp` | That backend |
+| `basilisk2.shared_folder`, `sheepshaver.shared_folder` | A host folder, or `""` for none | That backend |
+
+`true` and `false` may also be given as `on`/`off` or `yes`/`no`. `macman config keys
+[MACHINE]` lists the keys a machine has, with each one's value and, as the machine is now,
+the values it can take. Other keys, such as `name`, `id`, `emulator.backend`,
+`hardware.model`, and `disks`, can't be set, for the reasons `config edit` shows them
+read-only, and say so; one that's another backend's, or that the machine's backend
+refuses, as Basilisk II on Windows refuses a shared folder, explains that too.
+
+`config set` prints each change and then `Saved machine NAME`, or `No change to machine
+NAME` if every value was already set, which isn't an error. Notes, such as that Mini vMac
+will build a new emulator, go to stderr. It exits 0 when the machine has the settings
+given, and 1 for anything refused, with the machine unchanged. Like `config edit`, it
+refuses a machine that's running, and its write is atomic. Two `config set`s of one
+machine at once each wait their turn, so neither loses the other's change, and a `config
+edit` open meanwhile refuses to save over one. With `--json` it prints the changes; see
+[docs/JSON.md](docs/JSON.md). In zsh, bash, and fish, completion offers the machine's keys,
+and the values each can take, as for `config keys`.
+
 ## Shell completion
 
 `macman completions SHELL` prints a completion script for `zsh`, `bash`, `fish`,
 `powershell`, or `elvish`. It covers subcommands, options, backend, model, CPU, and
 network names, and file and folder arguments. In zsh, bash, and fish, it also
 completes the names of your machines, ROMs, and system images, such as after
-`macman run`. The script asks the `macman` on your `PATH` for these when you press
+`macman run`, and `config set`'s keys and their values. The script asks the `macman` on your `PATH` for these when you press
 Tab, so they're always current. It changes nothing. Install the script yourself.
 
 For zsh, put the script in a folder on `fpath`, and add that folder to `fpath` before

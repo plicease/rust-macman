@@ -243,6 +243,37 @@ Each partition has `index` (a number, from 1), `type` (a string, from the partit
 keys. That's the format in [DESIGN.md](DESIGN.md), and it holds what the file does,
 including any shared folder's host path.
 
+## `macman config set [NAME] KEY VALUE...`
+
+```json
+{"machine": "wombat-6", "changes": [{"key": "hardware.memory", "before": "4M", "after": "1M"}, {"key": "display.scale", "before": 2, "after": 3}], "notes": ["Mini vMac builds memory and the display into the emulator, so ..."]}
+```
+
+| Field | Type | |
+|---|---|---|
+| `machine` | string | |
+| `changes` | array | Each key given whose value changed, in the order given; empty if none did |
+| `changes[].key` | string | As in `config keys` |
+| `changes[].before`, `changes[].after` | as the key's type | A boolean, integer, or string, or `null` for a shared folder that isn't set |
+| `notes` | array of strings | What the changes mean beyond `machine.toml`, worth knowing |
+
+A refusal is an error, as above, and changes nothing.
+
+## `macman config keys [NAME]`
+
+```json
+{"machine": "wombat-6", "keys": [{"key": "display.depth", "type": "integer", "value": 1, "choices": [1], "other_values": false}], "fixed": [{"key": "id", "reason": "..."}]}
+```
+
+| Field | Type | |
+|---|---|---|
+| `keys` | array | The keys `config set` takes for this machine, in the order `config edit` shows them |
+| `keys[].type` | string | `boolean`, `integer`, `string`, or `path` |
+| `keys[].value` | as the type | Its value now, `null` for a shared folder that isn't set |
+| `keys[].choices` | array or null | The values it can take with the rest of the machine as it is; `null` for a path |
+| `keys[].other_values` | boolean | Whether values beyond `choices` may be given, such as other memory sizes |
+| `fixed` | array | Keys in `machine.toml` that are never set this way, each with its `reason` |
+
 ## `macman current`
 
 ```json

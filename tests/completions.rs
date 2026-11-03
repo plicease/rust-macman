@@ -378,15 +378,17 @@ fn zsh_completes_names() {
     // zsh's completion system it calls, and ask for each kind of name.
     let check = r#"
         compdef() { }
-        compadd() { print -rl -- "${(@P)2}" }
+        compadd() { print -rl -- "${(@P)${@[-1]}}" }
         source "$1"
         _macman_names machines
         _macman_names roms
         _macman_names systems
         _macman_names media
+        # As _arguments really calls it, with compadd's options first.
+        _macman_names -J -default- systems
     "#;
     let output = in_shell(root.path(), "zsh", &["-f"], check, &[&file]);
-    assert_eq!(output, "alpha\nbeta\nplus-v3\nsys-608\ndisk-1\n");
+    assert_eq!(output, "alpha\nbeta\nplus-v3\nsys-608\ndisk-1\nsys-608\n");
 }
 
 #[test]
@@ -411,5 +413,129 @@ fn fish_completes_names() {
             output.contains("alpha") && output.contains("beta"),
             "{output}"
         );
+    }
+}
+
+#[test]
+fn config_set_completes_machines_then_keys_then_values() {
+    let root = registered();
+    let offered = |words: &[&str]| {
+        let mut args = vec!["__complete-names", "config-set"];
+        args.extend_from_slice(words);
+        let output = macman(root.path(), &args);
+        assert!(
+            output.status.success() && output.stderr.is_empty(),
+            "{output:?}"
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert_eq!(
+        offered(&[]),
+        "alpha\nbeta\n",
+        "no current machine: names only"
+    );
+    let keys = offered(&["alpha"]);
+    assert!(
+        keys.starts_with("ephemeral\nhardware.rom\nhardware.memory\n"),
+        "{keys}"
+    );
+    assert!(
+        !keys.contains("alpha") && !keys.contains("basilisk2."),
+        "{keys}"
+    );
+    assert_eq!(offered(&["alpha", "display.depth"]), "1\n");
+    assert_eq!(offered(&["alpha", "ephemeral"]), "true\nfalse\n");
+    assert!(!offered(&["alpha", "ephemeral", "true"]).contains("ephemeral"));
+    assert_eq!(offered(&["alpha", "no.such"]), "");
+    assert_eq!(offered(&["nobody", "ephemeral"]), "");
+
+    let output = macman(root.path(), &["use", "beta"]);
+    assert!(output.status.success());
+    let first = offered(&[]);
+    assert!(first.starts_with("alpha\nbeta\nephemeral\n"), "{first}");
+    assert_eq!(offered(&["display.depth"]), "1\n", "the current machine's");
+}
+
+#[test]
+fn every_shell_completes_config_set_by_position() {
+    let zsh = script("zsh");
+    assert!(zsh.contains(":_macman_names config-set'"), "zsh");
+    assert!(zsh.contains("before=(\"${(@)words[1,CURRENT-1]}\")"), "zsh");
+    let fish = script("fish");
+    assert!(
+        fish.contains(r#"complete -c macman -n "__fish_macman_using_subcommand config; and __fish_seen_subcommand_from set" -f -a "(macman __complete-names config-set (__fish_macman_config_set_words))""#),
+        "fish"
+    );
+    assert!(
+        fish.contains("function __fish_macman_config_set_words"),
+        "fish"
+    );
+
+    let root = registered();
+    if have("bash") {
+        let file = root.path().join("macman.bash");
+        std::fs::write(&file, script("bash")).unwrap();
+        let check = r#"
+            source "$1"
+            complete_line() {
+                read -ra COMP_WORDS <<< "$1"
+                [[ $1 == *" " ]] && COMP_WORDS+=("")
+                COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 ))
+                COMPREPLY=()
+                _macman_with_names macman "${COMP_WORDS[COMP_CWORD]}" "${COMP_WORDS[COMP_CWORD-1]}"
+                echo "$1-> ${COMPREPLY[*]}"
+            }
+            complete_line "macman config set "
+            complete_line "macman config set alpha display.d"
+            complete_line "macman config set alpha display.depth "
+            complete_line "macman -v config set alpha ephemeral "
+            complete_line "macman config set alpha ephemeral true display.f"
+            complete_line "macman config set alpha display.scale 2 hardware.memory 4"
+        "#;
+        let output = in_shell(root.path(), "bash", &[], check, &[&file]);
+        let expected = "\
+macman config set -> alpha beta
+macman config set alpha display.d-> display.depth
+macman config set alpha display.depth -> 1
+macman -v config set alpha ephemeral -> true false
+macman config set alpha ephemeral true display.f-> display.fullscreen
+macman config set alpha display.scale 2 hardware.memory 4-> 4M
+";
+        assert_eq!(output, expected);
+    }
+    if have("zsh") {
+        let file = root.path().join("_macman");
+        std::fs::write(&file, &zsh).unwrap();
+        // Within `config set`, zsh's $words are its own words, as a real
+        // completion has them.
+        let check = r#"
+            compdef() { }
+            compadd() { print -rl -- "${(@P)${@[-1]}}" }
+            source "$1"
+            words=(alpha display.depth ''); CURRENT=3; _macman_names -J -default- config-set
+            words=(alpha ephemeral ''); CURRENT=3; _macman_names config-set
+            words=(''); CURRENT=1; _macman_names config-set
+        "#;
+        let output = in_shell(root.path(), "zsh", &["-f"], check, &[&file]);
+        assert_eq!(output, "1\ntrue\nfalse\nalpha\nbeta\n");
+    }
+    if have("fish") {
+        let file = root.path().join("macman.fish");
+        std::fs::write(&file, &fish).unwrap();
+        let check = r#"source $argv[1]
+            complete -C "macman config set alpha display.depth "
+            echo --
+            complete -C "macman config set alpha "
+            echo --
+            complete -C "macman -v config set alpha ephemeral ""#;
+        let output = in_shell(root.path(), "fish", &[], check, &[&file]);
+        let parts: Vec<_> = output.split("--\n").collect();
+        assert_eq!(parts[0].trim(), "1", "{output}");
+        assert!(
+            parts[1].contains("hardware.memory") && !parts[1].contains("alpha"),
+            "{output}"
+        );
+        let values: Vec<_> = parts[2].lines().collect();
+        assert_eq!(values, ["true", "false"], "{output}");
     }
 }

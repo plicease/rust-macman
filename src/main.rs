@@ -27,18 +27,23 @@ fn wants_json() -> bool {
         .any(|arg| arg == "--json")
 }
 
-/// `macman __complete-names KIND`, for completion scripts: names on stdout,
+/// `macman __complete-names KIND [WORD]...`, for completion scripts: names on stdout,
 /// and never an error, because no names is the worst completion should do.
 fn complete_names() -> Option<ExitCode> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.first().is_none_or(|first| first != COMPLETE_NAMES) {
         return None;
     }
-    if let [_, kind] = args.as_slice()
+    // Anything after the kind is the words typed before the one completed.
+    if let [_, kind, words @ ..] = args.as_slice()
         && let Some(kind) = kind.to_str().and_then(NameKind::parse)
         && let Ok(paths) = Paths::from_env()
     {
-        print_names(&paths, kind);
+        let words: Vec<String> = words
+            .iter()
+            .map(|word| word.to_string_lossy().into_owned())
+            .collect();
+        print_names(&paths, kind, &words);
     }
     Some(ExitCode::SUCCESS)
 }
