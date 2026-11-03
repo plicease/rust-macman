@@ -181,7 +181,7 @@ impl Backends {
         self.backends.iter().map(|backend| backend.as_ref())
     }
 
-    fn names(&self) -> Vec<&str> {
+    pub fn names(&self) -> Vec<&str> {
         self.backends.iter().map(|backend| backend.name()).collect()
     }
 }

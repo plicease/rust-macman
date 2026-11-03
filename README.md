@@ -91,6 +91,51 @@ Short names are normally on for the system drive. If a build says otherwise, set
 Mini vMac refuses to quit from its window while disks are mounted, so shut down the
 Mac first, or use Control Mode: hold Ctrl and press Q, then Y.
 
+## Shell completion
+
+`macman completions SHELL` prints a completion script for `zsh`, `bash`, `fish`,
+`powershell`, or `elvish`. It covers subcommands, options, backend, model, CPU, and
+network names, and file and folder arguments. In zsh, bash, and fish, it also
+completes the names of your machines, ROMs, and system images, such as after
+`macman run`. The script asks the `macman` on your `PATH` for these when you press
+Tab, so they're always current. It changes nothing. Install the script yourself.
+
+For zsh, put the script in a folder on `fpath`, and add that folder to `fpath` before
+`compinit` runs:
+
+```sh
+mkdir -p ~/.zfunc
+macman completions zsh > ~/.zfunc/_macman
+```
+
+```sh
+# in ~/.zshrc, above any existing compinit
+fpath=(~/.zfunc $fpath)
+autoload -Uz compinit
+compinit
+```
+
+New shells pick it up. To use it in the shell you're in, run those three lines
+there. If completion still doesn't appear, delete zsh's cache with
+`rm -f ~/.zcompdump*` and start a new shell. Rerun `macman completions zsh` after
+upgrading macman.
+
+For bash, with the bash-completion package installed, which loads it in new shells:
+
+```sh
+mkdir -p ~/.local/share/bash-completion/completions
+macman completions bash > ~/.local/share/bash-completion/completions/macman
+```
+
+To try it in the current bash without installing anything, run
+`eval "$(macman completions bash)"`.
+
+For fish:
+
+```sh
+macman completions fish > ~/.config/fish/completions/macman.fish
+```
+
 ## Supported hardware
 
 | Model | `--model` | Memory | Display |
