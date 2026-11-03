@@ -237,6 +237,58 @@ pub fn classify(path: &Path) -> Result<Classification> {
     }
 }
 
+/// Refuse anything that `run --cdrom` can't present as a CD. It takes the whole
+/// image, partition map included, so this looks for a volume and extracts nothing.
+pub fn check_cd_image(path: &Path) -> Result<()> {
+    use Classification::{Blank, Partitioned, Supported, Unrecognized, Unsupported};
+
+    let classification = classify(path)?;
+    let has_hfs = match &classification {
+        Supported(format) => *format == DiskFormat::RawHfs,
+        Partitioned(partitions) => partitions
+            .iter()
+            .any(|partition| partition.volume == Some(DiskFormat::RawHfs)),
+        _ => false,
+    };
+    if has_hfs {
+        return Ok(());
+    }
+    if is_iso9660(path)? {
+        eprintln!(
+            "note: {} has no HFS volume, so a Mac can't start from it, and can only read it \
+             with Foreign File Access",
+            path.display()
+        );
+        return Ok(());
+    }
+    let what = match classification {
+        Supported(DiskFormat::DiskCopy42) => "a Disk Copy 4.2 image".to_string(),
+        Supported(_) => "an MFS volume".to_string(),
+        Partitioned(_) => "a partitioned image with no HFS volume".to_string(),
+        Blank => "blank".to_string(),
+        Unsupported(what) => what,
+        Unrecognized => "in a format macman doesn't know".to_string(),
+    };
+    bail!(
+        "{} is {what}, which can't be attached as a CD; --cdrom takes an HFS or ISO 9660 CD \
+         image, such as a .iso or .toast file",
+        path.display()
+    )
+}
+
+/// Whether the image holds an ISO 9660 volume descriptor. It's 32K in, past what
+/// [`classify`] reads, and all before it may be zeros, which looks blank there.
+fn is_iso9660(path: &Path) -> Result<bool> {
+    const DESCRIPTOR: u64 = 0x8001;
+    let mut file = File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    if file.metadata()?.len() < DESCRIPTOR + 5 {
+        return Ok(false);
+    }
+    let mut signature = [0u8; 5];
+    read_at(&mut file, DESCRIPTOR, &mut signature)?;
+    Ok(&signature == b"CD001")
+}
+
 const ACCEPTED: &str = "macman accepts raw MFS/HFS volumes and Disk Copy 4.2 images";
 
 fn partitioned_hint(path: &Path, partitions: &[Partition]) -> String {
@@ -739,6 +791,31 @@ mod tests {
         let mut bytes = vec![0u8; 800 * 1024];
         bytes[1024..1026].copy_from_slice(signature);
         bytes
+    }
+
+    #[test]
+    fn a_cd_needs_a_volume_a_mac_can_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        let hfs = write("hfs.toast", &raw_image(b"BD"));
+        let partitioned = write("disc.iso", &partitioned_image(&[(96, b"BD")]));
+        check_cd_image(&hfs).unwrap();
+        check_cd_image(&partitioned).unwrap();
+
+        let mut plain = vec![0u8; 64 * 1024];
+        plain[0x8001..0x8006].copy_from_slice(b"CD001");
+        check_cd_image(&write("plain.iso", &plain)).unwrap();
+
+        let mfs = write("mfs.dsk", &raw_image(&[0xD2, 0xD7]));
+        let error = check_cd_image(&mfs).unwrap_err().to_string();
+        assert!(error.contains("an MFS volume"), "{error}");
+        let no_hfs = write("no-hfs.iso", &partitioned_image(&[(96, b"XX")]));
+        let error = check_cd_image(&no_hfs).unwrap_err().to_string();
+        assert!(error.contains("no HFS volume"), "{error}");
     }
 
     /// An Iomega-style disk: map, driver, then one HFS partition.

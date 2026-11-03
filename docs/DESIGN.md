@@ -240,6 +240,7 @@ Read from the pinned macemu source, tested with a stand-in for the emulator, and
 - **Addressing:** upstream's default, real addressing, which needs `vm.mmap_min_addr` to be 0. `doctor` and failed starts say so, and the requirement has been confirmed on a real run.
 - **JIT:** on, unlike Basilisk II, as the interpreter is too slow for its guests.
 - **Hosts:** only Linux x86-64 is offered. Basilisk II's other hosts don't carry over.
+- **Installing:** `create --disk-size` makes a sparse, unformatted boot disk in place of a system image's copy. `run --cdrom` passes images with `--cdrom`, not as disks, and turns `nocdrom` off and sets `bootdriver` to the CD driver's -62 for that run, so the Mac starts from the CD. The emulator opens them read-only, so they're locked shared and not copied. Turning `nocdrom` off also makes the emulator add `/dev/cdrom`. A blank or partitioned boot disk is fine for this backend, as the guest formats its own.
 
 ### Shared code
 

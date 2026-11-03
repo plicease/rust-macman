@@ -183,4 +183,8 @@ macman create p9b --backend sheepshaver --rom ppc --system mac-os-9 --memory 256
 | Run a ROM macman accepts but the emulator refuses | `macman run` fails, though the emulator exits 0. |
 | A later guest, if you have one: Mac OS 8.x and 9.0.4 | Boots to the Finder. List every combination tried in PLATFORMS.md, and say which weren't. |
 | `macman import` an archive of `p9` into empty directories, then `macman run p9` | No compiling until the run, and then it boots. |
+| `macman create pn --backend sheepshaver --rom ppc --disk-size 1G --memory 256M`, then `macman run pn` | A sparse 1G disk. The Mac stops at a question mark, and macman says to use `--cdrom`. |
+| `macman run pn --cdrom MacOS9.iso` | Starts from the CD, which shows as a CD, and offers to initialize the disk. Install onto it, turning off "Update Apple Hard Disk Drivers" under Options, then Shut Down. |
+| `macman run pn` | Starts from its own disk. The ISO's hash is unchanged. |
+| `macman run pn --cdrom MacOS9.iso` again | Starts from the CD, even though the disk has a system. |
 | `sudo sysctl vm.mmap_min_addr=65536`, or your distribution's value | Puts the host back as it was. |

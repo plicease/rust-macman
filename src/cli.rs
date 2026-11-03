@@ -145,8 +145,16 @@ pub struct CreateArgs {
     #[arg(long)]
     pub rom: String,
     /// Name of a registered system image, cloned into the machine
-    #[arg(long)]
-    pub system: String,
+    #[arg(
+        long,
+        required_unless_present = "disk_size",
+        conflicts_with = "disk_size"
+    )]
+    pub system: Option<String>,
+    /// Start with a blank boot disk of this size, such as 1G, to install onto from
+    /// `macman run --cdrom` (SheepShaver only)
+    #[arg(long, value_name = "SIZE")]
+    pub disk_size: Option<String>,
     /// Memory size, such as 4M (default depends on the model)
     #[arg(long)]
     pub memory: Option<String>,
@@ -188,6 +196,10 @@ pub struct RunArgs {
     /// Attach --disk files whose format macman does not recognize
     #[arg(long, requires = "disks")]
     pub any_format: bool,
+    /// Attach a CD image, read-only, for this run only, and start from it (repeatable;
+    /// SheepShaver only)
+    #[arg(long = "cdrom", value_name = "FILE")]
+    pub cdroms: Vec<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]

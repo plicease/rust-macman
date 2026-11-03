@@ -755,6 +755,7 @@ mod tests {
             executable: &executable,
             rom: Path::new("/roms/q.rom"),
             disks: &disks,
+            cdroms: &[],
             workdir: Path::new("/session"),
             verbose: false,
         };

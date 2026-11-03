@@ -270,6 +270,30 @@ volume needs its HFS wrapper, which disks formatted by Mac OS have. `--readonly`
 `--readonly`, the shared folder stays out of exports, and NVRAM lasts one run. If macman
 is killed, it takes the emulator with it.
 
+### Installing from a CD
+
+A SheepShaver machine can start with a blank disk instead of a system image, and install
+from a CD image of your own:
+
+```sh
+macman create ss904 --backend sheepshaver --rom newworld --disk-size 1G --memory 256M
+macman run ss904 --cdrom Mac-OS-9.0.4.iso
+```
+
+`--disk-size` takes K, M, or G, from 1M to 2048G, and makes a sparse file of zeros. It
+isn't formatted: the guest offers to initialize it. It's the machine's own disk from then
+on, and clone, export, and locks treat it like any other.
+
+`--cdrom` attaches an image as a CD for that run only, and the Mac starts from it. It's
+never written to, and never copied. It can be repeated, though several discs at once
+haven't been tried. Leave it off
+to start from the machine's disk. It takes a `.iso` or `.toast` image with an HFS volume,
+partitioned or not. A plain ISO 9660 image attaches, but a Mac can't start from it. While
+a CD image is attached, the guest also sees the host's `/dev/cdrom`, if there is one.
+
+If the Mac OS 9 installer stops at "Updating Apple hard disk drivers", start it again with
+that option turned off under Options. The emulator's disk isn't an Apple drive.
+
 ## Moving machines between hosts
 
 `macman export` writes machines to an archive, with each one's current disks and the
