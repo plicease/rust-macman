@@ -732,11 +732,14 @@ fn export_all_takes_every_machine() {
 }
 
 #[test]
-fn export_all_needs_machines_and_excludes_names() {
+fn export_all_needs_something_and_excludes_names() {
     let empty = Host::new();
     let archive = empty.archive("all.tar.gz");
     let output = empty.fails(&["export", "--all", "-o", &archive]);
-    assert!(output.contains("no machines"), "{output}");
+    assert!(
+        output.contains("no machines, ROMs, or system images"),
+        "{output}"
+    );
     assert!(!Path::new(&archive).exists());
 
     let both = empty.run(&["export", "--all", "plus-a", "-o", &archive]);
@@ -1221,7 +1224,8 @@ fn refuses_hostile_manifests() {
             "name = \"../escape\"",
             "invalid ROM name",
         ),
-        ("format_version = 1", "format_version = 2", "upgrade macman"),
+        ("format_version = 1", "format_version = 3", "upgrade macman"),
+        ("format_version = 1", "format_version = 0", "upgrade macman"),
         ("sha256 = \"", "sha256 = \"../", "invalid digest"),
     ];
     for (from, to, expected) in cases {
@@ -1501,7 +1505,9 @@ fn a_dry_run_reports_json() {
     assert_eq!(report["dry_run"], true);
     assert_eq!(
         report["roms"],
-        serde_json::json!([{"name": "plus-v3", "outcome": "unchanged", "local": "plus-v3"}])
+        serde_json::json!([
+            {"name": "plus-v3", "outcome": "unchanged", "local": "plus-v3", "reason": null}
+        ])
     );
     let machines = report["machines"].as_array().unwrap();
     assert_eq!(machines[0]["name"], "plus-a");
@@ -1530,4 +1536,550 @@ fn a_dry_run_reports_json() {
     assert_eq!(output.status.code(), Some(1));
     assert!(stdout(&output).contains("--dry-run"), "{output:?}");
     assert_eq!(target.exact_snapshot(), before);
+}
+
+// System images, and everything with `--all`.
+
+impl Host {
+    /// Register a system image named `name`, whose contents differ by `byte`.
+    fn add_system_named(&self, name: &str, byte: u8) {
+        let disk = write_disk(self.path(), &format!("{name}.src"));
+        let mut bytes = fs::read(&disk).unwrap();
+        bytes[8192] = byte;
+        fs::write(&disk, bytes).unwrap();
+        self.ok(&["system", "add", disk.to_str().unwrap(), "--name", name]);
+    }
+
+    fn manifest(&self, archive: &str) -> String {
+        String::from_utf8(read_entries(archive)[0].1.clone()).unwrap()
+    }
+
+    fn system_bytes(&self, name: &str) -> Vec<u8> {
+        fs::read(self.data().join(format!("systems/{name}.dsk"))).unwrap()
+    }
+}
+
+#[test]
+fn a_machine_export_holds_no_system_image_and_stays_format_1() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["plus-a"], "plus.tar.gz");
+    let manifest = source.manifest(&archive);
+    assert!(manifest.starts_with("format_version = 1\n"), "{manifest}");
+    assert!(!manifest.contains("[[systems]]"), "{manifest}");
+    assert!(!manifest.contains("register"), "{manifest}");
+}
+
+#[test]
+fn export_all_takes_every_rom_and_system_image_used_or_not() {
+    let source = Host::with_two_machines();
+    source.add_ii_rom("unused-rom");
+    source.add_system_named("system-7", 7);
+    let archive = source.archive("all.tar.gz");
+    let output = source.ok(&["export", "--all", "-o", &archive]);
+    assert!(
+        output.contains("Exported 2 machine(s), 2 ROM(s), and 2 system image(s)"),
+        "{output}"
+    );
+    assert!(
+        source
+            .manifest(&archive)
+            .starts_with("format_version = 2\n")
+    );
+
+    let target = Host::new();
+    let output = target.ok(&["import", &archive]);
+    for line in [
+        "imported rom plus-v3",
+        "imported rom unused-rom",
+        "imported system sys",
+        "imported system system-7",
+        "imported machine plus-a",
+        "imported machine plus-b",
+        "4 imported, 0 unchanged, 0 unresolved",
+    ] {
+        assert!(output.contains(line), "{line}: {output}");
+    }
+    assert_eq!(target.ok(&["rom", "list"]), source.ok(&["rom", "list"]));
+    assert_eq!(
+        target.ok(&["system", "list"]),
+        source.ok(&["system", "list"])
+    );
+    for name in ["sys", "system-7"] {
+        assert_eq!(target.system_bytes(name), source.system_bytes(name));
+        let metadata = |host: &Host| {
+            fs::read_to_string(host.data().join(format!("systems/{name}.toml"))).unwrap()
+        };
+        assert_eq!(metadata(&target), metadata(&source));
+    }
+
+    // They're usable as if they had been registered here.
+    target.ok(&[
+        "create",
+        "fresh",
+        "--model",
+        "ii",
+        "--rom",
+        "unused-rom",
+        "--system",
+        "system-7",
+    ]);
+}
+
+#[test]
+fn export_all_works_without_machines_but_not_with_nothing() {
+    let source = Host::new();
+    source.add_plus_rom("plus-v3");
+    source.add_system();
+    let archive = source.archive("all.tar.gz");
+    let output = source.ok(&["export", "--all", "-o", &archive]);
+    assert!(
+        output.contains("Exported 0 machine(s), 1 ROM(s), and 1 system image(s)"),
+        "{output}"
+    );
+
+    let target = Host::new();
+    let output = target.ok(&["import", &archive]);
+    assert!(output.contains("imported rom plus-v3"), "{output}");
+    assert!(output.contains("imported system sys"), "{output}");
+    target.create("plus-new", "plus", "plus-v3");
+
+    // A ROM alone is enough to export.
+    let rom_only = Host::new();
+    rom_only.add_plus_rom("plus-v3");
+    let archive = rom_only.archive("rom.tar.gz");
+    rom_only.ok(&["export", "--all", "-o", &archive]);
+    let target = Host::new();
+    assert!(
+        target
+            .ok(&["import", &archive])
+            .contains("imported rom plus-v3")
+    );
+    assert!(target.ok(&["rom", "list"]).contains("plus-v3"));
+}
+
+#[test]
+fn selected_system_images_travel_with_or_without_machines() {
+    let source = Host::with_two_machines();
+    source.add_system_named("system-7", 7);
+    source.add_system_named("system-unasked", 8);
+    let archive = source.export(&["plus-a", "--system", "system-7"], "one.tar.gz");
+    let manifest = source.manifest(&archive);
+    assert!(manifest.contains("name = \"system-7\""), "{manifest}");
+    assert!(!manifest.contains("system-unasked"), "{manifest}");
+    assert!(!manifest.contains("name = \"sys\""), "{manifest}");
+    // The machine's ROM comes only with the machine, as before.
+    assert!(!manifest.contains("register"), "{manifest}");
+
+    let target = Host::new();
+    let output = target.ok(&["import", &archive]);
+    assert!(output.contains("imported system system-7"), "{output}");
+    assert!(output.contains("imported machine plus-a"), "{output}");
+    let systems = target.ok(&["system", "list"]);
+    assert!(systems.contains("system-7") && !systems.contains("system-unasked"));
+    target.ok(&[
+        "create", "fresh", "--model", "plus", "--rom", "plus-v3", "--system", "system-7",
+    ]);
+
+    let systems_only = source.export(&["--system", "sys", "--system", "system-7"], "s.tar.gz");
+    let manifest = source.manifest(&systems_only);
+    assert!(!manifest.contains("[[roms]]") && !manifest.contains("[[machines]]"));
+    let target = Host::new();
+    let output = target.ok(&["import", &systems_only]);
+    assert!(
+        output.contains("2 imported, 0 unchanged, 0 unresolved"),
+        "{output}"
+    );
+
+    let every = source.export(&["--all-systems"], "every.tar.gz");
+    let output = Host::new().ok(&["import", &every]);
+    assert!(
+        output.contains("imported system system-unasked"),
+        "{output}"
+    );
+
+    let output = source.fails(&["export", "--system", "missing", "-o", &source.archive("x")]);
+    assert!(
+        output.contains("no system image named \"missing\""),
+        "{output}"
+    );
+    let both = source.run(&[
+        "export",
+        "--all",
+        "--system",
+        "sys",
+        "-o",
+        &source.archive("y"),
+    ]);
+    assert_eq!(both.status.code(), Some(2), "{both:?}");
+}
+
+#[test]
+fn identical_bytes_are_archived_once_and_each_name_is_registered() {
+    let source = Host::with_two_machines();
+    // The same image under two names, and a fresh machine's disk is a copy of it.
+    let disk = write_disk(source.path(), "sys.dsk");
+    source.ok(&[
+        "system",
+        "add",
+        disk.to_str().unwrap(),
+        "--name",
+        "sys-copy",
+    ]);
+    let archive = source.export(&["plus-a", "--all-systems"], "dup.tar.gz");
+    let names: Vec<_> = read_entries(&archive).into_iter().map(|(n, _)| n).collect();
+    // The manifest, the ROM, and one blob for both images and the disk.
+    assert_eq!(names.len(), 3, "{names:?}");
+
+    let target = Host::new();
+    let output = target.ok(&["import", &archive]);
+    assert!(output.contains("imported system sys\n"), "{output}");
+    assert!(output.contains("imported system sys-copy"), "{output}");
+    assert_eq!(target.system_bytes("sys"), target.system_bytes("sys-copy"));
+}
+
+#[test]
+fn importing_system_images_again_changes_nothing() {
+    let source = Host::with_two_machines();
+    source.add_ii_rom("unused-rom");
+    let archive = source.archive("all.tar.gz");
+    source.ok(&["export", "--all", "-o", &archive]);
+    let target = Host::new();
+    target.ok(&["import", &archive]);
+    let before = target.snapshot();
+
+    let output = target.ok(&["import", &archive]);
+    assert!(output.contains("unchanged system sys"), "{output}");
+    assert!(output.contains("unchanged rom unused-rom"), "{output}");
+    assert!(
+        output.contains("0 imported, 3 unchanged, 0 unresolved"),
+        "{output}"
+    );
+    assert_eq!(target.snapshot(), before);
+}
+
+#[test]
+fn a_different_system_image_with_the_same_name_is_a_conflict() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["--system", "sys"], "sys.tar.gz");
+
+    let target = Host::new();
+    target.add_system_named("sys", 1);
+    let before = target.snapshot();
+    let output = target.fails(&["import", &archive]);
+    assert!(
+        output.contains("conflict system sys: a different system image is already named"),
+        "{output}"
+    );
+    assert!(
+        output.contains("0 imported, 0 unchanged, 1 unresolved"),
+        "{output}"
+    );
+    assert_eq!(target.snapshot(), before);
+
+    // A conflict affects only that image.
+    let archive = source.export(&["plus-a", "--system", "sys"], "both.tar.gz");
+    let output = target.fails(&["import", &archive]);
+    assert!(output.contains("imported machine plus-a"), "{output}");
+    assert!(output.contains("conflict system sys"), "{output}");
+}
+
+#[test]
+fn a_damaged_local_system_image_is_not_taken_for_the_same_one() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["--system", "sys"], "sys.tar.gz");
+    let target = Host::new();
+    target.ok(&["import", &archive]);
+    let file = target.data().join("systems/sys.dsk");
+    let mut bytes = fs::read(&file).unwrap();
+    bytes[9000] ^= 1;
+    fs::write(&file, bytes).unwrap();
+    let output = target.fails(&["import", &archive]);
+    assert!(output.contains("conflict system sys"), "{output}");
+}
+
+#[test]
+fn an_interrupted_system_registration_is_recovered_only_when_certain() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["--system", "sys"], "sys.tar.gz");
+    let image = source.system_bytes("sys");
+    let interrupted = |bytes: &[u8], metadata_only: bool| {
+        let host = Host::new();
+        let systems = host.data().join("systems");
+        fs::create_dir_all(&systems).unwrap();
+        if metadata_only {
+            fs::copy(
+                source.data().join("systems/sys.toml"),
+                systems.join("sys.toml"),
+            )
+            .unwrap();
+        } else {
+            fs::write(systems.join("sys.dsk"), bytes).unwrap();
+        }
+        host
+    };
+
+    let target = interrupted(&image, false);
+    assert_preview_matches(&target, &[&archive]);
+    let clean = Host::new();
+    clean.ok(&["import", &archive]);
+    let metadata = |host: &Host| fs::read(host.data().join("systems/sys.toml")).unwrap();
+    assert_eq!(metadata(&target), metadata(&clean));
+    assert!(
+        target
+            .ok(&["import", &archive])
+            .contains("unchanged system sys")
+    );
+
+    let mut other = image.clone();
+    other[9000] ^= 1;
+    for host in [interrupted(&other, false), interrupted(&image, true)] {
+        let before = host.snapshot();
+        let output = host.fails(&["import", &archive]);
+        assert!(output.contains("conflict system sys"), "{output}");
+        assert_eq!(host.snapshot(), before);
+    }
+}
+
+#[test]
+fn a_rom_registered_for_its_own_sake_follows_the_rom_rules() {
+    let source = Host::with_two_machines();
+    source.add_ii_rom("unused-rom");
+    let archive = source.archive("all.tar.gz");
+    source.ok(&["export", "--all", "-o", &archive]);
+
+    // Its name is a registration of its own, so an identical ROM under
+    // another name doesn't stand in for it.
+    let target = Host::new();
+    target.add_ii_rom("my-ii");
+    let output = target.ok(&["import", &archive]);
+    assert!(output.contains("imported rom unused-rom"), "{output}");
+    assert!(target.data().join("roms/unused-rom.rom").exists());
+    assert!(
+        target
+            .ok(&["import", &archive])
+            .contains("unchanged rom unused-rom")
+    );
+
+    let target = Host::new();
+    target.add_large_rom("unused-rom", IIX_ROM_CHECKSUM);
+    let output = target.fails(&["import", &archive]);
+    assert!(
+        output.contains("conflict rom unused-rom: a different ROM is already named"),
+        "{output}"
+    );
+    assert!(
+        output.contains("3 imported, 0 unchanged, 1 unresolved"),
+        "{output}"
+    );
+
+    // With --all, a ROM comes in even if its only machine doesn't.
+    let target = Host::new();
+    target.add_system();
+    target.add_ii_rom("other");
+    target.create("plus-a", "ii", "other");
+    let output = target.fails(&["import", &archive]);
+    assert!(output.contains("conflict machine plus-a"), "{output}");
+    assert!(output.contains("imported rom plus-v3"), "{output}");
+}
+
+#[test]
+fn export_refuses_a_system_image_in_use_or_damaged() {
+    let source = Host::with_two_machines();
+    let file = source.data().join("systems/sys.dsk");
+    let lock = lock_image(&Paths::under(source.path()), &file, LockMode::Exclusive).unwrap();
+    let archive = source.archive("out.tar.gz");
+    let output = source.fails(&["export", "--system", "sys", "-o", &archive]);
+    assert!(output.contains("in use"), "{output}");
+    assert!(!Path::new(&archive).exists());
+    drop(lock);
+
+    let mut bytes = fs::read(&file).unwrap();
+    bytes[9000] ^= 1;
+    fs::write(&file, bytes).unwrap();
+    let output = source.fails(&["export", "--system", "sys", "-o", &archive]);
+    assert!(
+        output.contains("changed since it was registered"),
+        "{output}"
+    );
+    assert!(!Path::new(&archive).exists());
+}
+
+#[test]
+fn refuses_damaged_or_hostile_system_images() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["plus-a", "--system", "sys"], "sys.tar.gz");
+
+    // Every blob here is the ROM or the one image the disk and system share.
+    let mut entries = entries_of(&archive);
+    let image = entries
+        .iter()
+        .position(|(_, b)| b.len() == 800 * 1024)
+        .unwrap();
+    entries[image].1[9000] ^= 1;
+    assert_refused(&entries, "digest");
+
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "name = \"sys\"",
+            "name = \"../escape\"",
+            "invalid system name",
+        ),
+        (
+            "name = \"sys\"",
+            "name = \"sys\"\nversion = \"7\\u001b[2J\"",
+            "unprintable",
+        ),
+        (
+            "name = \"sys\"",
+            "name = \"sys\"\nsource_sha256 = \"../x\"",
+            "invalid digest",
+        ),
+    ];
+    for (from, to, expected) in cases {
+        let edit = |text: String| {
+            assert!(text.contains(from), "{from}");
+            text.replacen(from, to, 1)
+        };
+        assert_refused(&with_manifest(&archive, edit), expected);
+    }
+
+    // A listed system image twice.
+    let edit = |text: String| {
+        let start = text.find("[[systems]]").unwrap();
+        let end = text[start..]
+            .find("\n\n")
+            .map_or(text.len(), |at| start + at + 1);
+        let block = text[start..end].to_string();
+        text.replacen(&block, &format!("{block}\n{block}"), 1)
+    };
+    assert_refused(&with_manifest(&archive, edit), "twice");
+
+    // Bytes that are honest but not a volume.
+    let junk = vec![0x5A; 4096];
+    let junk_sha = sha256_bytes(&junk);
+    let disk_sha = digest(source.data().join("systems/sys.dsk"));
+    let mut entries = with_manifest(&archive, |text| {
+        let start = text.find("[[systems]]").unwrap();
+        let (head, tail) = text.split_at(start);
+        let tail =
+            tail.replacen(&disk_sha, &junk_sha, 1)
+                .replacen("size = 819200", "size = 4096", 1);
+        format!("{head}{tail}")
+    });
+    entries.push(regular(&format!("blobs/{junk_sha}"), &junk));
+    assert_refused(&entries, "not a usable volume");
+}
+
+#[test]
+fn a_dry_run_foretells_system_images_and_reports_them_in_json() {
+    let source = Host::with_two_machines();
+    source.add_system_named("system-7", 7);
+    let archive = source.archive("all.tar.gz");
+    source.ok(&["export", "--all", "-o", &archive]);
+
+    let target = Host::new();
+    target.add_system_named("system-7", 9);
+    let preview = assert_preview_matches(&target, &[&archive]);
+    assert!(preview.contains("would import system sys"), "{preview}");
+    assert!(preview.contains("conflict system system-7"), "{preview}");
+
+    // The import just now brought in the rest, so only the conflict is left.
+    let output = target.run(&["--json", "import", "--dry-run", &archive]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["systems"],
+        serde_json::json!([
+            {"name": "sys", "outcome": "unchanged", "reason": null},
+            {"name": "system-7", "outcome": "conflict", "reason":
+                "a different system image is already named \"system-7\"; nothing was changed"},
+        ])
+    );
+    assert_eq!(report["unresolved"], 1);
+}
+
+#[test]
+fn export_all_keeps_every_name_of_a_rom_registered_twice() {
+    let source = Host::with_two_machines();
+    source.add_plus_rom("plus");
+    let archive = source.archive("all.tar.gz");
+    source.ok(&["export", "--all", "-o", &archive]);
+    // Two entries, one blob.
+    let rom = digest(source.data().join("roms/plus.rom"));
+    assert_eq!(rom, digest(source.data().join("roms/plus-v3.rom")));
+    let manifest = source.manifest(&archive);
+    assert_eq!(manifest.matches("[[roms]]").count(), 2, "{manifest}");
+    let blobs = read_entries(&archive)
+        .into_iter()
+        .filter(|(name, _)| *name == format!("blobs/{rom}"))
+        .count();
+    assert_eq!(blobs, 1);
+
+    let target = Host::new();
+    let output = target.ok(&["import", &archive]);
+    assert!(output.contains("imported rom plus\n"), "{output}");
+    assert!(output.contains("imported rom plus-v3"), "{output}");
+    let list = target.ok(&["rom", "list"]);
+    let digests: Vec<_> = ["plus", "plus-v3"]
+        .iter()
+        .map(|name| {
+            let line = list
+                .lines()
+                .find(|line| line.starts_with(&format!("{name} ")))
+                .unwrap_or_else(|| panic!("{name}: {list}"));
+            line.split_whitespace().nth(3).unwrap().to_string()
+        })
+        .collect();
+    assert_eq!(digests[0], digests[1], "{list}");
+    assert_eq!(target.ok(&["rom", "list"]), source.ok(&["rom", "list"]));
+    // The machines keep the name they used.
+    assert!(target.definition("plus-a").contains("rom = \"plus-v3\""));
+
+    let before = target.snapshot();
+    let output = target.ok(&["import", &archive]);
+    assert!(output.contains("unchanged rom plus\n"), "{output}");
+    assert_eq!(target.snapshot(), before);
+}
+
+#[test]
+fn a_machine_still_reuses_an_identical_rom_but_all_keeps_its_name() {
+    let source = Host::with_two_machines();
+    let archive = source.archive("all.tar.gz");
+    source.ok(&["export", "--all", "-o", &archive]);
+
+    let target = Host::new();
+    target.add_plus_rom("my-plus");
+    let preview = assert_preview_matches(&target, &[&archive]);
+    assert!(preview.contains("would import rom plus-v3"), "{preview}");
+    // The machines were decided first, and use the ROM that was already here.
+    assert!(target.definition("plus-a").contains("rom = \"my-plus\""));
+    assert!(target.data().join("roms/plus-v3.rom").exists());
+}
+
+#[test]
+fn a_machine_export_lists_identical_roms_once_as_format_1_did() {
+    let source = Host::with_two_machines();
+    source.add_plus_rom("plus");
+    let definition = source
+        .definition("plus-b")
+        .replace("rom = \"plus-v3\"", "rom = \"plus\"");
+    source.write_definition("plus-b", &definition);
+    let archive = source.export(&["plus-a", "plus-b"], "both.tar.gz");
+    let manifest = source.manifest(&archive);
+    assert!(manifest.starts_with("format_version = 1\n"), "{manifest}");
+    assert_eq!(manifest.matches("[[roms]]").count(), 1, "{manifest}");
+    Host::new().ok(&["import", &archive]);
+}
+
+#[test]
+fn only_roms_registered_for_their_own_sake_may_share_contents() {
+    let (_source, archive) = honest();
+    let edit = |text: String| {
+        let start = text.find("[[roms]]").unwrap();
+        let end = start + text[start..].find("\n\n").unwrap() + 1;
+        let block = text[start..end].to_string();
+        let copy = block.replace("name = \"plus-v3\"", "name = \"other\"");
+        text.replacen(&block, &format!("{block}\n{copy}"), 1)
+    };
+    assert_refused(&with_manifest(&archive, edit), "lists ROM \"other\" twice");
 }

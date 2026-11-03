@@ -184,12 +184,13 @@ With no current machine, it fails, as without `--json`.
 ```json
 {
   "dry_run": true,
-  "roms": [{"name": "plus-v3", "outcome": "unchanged", "local": "plus-v3"}],
+  "roms": [{"name": "plus-v3", "outcome": "unchanged", "local": "plus-v3", "reason": null}],
+  "systems": [{"name": "system-6.0.8", "outcome": "imported", "reason": null}],
   "machines": [
     {"name": "plus-a", "outcome": "conflict", "reason": "a different machine is already named \"plus-a\"; import it under another name with --rename"},
     {"name": "plus-b", "outcome": "imported", "reason": null}
   ],
-  "imported": 1,
+  "imported": 2,
   "unchanged": 0,
   "unresolved": 1
 }
@@ -203,12 +204,20 @@ explains them.
 |---|---|---|
 | `dry_run` | boolean | Always `true` for now |
 | `roms[].name` | string | The ROM's name in the archive |
-| `roms[].outcome` | string | `imported`, `recovered`, `unchanged`, or `reused` |
-| `roms[].local` | string or null | The registered ROM the machines would use; `null` when `imported` |
+| `roms[].outcome` | string | `imported`, `recovered`, `unchanged`, `reused`, `conflict`, or `failed` |
+| `roms[].local` | string or null | The registered ROM the machines would use; `null` when `imported`, `conflict`, or `failed` |
+| `roms[].reason` | string or null | Why, for `conflict` and `failed` |
+| `systems[].name` | string | The system image's name, here and in the archive |
+| `systems[].outcome` | string | `imported`, `recovered`, `unchanged`, `conflict`, or `failed` |
+| `systems[].reason` | string or null | Why, for `conflict` and `failed` |
 | `machines[].name` | string | The name it would have here, which `--rename` sets |
 | `machines[].outcome` | string | `imported`, `unchanged`, `conflict`, or `failed` |
 | `machines[].reason` | string or null | Why, for `conflict` and `failed` |
-| `imported`, `unchanged`, `unresolved` | numbers | Machines counted by outcome; `unresolved` is conflicts and failures |
+| `imported`, `unchanged`, `unresolved` | numbers | Machines and system images counted by outcome, with `recovered` images as `imported`; `unresolved` is conflicts and failures, and includes ROMs' |
 
-A ROM that only machines with a conflict or failure need may not appear in `roms`. The
+`conflict` and `failed` ROMs, `reason`, and `systems` are new with system images in
+archives. A ROM gets `conflict` or `failed` only when the archive asks for it to be
+registered on its own, as `export --all` does, so for an archive of machines alone,
+these fields and counts are as they were. A ROM that only machines with a conflict or
+failure need may not appear in `roms`. The
 exit status is 1 when `unresolved` isn't 0.

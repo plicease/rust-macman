@@ -153,18 +153,28 @@ pub enum Command {
         source: String,
         dest: String,
     },
-    /// Write machines, with their ROMs and disks, to an archive for another host
+    /// Write machines, ROMs, and system images to an archive for another host
     Export {
-        #[arg(required_unless_present = "all", value_name = "MACHINE", value_hint = MACHINE)]
+        #[arg(
+            required_unless_present_any = ["all", "systems", "all_systems"],
+            value_name = "MACHINE",
+            value_hint = MACHINE
+        )]
         names: Vec<String>,
-        /// Export every machine
-        #[arg(long, conflicts_with = "names")]
+        /// Export every machine, ROM, and system image, used or not
+        #[arg(long, conflicts_with_all = ["names", "systems", "all_systems"])]
         all: bool,
+        /// Also export this registered system image (repeatable)
+        #[arg(long = "system", value_name = "SYSTEM", value_hint = SYSTEM)]
+        systems: Vec<String>,
+        /// Also export every registered system image
+        #[arg(long, conflicts_with = "systems")]
+        all_systems: bool,
         /// Archive to create, such as machines.tar.gz
         #[arg(short, long, value_name = "FILE", value_hint = ValueHint::FilePath)]
         output: PathBuf,
     },
-    /// Bring in machines from an archive; existing data is never replaced
+    /// Bring in machines and system images from an archive; existing data is never replaced
     Import {
         #[arg(value_hint = ValueHint::FilePath)]
         file: PathBuf,

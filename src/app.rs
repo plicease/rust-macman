@@ -1,6 +1,6 @@
 //! Command implementations.
 
-use crate::archive::{self, Outcome, RomOutcome};
+use crate::archive::{self, Outcome, RomOutcome, SystemOutcome};
 use crate::backend::minivmac::{MANIFEST, Manifest};
 use crate::backend::{
     Backends, CdImage, Check, CheckLevel, EmulatorBackend, LaunchRequest, ResolvedDisk,
@@ -152,17 +152,47 @@ impl App {
             Command::Run(args) => return self.run(&args, verbose),
             Command::Config(ConfigCommand::Show { name }) => self.config_show(name, json)?,
             Command::Clone { source, dest } => self.clone_machine(&source, &dest)?,
-            Command::Export { names, all, output } => {
-                let names = if all {
-                    list_dir(&self.paths.machines())?
-                } else {
-                    names
+            Command::Export {
+                names,
+                all,
+                systems,
+                all_systems,
+                output,
+            } => {
+                let every_system = || -> Result<Vec<String>> {
+                    Ok(registry::list_systems(&self.paths)?
+                        .into_iter()
+                        .map(|system| system.name)
+                        .collect())
                 };
-                if names.is_empty() {
-                    bail!("there are no machines to export");
+                let selection = archive::Selection {
+                    machines: if all {
+                        list_dir(&self.paths.machines())?
+                    } else {
+                        names
+                    },
+                    systems: if all || all_systems {
+                        every_system()?
+                    } else {
+                        systems
+                    },
+                    all_roms: all,
+                };
+                let empty = selection.machines.is_empty() && selection.systems.is_empty();
+                if all && empty && registry::list_roms(&self.paths)?.is_empty() {
+                    bail!("there are no machines, ROMs, or system images to export");
                 }
-                let count = archive::export(&self.paths, &names, &output)?;
-                println!("Exported {count} machine(s) to {}", output.display());
+                if !all && empty {
+                    bail!("there are no machines or system images to export");
+                }
+                let exported = archive::export(&self.paths, &selection, &output)?;
+                println!(
+                    "Exported {} machine(s), {} ROM(s), and {} system image(s) to {}",
+                    exported.machines,
+                    exported.roms,
+                    exported.systems,
+                    output.display()
+                );
             }
             Command::Import {
                 file,
@@ -195,6 +225,20 @@ impl App {
                     println!("would reuse rom {name} as {local}");
                 }
                 RomOutcome::Reused { local } => println!("reused rom {name} as {local}"),
+                RomOutcome::Conflict(reason) => println!("conflict rom {name}: {reason}"),
+                RomOutcome::Failed(reason) => println!("failed rom {name}: {reason}"),
+            }
+        }
+        for result in &report.systems {
+            let name = &result.name;
+            match &result.outcome {
+                SystemOutcome::Imported if dry_run => println!("would import system {name}"),
+                SystemOutcome::Imported => println!("imported system {name}"),
+                SystemOutcome::Recovered if dry_run => println!("would recover system {name}"),
+                SystemOutcome::Recovered => println!("recovered system {name}"),
+                SystemOutcome::Unchanged => println!("unchanged system {name}"),
+                SystemOutcome::Conflict(reason) => println!("conflict system {name}: {reason}"),
+                SystemOutcome::Failed(reason) => println!("failed system {name}: {reason}"),
             }
         }
         for result in &report.machines {
