@@ -118,16 +118,32 @@ what this backend is for.
 
 | Host | Status |
 |---|---|
-| Linux x86-64 | Candidate: **not yet built or booted for real** |
+| Linux x86-64 | Candidate: **builds and boots Mac OS 8.1**, smoke test unfinished |
 | Windows x86-64 | No: refused |
 | macOS ARM64 | No: refused |
 
-On Linux x86-64 macman offers the backend, so that it can be tested, and that's all this
-table claims. The build recipe, preferences, and limits were read from the pinned source,
-and exercised with a stand-in for the emulator. Nothing has been compiled from
-`SheepShaver/src`, and no guest has booted. No host counts as supported until
-[the smoke test](SMOKE_TEST.md#sheepshaver) has passed there, and release targets don't
-depend on this backend.
+On Linux x86-64 macman offers the backend, so that it can be tested. It's been built from
+the pinned source and run on one host, Ubuntu 26.04 with GCC 15.2 and SDL 2.32. The build
+took about 16 seconds, with real addressing and the JIT on. No host counts as supported
+until [the smoke test](SMOKE_TEST.md#sheepshaver) has passed there, and release targets
+don't depend on this backend.
+
+These parts of the smoke test have been seen to work on that host:
+
+- `macman doctor` reports `vm.mmap_min_addr` and an intact build, `macman list --builds`
+  shows the build, and a later run reuses it.
+- With `vm.mmap_min_addr` at 65536 the emulator stops with "Cannot map Low Memory Globals",
+  and macman names the fix.
+- With a guest running: the window, the 2x scale, and the RAM setting are right, and the
+  guest writes to its own disk.
+- A 68k ROM is refused. A ROM macman accepts and the emulator refuses, with
+  `Unsupported ROM type.` and exit code 0, is reported as a failed start.
+- Killing the emulator is reported as signal 9, and a crash as signal 11.
+
+These haven't been tested: Shut Down from inside the guest, sound on a real device, `slirp`
+networking, a shared folder, a CD or a read-only disk mounted in a running guest, killing
+macman, rebuilding a damaged build, booting an imported machine, and any installation done
+under SheepShaver itself.
 
 Windows and macOS are refused, whatever Basilisk II does there. Upstream's Windows build
 is 32-bit, and macman's 64-bit recipe is for Basilisk II, whose memory and JIT
@@ -136,12 +152,21 @@ would need a recipe of its own, and real tests.
 
 | Guest | ROM | Status |
 |---|---|---|
-| Mac OS 7.5.2 to 9.0.4 | One that suits the guest | Untested |
+| Mac OS 8.1 | Old World 4M dump (TNT nanokernel) | Boots to the Finder, 128M at 800x600. The disk was installed under Basilisk II |
+| Mac OS 8.1 | New World `Mac OS ROM` (labelled 8.6) | **Crashes the emulator** (SIGSEGV), from the disk or the CD image |
+| No system, a blank disk | Either of those ROMs | Stays up. New World reaches the question-mark disk |
+| Mac OS 7.5.2 to 8.0, 8.5 to 9.0.4 | One that suits the guest | Untested |
 | Mac OS 9.1, 9.2.x, Mac OS X | Any | Not claimed. The emulator decodes such ROMs, but macman makes no promise |
 
 macman accepts a 4M dump with a nanokernel the emulator knows (TNT, Alchemy, Zanzibar,
 Gazelle, Gossamer, or NewWorld), or a compressed `Mac OS ROM` file under 4M, and refuses
 everything else. That says it can be decoded, not that a given guest will boot from it.
+
+The New World crash happened with the JIT on or off, and at 64M, 128M, and 256M, and only
+once a Mac OS 8.1 system was involved. New World ROMs were made for Mac OS 8.5 and later,
+so the likely cause is that pairing, but that isn't confirmed: no 8.5 or later guest has
+been tried, so no New World ROM has booted anything yet. Until then, use an Old World ROM
+for Mac OS 8.1.
 
 It's a generic PowerPC Mac: the emulator patches the ROM to look like a Power Mac 9500,
 and models no particular machine. No Power Mac's own hardware or timing is represented.
@@ -152,14 +177,13 @@ The pin is the same macemu commit as Basilisk II's, so the two share one downloa
 
 x86-64 builds default to real addressing, where Mac addresses are host addresses, so
 `main_unix.cpp` has to map memory at address 0. Linux refuses that unless
-`vm.mmap_min_addr` is 0, and it's 65536 on most distributions. `macman doctor` reports
-this, and a failed start repeats the fix. Setting it to 0 allows every program on the
+`vm.mmap_min_addr` is 0, and it's 65536 on most distributions, so this does stop the
+emulator. `macman doctor` reports this, and a failed start repeats the fix. Setting it to 0 allows every program on the
 host to map address 0, which makes some kernel bugs easier to exploit, so it's for you to
 decide, and macman never changes it.
 
 `configure` also has a direct addressing mode that avoids this. macman doesn't use it,
-because the precompiled JIT operations may assume real addressing. It's worth trying if
-the smoke test goes badly.
+because the precompiled JIT operations may assume real addressing. It hasn't been tried.
 
 For the same reason, the emulator forces SDL onto X11, so a Wayland desktop needs XWayland.
 

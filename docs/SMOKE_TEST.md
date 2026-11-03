@@ -144,9 +144,9 @@ On macOS, these replace the matching steps:
 
 ## SheepShaver
 
-Run this on Linux x86-64, the only candidate host. Nothing has passed it yet, so update
-[PLATFORMS.md](PLATFORMS.md#sheepshaver) with what you find, and expect to adjust the
-backend. It needs a PowerPC ROM and a system image of your own, and it uses separate
+Run this on Linux x86-64, the only candidate host. It has been run in part, with Mac OS
+8.1, and [PLATFORMS.md](PLATFORMS.md#sheepshaver) lists what passed and what's left. Update
+it with what you find, and expect to adjust the backend. It needs a PowerPC ROM and a system image of your own, and it uses separate
 directories, so it doesn't touch your machines.
 
 ```sh
@@ -164,7 +164,7 @@ macman create p9b --backend sheepshaver --rom ppc --system mac-os-9 --memory 256
 |---|---|
 | `macman doctor` | Names any missing tools, and reports `vm.mmap_min_addr`. |
 | `macman run p9` with `vm.mmap_min_addr` above 0 | Downloads and builds, then fails, naming the `sysctl` that fixes it. If it boots instead, the requirement is wrong: remove it. |
-| `sudo sysctl vm.mmap_min_addr=0`, then `macman run p9` | Boots to the Finder. Note what the ROM and guest were. |
+| `sudo sysctl vm.mmap_min_addr=0`, then `macman run p9` | Boots to the Finder. Note what the ROM and guest were. A New World ROM has crashed with Mac OS 8.1, so pair it with 8.5 or later. |
 | The same run, with speakers or headphones on | The startup chime plays on the host's real sound device. |
 | While it runs, in a second terminal: `macman run p9` | Refused, because the disk is in use. |
 | While it runs: `macman doctor` | The machine is still reported as runnable. |

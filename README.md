@@ -219,10 +219,10 @@ PowerPC Mac OS, generally Mac OS 7.5.2 through 9.0.4, depending on the ROM and t
 It imitates no particular Power Mac, and macman makes no claim for Mac OS 9.1 or later,
 Mac OS X, or G4 and G5 machines.
 
-**This backend hasn't been tried against the real emulator yet.** Its build, launch, and
-limits come from reading the pinned source, and are tested against a stand-in. Treat it
-as a preview until [the smoke test](docs/SMOKE_TEST.md#sheepshaver) has passed; see
-[docs/PLATFORMS.md](docs/PLATFORMS.md#sheepshaver).
+**This backend is a preview.** It has built and booted Mac OS 8.1 on an Old World ROM on
+Linux x86-64, but nothing newer has been tried, and neither have sound, networking, or
+shared folders. Treat it as a preview until [the smoke test](docs/SMOKE_TEST.md#sheepshaver)
+has passed; see [docs/PLATFORMS.md](docs/PLATFORMS.md#sheepshaver).
 
 It's offered only on Linux x86-64, and compiles with the same packages as Basilisk II:
 
@@ -241,6 +241,8 @@ sudo sysctl vm.mmap_min_addr=0
 
 It needs a PowerPC ROM of your own: a 4M dump from a PCI Power Mac, or a `Mac OS ROM` file
 from a System Folder or an installer, which must be under 4M. No 68k ROM will start it.
+The ROM has to suit the guest: a New World ROM crashed the emulator with Mac OS 8.1, while
+an Old World one booted it.
 
 ```sh
 macman rom add "Mac OS ROM" --name newworld

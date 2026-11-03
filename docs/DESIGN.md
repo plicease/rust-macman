@@ -231,12 +231,12 @@ On macOS ARM64 it builds as on Linux, and differs in these ways:
 
 ### SheepShaver
 
-Read from the pinned macemu source, and tested only with a stand-in for the emulator; see [PLATFORMS.md](PLATFORMS.md#sheepshaver). The module comment in `src/backend/sheepshaver.rs` has the details. It works as Basilisk II does on Linux, and differs in these ways:
+Read from the pinned macemu source, tested with a stand-in for the emulator, and partly checked on the real one on Linux x86-64; see [PLATFORMS.md](PLATFORMS.md#sheepshaver). The module comment in `src/backend/sheepshaver.rs` has the details. It works as Basilisk II does on Linux, and differs in these ways:
 
 - **Configuration:** a `[sheepshaver]` table holds `sound`, `network`, and `shared_folder`. There's no CPU, FPU, or model to choose.
 - **ROMs:** a 4M dump with a nanokernel it knows, or a compressed `Mac OS ROM` file under 4M.
 - **Limits:** 16M to 1024M of RAM, and at least 640x480. Depth must be 32, as it starts at the desktop's depth, and has no setting.
-- **Addressing:** upstream's default, real addressing, which needs `vm.mmap_min_addr` to be 0. `doctor` and failed starts say so.
+- **Addressing:** upstream's default, real addressing, which needs `vm.mmap_min_addr` to be 0. `doctor` and failed starts say so, and the requirement has been confirmed on a real run.
 - **JIT:** on, unlike Basilisk II, as the interpreter is too slow for its guests.
 - **Hosts:** only Linux x86-64 is offered. Basilisk II's other hosts don't carry over.
 
