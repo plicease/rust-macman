@@ -243,8 +243,9 @@ Shut Down it started 9.0.4 from its own disk, with a plain ISO 9660 image attach
 mounted as a data disc with its folder and file. While the install ran, a second machine
 naming the same CD image was refused. The CD images' hashes were unchanged.
 
-Sound, `slirp`, full screen, a shared folder, read-only disks, a damaged build, Mac OS 8.x,
-Homebrew, several HFS CDs at once, and host CD media haven't been tried there.
+`slirp` networking, sound on a real device, full screen, a shared folder, and a read-only
+disk work there too. A damaged build, Mac OS 8.x, Homebrew, several HFS CDs at once, and
+host CD media haven't been tried there.
 
 ### Other hosts, and guests
 

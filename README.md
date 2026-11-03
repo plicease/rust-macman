@@ -223,7 +223,8 @@ Mac OS X, or G4 and G5 machines.
 and installed and booted Mac OS 9.0.4 on a New World ROM, and `slirp` networking, a shared
 folder, read-only disks, and sound on a real device work. On Windows x86-64 it has booted
 Mac OS 9.0.4, with `slirp`, full screen, and sound working, and on macOS ARM64 it has
-installed and booted Mac OS 9.0.4 and shut down cleanly. Treat it as a preview until
+installed and booted Mac OS 9.0.4, with `slirp`, full screen, sound, a shared folder, and
+read-only disks working. Treat it as a preview until
 [the smoke test](docs/SMOKE_TEST.md#sheepshaver) has passed; see
 [docs/PLATFORMS.md](docs/PLATFORMS.md#sheepshaver).
 
