@@ -177,24 +177,49 @@ const CHRP_IMAGES: [&[u8]; 2] = [b"constant lzss-offset", b"constant parcels-off
 /// ROM` file. Such a file has to be smaller than a dump, as `DecodeROM` takes
 /// anything of that size for one. Neither has a checksum to test.
 pub fn is_powerpc_rom(bytes: &[u8], size: u64) -> bool {
+    powerpc_rom(bytes, size).is_some()
+}
+
+/// Which kind of PowerPC ROM `PatchROM` would take this for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerPcRom {
+    /// A dump of a PCI Power Mac made before the iMac.
+    OldWorld,
+    /// A `Mac OS ROM` file, compressed or as a whole image.
+    NewWorld,
+}
+
+/// [`is_powerpc_rom`], saying which kind it is.
+pub fn powerpc_rom(bytes: &[u8], size: u64) -> Option<PowerPcRom> {
     if size == POWERPC_ROM_SIZE {
         let id = bytes.get(NANOKERNEL_ID..).unwrap_or_default();
-        return NANOKERNELS.iter().any(|name| id.starts_with(name));
+        let name = NANOKERNELS.iter().find(|name| id.starts_with(name))?;
+        return Some(if *name == b"NewWorld" {
+            PowerPcRom::NewWorld
+        } else {
+            PowerPcRom::OldWorld
+        });
     }
-    size < POWERPC_ROM_SIZE
+    let compressed = size < POWERPC_ROM_SIZE
         && bytes.starts_with(CHRP_SIGNATURE)
         && CHRP_IMAGES
             .iter()
-            .any(|image| bytes.windows(image.len()).any(|found| found == *image))
+            .any(|image| bytes.windows(image.len()).any(|found| found == *image));
+    compressed.then_some(PowerPcRom::NewWorld)
 }
 
 /// [`is_powerpc_rom`], for a stored ROM.
 pub fn rom_file_is_powerpc(file: &Path, size: u64) -> Result<bool> {
+    Ok(rom_file_powerpc(file, size)?.is_some())
+}
+
+/// [`powerpc_rom`], for a stored ROM.
+pub fn rom_file_powerpc(file: &Path, size: u64) -> Result<Option<PowerPcRom>> {
     let mut bytes = Vec::new();
     File::open(file)
         .and_then(|rom| rom.take(POWERPC_ROM_SIZE).read_to_end(&mut bytes))
         .with_context(|| format!("cannot read ROM {}", file.display()))?;
-    Ok(is_powerpc_rom(&bytes, size))
+    Ok(powerpc_rom(&bytes, size))
 }
 
 /// Read up to the largest ROM size from the start of `path`.
@@ -505,7 +530,16 @@ mod tests {
     fn a_powerpc_dump_is_known_by_its_nanokernel() {
         for name in NANOKERNELS {
             let dump = powerpc_dump(name);
-            assert!(is_powerpc_rom(&dump, dump.len() as u64));
+            let kind = if name == b"NewWorld" {
+                PowerPcRom::NewWorld
+            } else {
+                PowerPcRom::OldWorld
+            };
+            assert_eq!(
+                powerpc_rom(&dump, dump.len() as u64),
+                Some(kind),
+                "{name:?}"
+            );
         }
         let unknown = powerpc_dump(b"Boot Kanga");
         assert!(!is_powerpc_rom(&unknown, POWERPC_ROM_SIZE));
@@ -523,7 +557,10 @@ mod tests {
             let mut file = CHRP_SIGNATURE.to_vec();
             file.extend_from_slice(b" 000400 ");
             file.extend_from_slice(image);
-            assert!(is_powerpc_rom(&file, file.len() as u64));
+            assert_eq!(
+                powerpc_rom(&file, file.len() as u64),
+                Some(PowerPcRom::NewWorld)
+            );
             // `DecodeROM` would take this for a dump, and fail to patch it.
             assert!(!is_powerpc_rom(&file, POWERPC_ROM_SIZE));
             assert!(!is_powerpc_rom(&file, POWERPC_ROM_SIZE + 1));

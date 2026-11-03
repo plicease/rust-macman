@@ -5,7 +5,7 @@ use crate::backend::minivmac::{MANIFEST, Manifest};
 use crate::backend::{
     Backends, CdImage, Check, CheckLevel, EmulatorBackend, LaunchRequest, ResolvedDisk,
 };
-use crate::backend::{basilisk2, sheepshaver};
+use crate::backend::{basilisk2, minivmac, sheepshaver};
 use crate::cli::{
     Cli, Command, ConfigCommand, CreateArgs, DiskCommand, NameKind, RomCommand, RunArgs,
     SystemCommand,
@@ -21,7 +21,7 @@ use crate::machine::{
 };
 use crate::model::{Model, parse_display};
 use crate::paths::Paths;
-use crate::registry;
+use crate::registry::{self, PowerPcRom};
 use crate::report::{
     BuildDetails, BuildEntry, BuildList, Current, DiskInfo, DisplayReport, DoctorReport, Format,
     ImportResult, Layout, MachineConfig, MachineDetails, MachineEntry, MachineList,
@@ -351,45 +351,65 @@ impl App {
 
     fn list_roms(&self, json: bool) -> Result<()> {
         let mut roms = Vec::new();
+        let mut rows = Vec::new();
         for rom in registry::list_roms(&self.paths)? {
             let file = self.paths.roms().join(format!("{}.rom", rom.name));
-            let backend = if !rom.models.is_empty() {
-                Some("minivmac")
-            } else if registry::rom_file_is_32_bit_clean(&file, rom.size)? {
-                Some(basilisk2::BACKEND_NAME)
-            } else if registry::rom_file_is_powerpc(&file, rom.size)? {
-                Some(sheepshaver::BACKEND_NAME)
-            } else {
-                None
-            };
+            // Each backend's own test, so a ROM two of them take is listed for both.
+            let clean = registry::rom_file_is_32_bit_clean(&file, rom.size)?;
+            let powerpc = registry::rom_file_powerpc(&file, rom.size)?;
+            let mut kinds = Vec::new();
+            if !rom.models.is_empty() {
+                kinds.push(
+                    rom.models
+                        .iter()
+                        .map(|m| m.name())
+                        .collect::<Vec<_>>()
+                        .join("/"),
+                );
+            }
+            if clean {
+                kinds.push("32-bit clean".to_string());
+            }
+            match powerpc {
+                Some(PowerPcRom::OldWorld) => kinds.push("PowerPC Old World".to_string()),
+                Some(PowerPcRom::NewWorld) => kinds.push("PowerPC New World".to_string()),
+                None => {}
+            }
+            let emulators: Vec<&'static str> = [
+                (!rom.models.is_empty(), minivmac::BACKEND_NAME),
+                (clean, basilisk2::BACKEND_NAME),
+                (powerpc.is_some(), sheepshaver::BACKEND_NAME),
+            ]
+            .into_iter()
+            .filter_map(|(takes, backend)| takes.then_some(backend))
+            .collect();
+            rows.push(vec![
+                rom.name.clone(),
+                format!("{}K", rom.size / 1024),
+                if kinds.is_empty() {
+                    "unrecognised".to_string()
+                } else {
+                    kinds.join(", ")
+                },
+                rom.sha256[..12].to_string(),
+                if emulators.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    emulators.join("/")
+                },
+            ]);
             roms.push(RomEntry {
                 models: rom.models.iter().map(|m| m.name().to_string()).collect(),
                 name: rom.name,
                 size: rom.size,
                 sha256: rom.sha256,
-                backend,
+                backend: emulators.first().copied(),
+                emulators,
             });
         }
         if json {
             return print_json(&RomList { roms });
         }
-        let rows: Vec<Vec<String>> = roms
-            .into_iter()
-            .map(|rom| {
-                let models = match rom.backend {
-                    Some("minivmac") => rom.models.join("/"),
-                    Some(basilisk2::BACKEND_NAME) => "32-bit clean, for Basilisk II".to_string(),
-                    Some(_) => "PowerPC, for SheepShaver".to_string(),
-                    None => "unrecognised".to_string(),
-                };
-                vec![
-                    rom.name,
-                    format!("{}K", rom.size / 1024),
-                    models,
-                    rom.sha256[..12].to_string(),
-                ]
-            })
-            .collect();
         print_table(&rows, &[1]);
         Ok(())
     }

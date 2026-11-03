@@ -111,7 +111,7 @@ Checks come in the order the text output has them.
 ## `macman rom list`
 
 ```json
-{"roms": [{"name": "plus-v3", "size": 131072, "sha256": "dd908e...", "models": ["512ke", "plus"], "backend": "minivmac"}]}
+{"roms": [{"name": "plus-v3", "size": 131072, "sha256": "dd908e...", "models": ["512ke", "plus"], "backend": "minivmac", "emulators": ["minivmac"]}]}
 ```
 
 | Field | Type | |
@@ -120,7 +120,11 @@ Checks come in the order the text output has them.
 | `size` | number | |
 | `sha256` | string | All 64 hex digits |
 | `models` | array of strings | Mini vMac models it's a genuine ROM for; empty for any other ROM |
-| `backend` | string or null | The backend it suits: `minivmac`, `basilisk2`, or `sheepshaver`; `null` if unrecognized |
+| `backend` | string or null | The first of `emulators`, or `null` if it's empty |
+| `emulators` | array of strings | Each backend whose ROM check it passes: `minivmac`, `basilisk2`, or `sheepshaver`, in that order; empty if unrecognized |
+
+A backend listed in `emulators` can start from the ROM; that doesn't mean every guest
+will boot on it. Mac OS 8.1, for one, crashes SheepShaver with a New World ROM.
 
 ## `macman system list`
 

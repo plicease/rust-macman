@@ -73,6 +73,11 @@ Other commands: `list [--builds]`, `current`, `rom list`, `system list`, `system
 logs. Add `--json` to `list`, `doctor`, `rom list`, `system list`, `disk info`, `config show`, or
 `current` for output that scripts can read; [docs/JSON.md](docs/JSON.md) has the fields.
 
+`rom list` shows each ROM's name, size, kind, and the start of its hash, then the
+backends that can start from it, such as `minivmac` or `basilisk2`, or `unknown` for one
+macman doesn't recognize. That's judged from the ROM's contents, never its name, and it
+doesn't promise that every guest will boot.
+
 On Linux and macOS, files live under the XDG directories: `~/.config/macman`,
 `~/.local/share/macman`, and `~/.cache/macman`. macman doesn't use `~/Library`. On Windows, configuration is in
 `%APPDATA%\macman`, and machines, ROMs, and images are in `%LOCALAPPDATA%\macman`, with
