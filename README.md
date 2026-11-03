@@ -221,7 +221,8 @@ Mac OS X, or G4 and G5 machines.
 
 **This backend is a preview.** On Linux x86-64 it has booted Mac OS 8.1 on an Old World ROM,
 and installed and booted Mac OS 9.0.4 on a New World ROM, and `slirp` networking, a shared
-folder, read-only disks, and sound on a real device work. Treat it as a preview until [the smoke test](docs/SMOKE_TEST.md#sheepshaver) has passed; see
+folder, read-only disks, and sound on a real device work. Treat it as a preview until
+[the smoke test](docs/SMOKE_TEST.md#sheepshaver) has passed; see
 [docs/PLATFORMS.md](docs/PLATFORMS.md#sheepshaver).
 
 It's offered only on Linux x86-64, and compiles with the same packages as Basilisk II:
