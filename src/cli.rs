@@ -16,6 +16,8 @@ pub(crate) const MACHINE: ValueHint = ValueHint::Username;
 pub(crate) const ROM: ValueHint = ValueHint::Hostname;
 pub(crate) const SYSTEM: ValueHint = ValueHint::EmailAddress;
 pub(crate) const MEDIA: ValueHint = ValueHint::Url;
+/// `config set`'s words, which are completed knowing the words before them.
+pub(crate) const SETTINGS: ValueHint = ValueHint::CommandName;
 
 /// The command completion scripts run for names. It isn't a subcommand,
 /// because every shell's script would then offer it.
@@ -28,10 +30,18 @@ pub enum NameKind {
     Roms,
     Systems,
     Media,
+    /// The next word of `config set`: a machine, a key, or a value.
+    Settings,
 }
 
 impl NameKind {
-    pub const ALL: [Self; 4] = [Self::Machines, Self::Roms, Self::Systems, Self::Media];
+    pub const ALL: [Self; 5] = [
+        Self::Machines,
+        Self::Roms,
+        Self::Systems,
+        Self::Media,
+        Self::Settings,
+    ];
 
     /// The kind an argument marked with `hint` takes, if any.
     pub fn of(hint: ValueHint) -> Option<Self> {
@@ -44,6 +54,7 @@ impl NameKind {
             Self::Roms => ROM,
             Self::Systems => SYSTEM,
             Self::Media => MEDIA,
+            Self::Settings => SETTINGS,
         }
     }
 
@@ -53,6 +64,7 @@ impl NameKind {
             Self::Roms => "roms",
             Self::Systems => "systems",
             Self::Media => "media",
+            Self::Settings => "config-set",
         }
     }
 
@@ -62,6 +74,7 @@ impl NameKind {
             "roms" => Some(Self::Roms),
             "systems" => Some(Self::Systems),
             "media" => Some(Self::Media),
+            "config-set" => Some(Self::Settings),
             _ => None,
         }
     }
@@ -472,6 +485,32 @@ pub enum ConfigCommand {
     },
     /// Change a machine's settings in an interactive editor (the current one by default)
     Edit {
+        #[arg(value_name = "MACHINE", value_hint = MACHINE)]
+        name: Option<String>,
+    },
+    /// Change settings from a script, as `config set wombat-6 hardware.memory 4M`; several
+    /// KEY VALUE pairs are checked and saved together, and without MACHINE, the current one
+    #[command(
+        override_usage = "macman config set [--machine MACHINE | MACHINE] KEY VALUE [KEY VALUE]..."
+    )]
+    Set {
+        /// The machine to change, rather than giving it as the first word; then every word
+        /// is a KEY or a VALUE
+        #[arg(long, value_name = "MACHINE", value_hint = MACHINE)]
+        machine: Option<String>,
+        /// The machine, if not the current one, then KEY VALUE pairs; given an odd number of
+        /// words, the first is the machine
+        #[arg(
+            value_name = "WORDS",
+            value_hint = SETTINGS,
+            required = true,
+            num_args = 1..,
+            allow_hyphen_values = false
+        )]
+        words: Vec<String>,
+    },
+    /// List the keys `config set` takes for a machine, with their values and choices
+    Keys {
         #[arg(value_name = "MACHINE", value_hint = MACHINE)]
         name: Option<String>,
     },

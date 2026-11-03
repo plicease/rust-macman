@@ -11,6 +11,7 @@ use crate::backend::{Check, CheckLevel};
 use crate::disk::{DiskFormat, Partition};
 use crate::machine::Machine;
 use crate::media::{Media, MediaFormat, MediaKind};
+use crate::settings::{Change, KeyInfo};
 use serde::Serialize;
 
 /// Print `report` as one JSON document on stdout.
@@ -355,6 +356,28 @@ impl From<&Partition> for PartitionReport {
 #[derive(Debug, Serialize)]
 pub struct MachineConfig {
     pub machine: Machine,
+}
+
+/// `config set`: what changed, in the order given; none for a no-op.
+#[derive(Debug, Serialize)]
+pub struct ConfigSet {
+    pub machine: String,
+    pub changes: Vec<Change>,
+    pub notes: Vec<String>,
+}
+
+/// `config keys`: what `config set` takes for a machine, and what it doesn't.
+#[derive(Debug, Serialize)]
+pub struct ConfigKeys {
+    pub machine: String,
+    pub keys: Vec<KeyInfo>,
+    pub fixed: Vec<FixedKey>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FixedKey {
+    pub key: &'static str,
+    pub reason: &'static str,
 }
 
 #[derive(Debug, Serialize)]

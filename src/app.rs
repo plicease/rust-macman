@@ -25,11 +25,13 @@ use crate::model::{Model, parse_display};
 use crate::paths::Paths;
 use crate::registry::{self, PowerPcRom};
 use crate::report::{
-    BuildDetails, BuildEntry, BuildList, CheckpointEntry, CheckpointList, Current, DiskInfo,
-    DiskUsage, DisplayReport, DoctorReport, Format, ImportResult, Layout, MachineConfig,
-    MachineDetails, MachineEntry, MachineList, MediaEntry, MediaInfo, MediaList, PartitionReport,
-    RomEntry, RomList, SystemEntry, SystemList, UsageEntry, UsageKind, print_json,
+    BuildDetails, BuildEntry, BuildList, CheckpointEntry, CheckpointList, ConfigKeys, ConfigSet,
+    Current, DiskInfo, DiskUsage, DisplayReport, DoctorReport, FixedKey, Format, ImportResult,
+    Layout, MachineConfig, MachineDetails, MachineEntry, MachineList, MediaEntry, MediaInfo,
+    MediaList, PartitionReport, RomEntry, RomList, SystemEntry, SystemList, UsageEntry, UsageKind,
+    print_json,
 };
+use crate::settings;
 use crate::usage;
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
@@ -196,6 +198,10 @@ impl App {
             Command::Run(args) => return self.run(&args, verbose),
             Command::Config(ConfigCommand::Show { name }) => self.config_show(name, json)?,
             Command::Config(ConfigCommand::Edit { name }) => self.config_edit(name)?,
+            Command::Config(ConfigCommand::Set { machine, words }) => {
+                self.config_set(machine.as_deref(), &words, json)?
+            }
+            Command::Config(ConfigCommand::Keys { name }) => self.config_keys(name, json)?,
             Command::Checkpoint(CheckpointCommand::Create { name, checkpoint }) => {
                 self.checkpoint_create(name, checkpoint.as_deref())?
             }
@@ -1216,6 +1222,79 @@ impl App {
         Ok(())
     }
 
+    fn config_set(&self, machine: Option<&str>, words: &[String], json: bool) -> Result<()> {
+        let is_machine = |name: &str| {
+            validate_name("machine", name).is_ok()
+                && self.paths.machine(name).join("machine.toml").is_file()
+        };
+        let (named, pairs) = settings::split(words, machine, &is_machine)?;
+        let name = self.resolve_name(named.map(str::to_string))?;
+        let mut editor = crate::edit::Editor::open_locked(&self.paths, &self.backends, &name)?;
+        let changes = settings::set(&mut editor, &pairs)?;
+        let notes = editor.notes();
+        if editor.is_modified() {
+            editor.save()?;
+        }
+        if json {
+            return print_json(&ConfigSet {
+                machine: name,
+                changes,
+                notes,
+            });
+        }
+        for change in &changes {
+            println!(
+                "{}: {} -> {}",
+                change.key,
+                settings::text(&change.before),
+                settings::text(&change.after)
+            );
+        }
+        if changes.is_empty() {
+            println!("No change to machine {name}");
+        } else {
+            println!("Saved machine {name}");
+        }
+        for note in notes {
+            eprintln!("note: {note}");
+        }
+        Ok(())
+    }
+
+    fn config_keys(&self, name: Option<String>, json: bool) -> Result<()> {
+        let name = self.resolve_name(name)?;
+        let editor = crate::edit::Editor::inspect(&self.paths, &self.backends, &name)?;
+        let keys = settings::describe(&editor);
+        if json {
+            return print_json(&ConfigKeys {
+                machine: name,
+                keys,
+                fixed: settings::FIXED
+                    .iter()
+                    .map(|&(key, reason)| FixedKey { key, reason })
+                    .collect(),
+            });
+        }
+        let width = keys.iter().map(|key| key.key.len()).max().unwrap_or(0);
+        let values: Vec<String> = keys.iter().map(|key| settings::text(&key.value)).collect();
+        let value_width = values.iter().map(String::len).max().unwrap_or(0);
+        for (key, value) in keys.iter().zip(&values) {
+            let mut allowed = match &key.choices {
+                Some(choices) => choices
+                    .iter()
+                    .map(settings::text)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                None => format!("a {}", key.kind),
+            };
+            if key.other_values && key.choices.is_some() {
+                allowed += ", or another";
+            }
+            println!("{:width$}  {value:value_width$}  {allowed}", key.key);
+        }
+        Ok(())
+    }
+
     fn run(&self, args: &RunArgs, verbose: bool) -> Result<u8> {
         let name = self.resolve_name(args.name.clone())?;
         self.sweep_stale_sessions()?;
@@ -2035,7 +2114,7 @@ fn print_layout(file: &Path, size: u64, layout: Layout) {
 /// `macman __complete-names`: the names of one kind, one per line, for a
 /// completion script. It reads only directory listings, and on any trouble
 /// prints nothing, because a shell would show an error mid-line.
-pub fn print_names(paths: &Paths, kind: NameKind) {
+pub fn print_names(paths: &Paths, kind: NameKind, words: &[String]) {
     let registered = |dir: PathBuf| -> Vec<String> {
         list_dir(&dir)
             .unwrap_or_default()
@@ -2052,8 +2131,26 @@ pub fn print_names(paths: &Paths, kind: NameKind) {
         NameKind::Roms => registered(paths.roms()),
         NameKind::Systems => registered(paths.systems()),
         NameKind::Media => registered(paths.media()),
+        NameKind::Settings => {
+            let mut machines = Vec::new();
+            for name in list_dir(&paths.machines()).unwrap_or_default() {
+                if paths.machine(&name).join("machine.toml").is_file() {
+                    machines.push(name);
+                }
+            }
+            machines.sort();
+            let current = Config::load(paths).ok().and_then(|config| config.current);
+            let Ok(backends) = crate::default_backends(paths) else {
+                return;
+            };
+            // In the order to offer them: machines, then keys as config edit has them.
+            let words = settings::complete(paths, &backends, current.as_deref(), &machines, words);
+            Vec::from_iter(words)
+        }
     };
-    names.sort();
+    if kind != NameKind::Settings {
+        names.sort();
+    }
     let mut stdout = std::io::stdout().lock();
     for name in names {
         if writeln!(stdout, "{name}").is_err() {
@@ -2073,7 +2170,9 @@ fn without_json(command: &Command) -> Option<&'static str> {
         | Command::Du
         | Command::Checkpoint(CheckpointCommand::List { .. })
         | Command::Media(MediaCommand::List | MediaCommand::Info { .. })
-        | Command::Config(ConfigCommand::Show { .. }) => return None,
+        | Command::Config(
+            ConfigCommand::Show { .. } | ConfigCommand::Set { .. } | ConfigCommand::Keys { .. },
+        ) => return None,
         Command::Media(MediaCommand::Add { .. }) => "media add",
         Command::Checkpoint(CheckpointCommand::Create { .. }) => "checkpoint create",
         Command::Checkpoint(CheckpointCommand::Delete { .. }) => "checkpoint delete",

@@ -5,8 +5,8 @@
 //! so the editor has no rules of its own to drift from theirs.
 
 use crate::backend::Backends;
-use crate::disk::{self, LockMode};
-use crate::fsutil::validate_name;
+use crate::disk::{self, ImageLock, LockMode};
+use crate::fsutil::{HeldLock, validate_name};
 use crate::machine::{Basilisk2Settings, Cpu, Machine, Network, SheepShaverSettings};
 use crate::paths::Paths;
 use crate::registry;
@@ -36,6 +36,16 @@ const SIZES: &[(u32, u32)] = &[
     (1600, 1200),
     (1920, 1080),
 ];
+/// Why the fields `config edit` shows but doesn't change are fixed, which
+/// `config set` gives too.
+pub const RENAME: &str =
+    "Rename a machine by cloning it with `macman clone`, then removing the old one.";
+pub const BACKEND_FIXED: &str =
+    "A machine's disks were made for its emulator; create a new machine for another.";
+pub const MODEL_FIXED: &str =
+    "The model decides the ROM, disks, and build; create a new machine for another.";
+pub const DISKS_FIXED: &str = "The disk files and their order aren't edited here, so nothing \
+     can lose track of an installed system. Attach others for one run with `run --disk`.";
 const DEPTHS: &[u32] = &[1, 2, 4, 8, 16, 32];
 const SCALES: &[u32] = &[1, 2, 3, 4];
 
@@ -107,11 +117,48 @@ pub struct Editor<'a> {
     /// The definition as it was read, to notice anyone else changing it.
     loaded: String,
     roms: Vec<String>,
+    /// The machine's definition lock, when it's held for the whole edit.
+    held: Option<HeldLock>,
+}
+
+/// Hold `name`'s definition lock, waiting for anyone else holding it. Every
+/// save takes it, so two edits can't interleave reading and writing.
+pub fn lock_definition(paths: &Paths, name: &str) -> Result<HeldLock> {
+    validate_name("machine", name)?;
+    fs::create_dir_all(paths.locks()).context("cannot create lock directory")?;
+    let path = paths.locks().join(format!("machine-{name}.lock"));
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("cannot open lock {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("cannot lock {}", path.display()))?;
+    Ok(HeldLock::new(file))
 }
 
 impl<'a> Editor<'a> {
     /// Open `name` for editing, refusing while it's running.
     pub fn open(paths: &'a Paths, backends: &'a Backends, name: &str) -> Result<Self> {
+        let editor = Self::inspect(paths, backends, name)?;
+        editor.check_idle()?;
+        Ok(editor)
+    }
+
+    /// [`Editor::open`], holding the machine's definition lock from before it's
+    /// read until it's saved, so edits made one after another can't lose any.
+    pub fn open_locked(paths: &'a Paths, backends: &'a Backends, name: &str) -> Result<Self> {
+        let held = lock_definition(paths, name)?;
+        let mut editor = Self::open(paths, backends, name)?;
+        editor.held = Some(held);
+        Ok(editor)
+    }
+
+    /// Read `name` to see what could be changed, creating and locking nothing,
+    /// as completion needs. It can't be saved any more safely than another.
+    pub fn inspect(paths: &'a Paths, backends: &'a Backends, name: &str) -> Result<Self> {
         validate_name("machine", name)?;
         let original = Machine::load(paths, name)?;
         backends.get(&original.emulator.backend)?;
@@ -121,23 +168,28 @@ impl<'a> Editor<'a> {
             .map(|rom| rom.name)
             .collect();
         roms.sort();
-        let editor = Self {
+        Ok(Self {
             paths,
             backends,
             draft: original.clone(),
             original,
             loaded,
             roms,
-        };
-        editor.check_idle()?;
-        Ok(editor)
+            held: None,
+        })
     }
 
     /// Refuse while an emulator has the machine's disks, as `remove` does.
     fn check_idle(&self) -> Result<()> {
+        self.hold_idle().map(drop)
+    }
+
+    /// The machine's disks, locked so no emulator can start on them.
+    fn hold_idle(&self) -> Result<Vec<ImageLock>> {
+        let mut locks = Vec::new();
         for (path, _) in self.original.disk_paths(self.paths)? {
             if path.exists() {
-                drop(
+                locks.push(
                     disk::lock_image(self.paths, &path, LockMode::Exclusive).with_context(
                         || {
                             format!(
@@ -149,7 +201,7 @@ impl<'a> Editor<'a> {
                 );
             }
         }
-        Ok(())
+        Ok(locks)
     }
 
     /// Whether `machine` would be accepted by `create` and `run`, as far as
@@ -215,26 +267,16 @@ impl<'a> Editor<'a> {
         let backend = machine.emulator.backend.as_str();
         let macemu = matches!(backend, "basilisk2" | "sheepshaver");
         let mut fields = vec![
-            self.fixed(
-                "Machine",
-                "Name",
-                machine.name.clone(),
-                "Rename a machine by cloning it with `macman clone`, then removing the old one.",
-            ),
+            self.fixed("Machine", "Name", machine.name.clone(), RENAME),
             self.fixed(
                 "Machine",
                 "Backend",
                 machine.emulator.backend.clone(),
-                "A machine's disks were made for its emulator; create a new machine for another.",
+                BACKEND_FIXED,
             ),
         ];
         if let Some(model) = machine.hardware.model {
-            fields.push(self.fixed(
-                "Machine",
-                "Model",
-                model.to_string(),
-                "The model decides the ROM, disks, and build; create a new machine for another.",
-            ));
+            fields.push(self.fixed("Machine", "Model", model.to_string(), MODEL_FIXED));
         }
         fields.push(self.field(
             FieldId::Ephemeral,
@@ -259,13 +301,7 @@ impl<'a> Editor<'a> {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        fields.push(self.fixed(
-            "Machine",
-            "Disks",
-            disks,
-            "The disk files and their order aren't edited here, so nothing can lose track \
-             of an installed system. Attach others for one run with `run --disk`.",
-        ));
+        fields.push(self.fixed("Machine", "Disks", disks, DISKS_FIXED));
 
         let roms = self.choices(FieldId::Rom, self.roms.iter().cloned());
         fields.push(self.field(
@@ -525,11 +561,16 @@ impl<'a> Editor<'a> {
     }
 
     /// Write the draft, if it's valid, the machine isn't running, and nobody
-    /// else changed it meanwhile. The write is atomic.
+    /// else changed it meanwhile. The write is atomic, and made holding the
+    /// definition lock and the disks', so nothing starts or saves meanwhile.
     pub fn save(&self) -> Result<()> {
         self.check(&self.draft)
             .context("this configuration can't be saved")?;
-        self.check_idle()?;
+        let _definition = match self.held {
+            Some(_) => None,
+            None => Some(lock_definition(self.paths, &self.original.name)?),
+        };
+        let _disks = self.hold_idle()?;
         let file = definition(self.paths, &self.original.name);
         let now =
             fs::read_to_string(&file).with_context(|| format!("cannot read {}", file.display()))?;
@@ -632,7 +673,7 @@ fn parse_number(what: &str, value: &str) -> Result<u32> {
 }
 
 /// Set a field from its shown form, checking only that the value parses.
-fn apply(machine: &mut Machine, id: FieldId, value: &str) -> Result<()> {
+pub(crate) fn apply(machine: &mut Machine, id: FieldId, value: &str) -> Result<()> {
     let is_sheepshaver = machine.emulator.backend == "sheepshaver";
     let basilisk2: Basilisk2Settings = machine.basilisk2.clone().unwrap_or_default();
     let sheepshaver: SheepShaverSettings = machine.sheepshaver.clone().unwrap_or_default();
@@ -738,7 +779,7 @@ pub(crate) mod tests {
     }
 
     /// A synthetic 32-bit clean ROM, for Basilisk II.
-    fn clean_rom(path: &Path) {
+    pub(crate) fn clean_rom(path: &Path) {
         let mut bytes = vec![0u8; 1024 * 1024];
         bytes[8..10].copy_from_slice(&0x067Cu16.to_be_bytes());
         fs::write(path, bytes).unwrap();
@@ -773,7 +814,7 @@ pub(crate) mod tests {
         );
     }
 
-    fn add_rom(paths: &Paths, name: &str, write: fn(&Path)) {
+    pub(crate) fn add_rom(paths: &Paths, name: &str, write: fn(&Path)) {
         let dir = paths.cache_dir.join("sources");
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join(format!("{name}.rom"));
@@ -804,7 +845,7 @@ pub(crate) mod tests {
         );
     }
 
-    fn make_basilisk(paths: &Paths) {
+    pub(crate) fn make_basilisk(paths: &Paths) {
         add_rom(paths, "quadra", clean_rom);
         add_rom(paths, "plus", plus_rom);
         add_system(paths);
@@ -823,7 +864,7 @@ pub(crate) mod tests {
         );
     }
 
-    fn make_sheep(paths: &Paths) {
+    pub(crate) fn make_sheep(paths: &Paths) {
         add_rom(paths, "tnt", powerpc_rom);
         add_rom(paths, "quadra", clean_rom);
         add_system(paths);

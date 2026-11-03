@@ -39,6 +39,8 @@ struct Launch {
     workdir: PathBuf,
     rom: PathBuf,
     disks: Vec<ResolvedDisk>,
+    /// The display scale the machine was launched with.
+    scale: u32,
 }
 
 type DuringLaunch = Box<dyn FnOnce(&Launch)>;
@@ -114,6 +116,7 @@ impl EmulatorBackend for Mock {
             workdir: request.workdir.to_path_buf(),
             rom: request.rom.to_path_buf(),
             disks: request.disks.to_vec(),
+            scale: request.machine.display.scale,
         };
         let during = self.0.borrow_mut().during.take();
         if let Some(during) = during {
@@ -1551,4 +1554,31 @@ fn a_damaged_checkpoint_or_an_unfinished_one_is_never_used() {
         all.iter().any(|n| n.ends_with('Z') && n.contains('T')),
         "{all:?}"
     );
+}
+
+#[test]
+fn a_running_machine_keeps_its_configuration() {
+    let (h, mock) = Harness::mock();
+    let definition = h.paths.machine("plus-a").join("machine.toml");
+    let paths = h.paths.clone();
+    let tried = Rc::new(RefCell::new(None));
+    let seen = tried.clone();
+    mock.0.borrow_mut().during = Some(Box::new(move |_: &Launch| {
+        let error =
+            other_macman(&paths, &["config", "set", "plus-a", "ephemeral", "true"]).unwrap_err();
+        *seen.borrow_mut() = Some(format!("{error:#}"));
+    }));
+    let before = fs::read_to_string(&definition).unwrap();
+    h.cmd(&["run", "plus-a"]).unwrap();
+    let error = tried.borrow().clone().expect("config set was tried");
+    assert!(error.contains("is running"), "{error}");
+    assert_eq!(fs::read_to_string(&definition).unwrap(), before);
+
+    // Once it's quit, the same change is made, and the next run uses it.
+    h.cmd(&["config", "set", "plus-a", "display.scale", "3"])
+        .unwrap();
+    mock.0.borrow_mut().during = None;
+    h.cmd(&["run", "plus-a"]).unwrap();
+    let launch = mock.0.borrow().launches.last().cloned().unwrap();
+    assert_eq!(launch.scale, 3);
 }

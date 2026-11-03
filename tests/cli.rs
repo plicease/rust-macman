@@ -1158,3 +1158,281 @@ fn rollback_restores_a_missing_boot_disk_but_wont_pretend_to_save_it() {
     all.sort_by_key(ToString::to_string);
     assert_eq!(all, ["before", "clean"]);
 }
+
+#[test]
+fn config_set_changes_settings_from_a_script() {
+    let env = Env::new();
+    env.register();
+    env.create("wombat-6");
+    let definition = env
+        .path()
+        .join("data/macman/machines/wombat-6/machine.toml");
+    let disk = std::fs::read(env.machine_disk("wombat-6")).unwrap();
+
+    let output = env.run(&[
+        "config",
+        "set",
+        "wombat-6",
+        "hardware.memory",
+        "1M",
+        "display.scale",
+        "3",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = String::from_utf8(output.stdout.clone()).unwrap();
+    assert_eq!(
+        text,
+        "hardware.memory: 4M -> 1M\ndisplay.scale: 2 -> 3\nSaved machine wombat-6\n"
+    );
+    // What it means beyond the file goes to stderr, apart from the result.
+    assert!(
+        stderr(&output).contains("note: Mini vMac builds"),
+        "{}",
+        stderr(&output)
+    );
+    let shown = env.ok(&["config", "show", "wombat-6"]);
+    assert!(
+        shown.contains("memory = \"1M\"") && shown.contains("scale = 3"),
+        "{shown}"
+    );
+    assert_eq!(std::fs::read(env.machine_disk("wombat-6")).unwrap(), disk);
+
+    // A no-op succeeds, and writes nothing.
+    let before = std::fs::read_to_string(&definition).unwrap();
+    let text = env.ok(&["config", "set", "wombat-6", "display.scale", "3"]);
+    assert_eq!(text, "No change to machine wombat-6\n");
+    assert_eq!(std::fs::read_to_string(&definition).unwrap(), before);
+
+    // Refusals exit 1, explain, and leave the file as it was, even with a
+    // valid pair before the bad one.
+    for (args, says) in [
+        (
+            &["wombat-6", "hardware.memory", "2G"][..],
+            "hardware.memory can be one of",
+        ),
+        (
+            &["wombat-6", "display.scale", "2", "display.depth", "8"],
+            "monochrome",
+        ),
+        (&["wombat-6", "name", "other"], "macman clone"),
+        (&["wombat-6", "colour", "red"], "unknown key \"colour\""),
+        (&["wombat-6", "hardware.memory"], "has no value"),
+        (&["missing", "ephemeral", "true"], "missing"),
+    ] {
+        let mut all = vec!["config", "set"];
+        all.extend_from_slice(args);
+        let error = env.fails(&all);
+        assert!(error.contains(says), "{args:?}: {error}");
+        assert_eq!(
+            std::fs::read_to_string(&definition).unwrap(),
+            before,
+            "{args:?}"
+        );
+    }
+    let error = env.fails(&["config", "set", "wombat-6", "hardware.memory", "2G"]);
+    assert!(error.contains("nothing was changed"), "{error}");
+
+    // Without a name, the current machine.
+    env.fails(&["config", "set", "ephemeral", "true"]);
+    env.ok(&["use", "wombat-6"]);
+    env.ok(&["config", "set", "ephemeral", "true"]);
+    assert!(
+        std::fs::read_to_string(&definition)
+            .unwrap()
+            .contains("ephemeral = true")
+    );
+
+    // --json gives the changes, typed, and nothing else on stdout.
+    let output = env.run(&["--json", "config", "set", "wombat-6", "ephemeral", "false"]);
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["machine"], "wombat-6");
+    assert_eq!(
+        json["changes"],
+        serde_json::json!([{"key": "ephemeral", "before": true, "after": false}])
+    );
+    let output = env.run(&["--json", "config", "set", "wombat-6", "display.depth", "8"]);
+    assert_eq!(output.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        json["error"].as_str().unwrap().contains("monochrome"),
+        "{json}"
+    );
+}
+
+#[test]
+fn config_keys_lists_what_config_set_takes() {
+    let env = Env::new();
+    env.register();
+    env.create("wombat-6");
+    let text = env.ok(&["config", "keys", "wombat-6"]);
+    let lines: Vec<_> = text.lines().collect();
+    assert!(
+        lines[0].starts_with("ephemeral") && lines[0].ends_with("true, false"),
+        "{text}"
+    );
+    let depth = lines
+        .iter()
+        .find(|l| l.starts_with("display.depth"))
+        .unwrap();
+    assert_eq!(
+        depth.split_whitespace().collect::<Vec<_>>(),
+        ["display.depth", "1", "1"],
+        "{text}"
+    );
+    let height = lines
+        .iter()
+        .find(|l| l.starts_with("display.height"))
+        .unwrap();
+    assert!(height.contains("1024, 1080, 1200, or another"), "{text}");
+    let memory = lines
+        .iter()
+        .find(|l| l.starts_with("hardware.memory"))
+        .unwrap();
+    assert!(
+        memory.contains("4M") && memory.ends_with(", or another"),
+        "{text}"
+    );
+    assert!(!text.contains("basilisk2."), "{text}");
+
+    let json: serde_json::Value =
+        serde_json::from_str(&env.ok(&["--json", "config", "keys", "wombat-6"])).unwrap();
+    let keys = json["keys"].as_array().unwrap();
+    let scale = keys.iter().find(|k| k["key"] == "display.scale").unwrap();
+    assert_eq!(scale["type"], "integer");
+    assert_eq!(scale["value"], 2);
+    assert_eq!(scale["other_values"], false);
+    let fixed = json["fixed"].as_array().unwrap();
+    assert!(fixed.iter().any(|k| k["key"] == "id"), "{json}");
+}
+
+#[test]
+fn concurrent_config_sets_each_take_effect() {
+    let env = Env::new();
+    env.register();
+    env.create("wombat-6");
+    // Each sets a different key; none may lose another's change.
+    let settings = [
+        ["ephemeral", "true"],
+        ["display.scale", "3"],
+        ["display.fullscreen", "true"],
+        ["hardware.memory", "1M"],
+    ];
+    let outputs: Vec<Output> = std::thread::scope(|scope| {
+        let handles: Vec<_> = settings
+            .iter()
+            .map(|[key, value]| {
+                let env = &env;
+                scope.spawn(move || env.run(&["config", "set", "wombat-6", key, value]))
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for output in &outputs {
+        assert!(output.status.success(), "{}", stderr(output));
+    }
+    let json: serde_json::Value =
+        serde_json::from_str(&env.ok(&["--json", "config", "keys", "wombat-6"])).unwrap();
+    let value = |key: &str| {
+        json["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|k| k["key"] == key)
+            .unwrap()["value"]
+            .clone()
+    };
+    assert_eq!(value("ephemeral"), true);
+    assert_eq!(value("display.scale"), 3);
+    assert_eq!(value("display.fullscreen"), true);
+    assert_eq!(value("hardware.memory"), "1M");
+}
+
+#[test]
+fn config_set_takes_the_machine_by_option_or_position_but_not_both() {
+    let env = Env::new();
+    env.register();
+    env.create("wombat-6");
+    env.create("other");
+    let definition = |name: &str| {
+        std::fs::read_to_string(
+            env.path()
+                .join(format!("data/macman/machines/{name}/machine.toml")),
+        )
+        .unwrap()
+    };
+
+    let text = env.ok(&[
+        "config",
+        "set",
+        "--machine",
+        "wombat-6",
+        "display.scale",
+        "3",
+        "ephemeral",
+        "true",
+    ]);
+    assert!(text.ends_with("Saved machine wombat-6\n"), "{text}");
+    assert!(definition("wombat-6").contains("scale = 3"));
+    assert!(
+        !definition("other").contains("scale = 3"),
+        "only the one named"
+    );
+    // The option may come after the pairs, too.
+    env.ok(&["config", "set", "display.scale", "1", "--machine=other"]);
+    assert!(definition("other").contains("scale = 1"));
+
+    let wombat = definition("wombat-6");
+    let other = definition("other");
+    for (args, says) in [
+        // A value left out is said, however the machine is named.
+        (
+            &["--machine", "wombat-6", "hardware.memory"][..],
+            "\"hardware.memory\" has no value",
+        ),
+        (
+            &[
+                "--machine",
+                "wombat-6",
+                "ephemeral",
+                "false",
+                "display.scale",
+            ],
+            "\"display.scale\" has no value",
+        ),
+        (
+            &["wombat-6", "ephemeral", "false", "display.scale"],
+            "\"display.scale\" has no value",
+        ),
+        (
+            &["ephemeral", "false", "display.scale"],
+            "\"display.scale\" has no value",
+        ),
+        // Both at once is refused, whichever machine each names.
+        (
+            &["--machine", "wombat-6", "wombat-6", "ephemeral", "false"],
+            "given twice",
+        ),
+        (
+            &["--machine", "other", "wombat-6", "ephemeral", "false"],
+            "given twice",
+        ),
+        (
+            &["--machine", "wombat-6", "colour", "ephemeral", "false"],
+            "isn't a key",
+        ),
+        (&["--machine", "nobody", "ephemeral", "false"], "nobody"),
+    ] {
+        let mut all = vec!["config", "set"];
+        all.extend_from_slice(args);
+        let error = env.fails(&all);
+        assert!(error.contains(says), "{args:?}: {error}");
+        assert_eq!(definition("wombat-6"), wombat, "{args:?}");
+        assert_eq!(definition("other"), other, "{args:?}");
+    }
+    let help = env.ok(&["config", "set", "--help"]);
+    assert!(
+        help.contains("[--machine MACHINE | MACHINE] KEY VALUE"),
+        "{help}"
+    );
+}

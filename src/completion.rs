@@ -101,6 +101,7 @@ fn zsh(generated: &str) -> String {
         (NameKind::Roms, "_hosts"),
         (NameKind::Systems, "_email_addresses"),
         (NameKind::Media, "_urls"),
+        (NameKind::Settings, "_command_names -e"),
     ] {
         script = splice(
             &script,
@@ -111,9 +112,18 @@ fn zsh(generated: &str) -> String {
     let helper = format!(
         r#"(( $+functions[_macman_names] )) ||
 _macman_names() {{
-    local -a names
-    names=(${{(f)"$(macman {COMPLETE_NAMES} $1 2>/dev/null)"}})
-    compadd -a names
+    # _arguments puts its own options, such as -J and a group, before the
+    # kind, which is last; they're compadd's.
+    local kind=${{@[-1]}}
+    local -a names before
+    # `config set` is completed knowing the words before this one: those of
+    # $words there, which are its positionals, and its --machine.
+    if [[ $kind == config-set ]]; then
+        [[ -n ${{opt_args[--machine]}} ]] && before=(--machine "${{opt_args[--machine]}}")
+        before+=("${{(@)words[1,CURRENT-1]}}")
+    fi
+    names=(${{(f)"$(macman {COMPLETE_NAMES} $kind "${{before[@]}}" 2>/dev/null)"}})
+    compadd "${{(@)@[1,-2]}}" -a names
 }}
 
 if [ "$funcstack[1]" = "_macman" ]; then"#
@@ -200,7 +210,20 @@ _macman_with_names() {{
 
     if [[ -n $kind ]]; then
         local IFS=$'\n'
-        COMPREPLY=( $(compgen -W "$(macman {COMPLETE_NAMES} "$kind" 2>/dev/null)" -- "$cur") )
+        # `config set` is completed knowing every word after it, options too.
+        local -a extra=()
+        if [[ $kind == config-set ]]; then
+            local seen=0
+            for (( i = 1; i < COMP_CWORD; i++ )); do
+                word="${{COMP_WORDS[i]}}"
+                case $seen in
+                    2) extra+=("$word") ;;
+                    1) [[ $word == set ]] && seen=2 ;;
+                    0) [[ $word == config ]] && seen=1 ;;
+                esac
+            done
+        fi
+        COMPREPLY=( $(compgen -W "$(macman {COMPLETE_NAMES} "$kind" "${{extra[@]}}" 2>/dev/null)" -- "$cur") )
         return 0
     fi
     _macman "$@"
@@ -230,11 +253,29 @@ fn collect_value_options(command: &clap::Command, found: &mut Vec<String>) {
     }
 }
 
+/// The words after `config set` on fish's command line, before the cursor,
+/// options too, which macman sorts out.
+const FISH_CONFIG_SET_WORDS: &str = r#"function __fish_macman_config_set_words
+    set -l seen 0
+    for token in (commandline -opc)
+        switch $seen
+            case 2
+                printf '%s\n' $token
+            case 1
+                string match -q -- set $token; and set seen 2
+            case 0
+                string match -q -- config $token; and set seen 1
+        end
+    end
+end
+"#;
+
 /// Fish's generated script has no marks to replace, so this adds completions
 /// for each name argument. A positional one is offered at every position.
 fn fish(generated: &str, args: &[NameArg]) -> String {
     let mut script = generated.to_string();
     script += "\n# Machine, ROM, and system names, which only macman knows.\n";
+    script += FISH_CONFIG_SET_WORDS;
     for arg in args {
         let condition = match arg.path.as_slice() {
             [command] => format!("__fish_macman_using_subcommand {command}"),
@@ -245,7 +286,13 @@ fn fish(generated: &str, args: &[NameArg]) -> String {
             }
             path => unreachable!("macman has no commands nested as deep as {path:?}"),
         };
-        let names = format!("(macman {COMPLETE_NAMES} {})", arg.kind.as_str());
+        let names = match arg.kind {
+            // Keyed by the words before the cursor, not by its position alone.
+            NameKind::Settings => {
+                format!("(macman {COMPLETE_NAMES} config-set (__fish_macman_config_set_words))")
+            }
+            kind => format!("(macman {COMPLETE_NAMES} {})", kind.as_str()),
+        };
         script += &match &arg.place {
             Place::Option { long } => {
                 format!("complete -c macman -n \"{condition}\" -l {long} -r -f -a \"{names}\"\n")
@@ -299,6 +346,16 @@ mod tests {
             arg(&["run"], option("media"), NameKind::Media),
             arg(&["config", "show"], at(0), NameKind::Machines),
             arg(&["config", "edit"], at(0), NameKind::Machines),
+            arg(
+                &["config", "set"],
+                Place::Positional {
+                    index: 0,
+                    repeats: true,
+                },
+                NameKind::Settings,
+            ),
+            arg(&["config", "set"], option("machine"), NameKind::Machines),
+            arg(&["config", "keys"], at(0), NameKind::Machines),
             arg(&["checkpoint", "create"], at(0), NameKind::Machines),
             arg(&["checkpoint", "list"], at(0), NameKind::Machines),
             arg(&["checkpoint", "delete"], at(0), NameKind::Machines),
