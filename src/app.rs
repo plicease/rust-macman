@@ -21,6 +21,11 @@ use crate::machine::{
 use crate::model::{Model, parse_display};
 use crate::paths::Paths;
 use crate::registry;
+use crate::report::{
+    BuildDetails, BuildEntry, BuildList, Current, DiskInfo, DisplayReport, DoctorReport, Format,
+    Layout, MachineConfig, MachineDetails, MachineEntry, MachineList, PartitionReport, RomEntry,
+    RomList, SystemEntry, SystemList, print_json,
+};
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
 use std::fs;
@@ -87,15 +92,22 @@ impl App {
     /// Run a command, returning the process exit code.
     pub fn execute(&self, cli: Cli) -> Result<u8> {
         let verbose = cli.verbose;
+        let json = cli.json;
+        if json && let Some(command) = without_json(&cli.command) {
+            bail!(
+                "--json isn't supported by `macman {command}`, which changes things rather than \
+                 reporting them; leave it off"
+            );
+        }
         match cli.command {
-            Command::Doctor => return self.doctor(verbose),
-            Command::List { builds: false } => self.list_machines()?,
-            Command::List { builds: true } => self.list_builds()?,
+            Command::Doctor => return self.doctor(verbose, json),
+            Command::List { builds: false } => self.list_machines(json)?,
+            Command::List { builds: true } => self.list_builds(json)?,
             Command::Rom(RomCommand::Add { file, name }) => {
                 let rom = registry::add_rom(&self.paths, &file, &name)?;
                 println!("Imported ROM {} ({})", rom.name, rom.sha256);
             }
-            Command::Rom(RomCommand::List) => self.list_roms()?,
+            Command::Rom(RomCommand::List) => self.list_roms(json)?,
             Command::System(SystemCommand::Add {
                 file,
                 name,
@@ -112,11 +124,11 @@ impl App {
                     None => println!("Registered system image {name}"),
                 }
             }
-            Command::System(SystemCommand::List) => self.list_systems()?,
+            Command::System(SystemCommand::List) => self.list_systems(json)?,
             Command::System(SystemCommand::Remove { name, yes }) => {
                 self.remove_system(&name, yes)?
             }
-            Command::Disk(DiskCommand::Info { file }) => self.disk_info(&file)?,
+            Command::Disk(DiskCommand::Info { file }) => self.disk_info(&file, json)?,
             Command::Disk(DiskCommand::Extract {
                 source,
                 dest,
@@ -127,9 +139,12 @@ impl App {
                 self.create(args)?;
             }
             Command::Use { name } => self.select(&name)?,
+            Command::Current if json => print_json(&Current {
+                current: self.current()?,
+            })?,
             Command::Current => println!("{}", self.current()?),
             Command::Run(args) => return self.run(&args, verbose),
-            Command::Config(ConfigCommand::Show { name }) => self.config_show(name)?,
+            Command::Config(ConfigCommand::Show { name }) => self.config_show(name, json)?,
             Command::Clone { source, dest } => self.clone_machine(&source, &dest)?,
             Command::Export { names, all, output } => {
                 let names = if all {
@@ -199,123 +214,232 @@ impl App {
         Ok(())
     }
 
-    fn list_machines(&self) -> Result<()> {
+    fn list_machines(&self, json: bool) -> Result<()> {
         let current = Config::load(&self.paths)?.current;
-        let mut rows = Vec::new();
+        let mut machines = Vec::new();
         for name in list_dir(&self.paths.machines())? {
-            let marker = if current.as_deref() == Some(&name) {
-                '*'
-            } else {
-                ' '
+            let details = match Machine::load(&self.paths, &name) {
+                Ok(m) => MachineDetails::Readable {
+                    backend: m.emulator.backend.clone(),
+                    model: m.hardware.model.map(|model| model.to_string()),
+                    memory: m.hardware.memory.clone(),
+                    display: DisplayReport {
+                        width: m.display.width,
+                        height: m.display.height,
+                        depth: m.display.depth,
+                        scale: m.display.scale,
+                        fullscreen: m.display.fullscreen,
+                    },
+                    system_version: m.system.version.clone(),
+                },
+                Err(e) => MachineDetails::Unreadable {
+                    error: format!("{e:#}"),
+                },
             };
-            let label = format!("{marker} {name}");
-            rows.push(match Machine::load(&self.paths, &name) {
-                Ok(m) => {
-                    let version = m.system.version.as_deref().unwrap_or("-");
-                    let hardware = m
-                        .hardware
-                        .model
-                        .map_or(m.emulator.backend.clone(), |model| model.to_string());
-                    vec![
-                        label,
-                        hardware,
-                        m.hardware.memory.clone(),
-                        format!(
-                            "{}x{}x{}",
-                            m.display.width, m.display.height, m.display.depth
-                        ),
-                        format!("system {version}"),
-                    ]
+            machines.push(MachineEntry {
+                current: current.as_deref() == Some(&name),
+                name,
+                details,
+            });
+        }
+        if json {
+            return print_json(&MachineList { machines });
+        }
+        let mut rows = Vec::new();
+        for machine in machines {
+            let marker = if machine.current { '*' } else { ' ' };
+            let label = format!("{marker} {}", machine.name);
+            rows.push(match machine.details {
+                MachineDetails::Readable {
+                    backend,
+                    model,
+                    memory,
+                    display,
+                    system_version,
+                } => vec![
+                    label,
+                    model.unwrap_or(backend),
+                    memory,
+                    format!("{}x{}x{}", display.width, display.height, display.depth),
+                    format!("system {}", system_version.as_deref().unwrap_or("-")),
+                ],
+                MachineDetails::Unreadable { error } => {
+                    vec![label, format!("(unreadable: {error})")]
                 }
-                Err(e) => vec![label, format!("(unreadable: {e:#})")],
             });
         }
         print_table(&rows, &[2]);
         Ok(())
     }
 
-    fn list_builds(&self) -> Result<()> {
-        let mut rows = Vec::new();
+    fn list_builds(&self, json: bool) -> Result<()> {
+        let mut builds = Vec::new();
         for key in list_dir(&self.paths.builds())? {
-            rows.push(
+            let details =
                 match read_toml::<Manifest>(&self.paths.builds().join(&key).join(MANIFEST)) {
-                    Ok(m) => vec![
-                        key[..12.min(key.len())].to_string(),
-                        m.backend,
-                        m.revision,
-                        m.options.join(" "),
-                    ],
-                    // One cell, as the whole key would widen the column for every other row.
-                    Err(_) => vec![format!("{key}  (no valid manifest)")],
-                },
-            );
+                    Ok(m) => BuildDetails::Valid {
+                        backend: m.backend,
+                        revision: m.revision,
+                        options: m.options,
+                    },
+                    Err(_) => BuildDetails::Invalid {
+                        error: "no valid manifest".to_string(),
+                    },
+                };
+            builds.push(BuildEntry { key, details });
         }
+        if json {
+            return print_json(&BuildList { builds });
+        }
+        let rows: Vec<Vec<String>> = builds
+            .into_iter()
+            .map(|build| match build.details {
+                BuildDetails::Valid {
+                    backend,
+                    revision,
+                    options,
+                } => vec![
+                    build.key[..12.min(build.key.len())].to_string(),
+                    backend,
+                    revision,
+                    options.join(" "),
+                ],
+                // One cell, as the whole key would widen the column for every other row.
+                BuildDetails::Invalid { error } => vec![format!("{}  ({error})", build.key)],
+            })
+            .collect();
         print_table(&rows, &[]);
         Ok(())
     }
 
-    fn list_roms(&self) -> Result<()> {
-        let mut rows = Vec::new();
+    fn list_roms(&self, json: bool) -> Result<()> {
+        let mut roms = Vec::new();
         for rom in registry::list_roms(&self.paths)? {
-            let models: Vec<_> = rom.models.iter().map(|m| m.name()).collect();
             let file = self.paths.roms().join(format!("{}.rom", rom.name));
-            let models = if !models.is_empty() {
-                models.join("/")
+            let backend = if !rom.models.is_empty() {
+                Some("minivmac")
             } else if registry::rom_file_is_32_bit_clean(&file, rom.size)? {
-                "32-bit clean, for Basilisk II".to_string()
+                Some(basilisk2::BACKEND_NAME)
             } else if registry::rom_file_is_powerpc(&file, rom.size)? {
-                "PowerPC, for SheepShaver".to_string()
+                Some(sheepshaver::BACKEND_NAME)
             } else {
-                "unrecognised".to_string()
+                None
             };
-            rows.push(vec![
-                rom.name,
-                format!("{}K", rom.size / 1024),
-                models,
-                rom.sha256[..12].to_string(),
-            ]);
+            roms.push(RomEntry {
+                models: rom.models.iter().map(|m| m.name().to_string()).collect(),
+                name: rom.name,
+                size: rom.size,
+                sha256: rom.sha256,
+                backend,
+            });
         }
+        if json {
+            return print_json(&RomList { roms });
+        }
+        let rows: Vec<Vec<String>> = roms
+            .into_iter()
+            .map(|rom| {
+                let models = match rom.backend {
+                    Some("minivmac") => rom.models.join("/"),
+                    Some(basilisk2::BACKEND_NAME) => "32-bit clean, for Basilisk II".to_string(),
+                    Some(_) => "PowerPC, for SheepShaver".to_string(),
+                    None => "unrecognised".to_string(),
+                };
+                vec![
+                    rom.name,
+                    format!("{}K", rom.size / 1024),
+                    models,
+                    rom.sha256[..12].to_string(),
+                ]
+            })
+            .collect();
         print_table(&rows, &[1]);
         Ok(())
     }
 
-    fn list_systems(&self) -> Result<()> {
-        let mut rows = Vec::new();
+    fn list_systems(&self, json: bool) -> Result<()> {
+        let mut systems = Vec::new();
         for system in registry::list_systems(&self.paths)? {
-            let version = system.version.as_deref().unwrap_or("-");
             let (_, file) = registry::load_system(&self.paths, &system.name)?;
-            let format = disk::detect_format(&file)
-                .map(registry::describe_format)
-                .unwrap_or("unknown format");
-            rows.push(vec![
-                system.name.clone(),
-                version.to_string(),
-                format!("{}K", system.size / 1024),
-                format.to_string(),
-            ]);
+            systems.push(SystemEntry {
+                format: disk::detect_format(&file).ok().map(Format::from),
+                name: system.name,
+                version: system.version,
+                size: system.size,
+                sha256: system.sha256,
+            });
         }
+        if json {
+            return print_json(&SystemList { systems });
+        }
+        let rows: Vec<Vec<String>> = systems
+            .into_iter()
+            .map(|system| {
+                let format = match system.format {
+                    Some(Format::Mfs) => "raw MFS",
+                    Some(Format::Hfs) => "raw HFS",
+                    Some(Format::DiskCopy42) => "Disk Copy 4.2",
+                    None => "unknown format",
+                };
+                vec![
+                    system.name,
+                    system.version.unwrap_or_else(|| "-".to_string()),
+                    format!("{}K", system.size / 1024),
+                    format.to_string(),
+                ]
+            })
+            .collect();
         print_table(&rows, &[2]);
         Ok(())
     }
 
-    fn disk_info(&self, file: &Path) -> Result<()> {
+    fn disk_info(&self, file: &Path, json: bool) -> Result<()> {
         let _guard = disk::lock_image(&self.paths, file, LockMode::Shared)?;
         let size = fs::metadata(file)?.len();
-        println!("{}: {size} bytes", file.display());
-        match disk::classify(file)? {
+        let layout = match disk::classify(file)? {
             Classification::Supported(DiskFormat::DiskCopy42) => {
                 let (offset, length, volume) = disk::disk_copy_contents(file)?;
+                Layout::DiskCopy42 {
+                    data_offset: offset,
+                    data_length: length,
+                    volume: volume.map(Format::from),
+                }
+            }
+            Classification::Supported(format) => Layout::Volume {
+                volume: format.into(),
+            },
+            Classification::Partitioned(partitions) => Layout::Partitioned {
+                partitions: partitions.iter().map(PartitionReport::from).collect(),
+            },
+            Classification::Blank => Layout::Blank,
+            Classification::Unsupported(what) => Layout::Unsupported { description: what },
+            Classification::Unrecognized => Layout::Unrecognized,
+        };
+        if json {
+            return print_json(&DiskInfo {
+                file: file.display().to_string(),
+                size,
+                layout,
+            });
+        }
+        println!("{}: {size} bytes", file.display());
+        let name = |format: Format| match format {
+            Format::Mfs => "MFS",
+            Format::Hfs => "HFS",
+            Format::DiskCopy42 => "Disk Copy 4.2",
+        };
+        match layout {
+            Layout::DiskCopy42 {
+                data_offset,
+                data_length,
+                volume,
+            } => {
                 println!("Format: Disk Copy 4.2, read-only in Mini vMac");
-                println!("Data: {length} bytes at offset {offset}");
-                println!(
-                    "Volume: {}",
-                    volume.map_or("none recognized", disk::volume_name)
-                );
+                println!("Data: {data_length} bytes at offset {data_offset}");
+                println!("Volume: {}", volume.map_or("none recognized", name));
             }
-            Classification::Supported(format) => {
-                println!("Format: raw {} volume", disk::volume_name(format));
-            }
-            Classification::Partitioned(partitions) => {
+            Layout::Volume { volume } => println!("Format: raw {} volume", name(volume)),
+            Layout::Partitioned { partitions } => {
                 println!("Format: partitioned disk, not mountable by Mini vMac as it stands");
                 println!(
                     "{:>3}  {:<24} {:>12} {:>12}  Volume",
@@ -324,7 +448,7 @@ impl App {
                 for p in &partitions {
                     let volume = match (p.in_bounds, p.volume) {
                         (false, _) => "out of bounds",
-                        (true, Some(format)) => disk::volume_name(format),
+                        (true, Some(format)) => name(format),
                         (true, None) => "-",
                     };
                     println!(
@@ -333,9 +457,11 @@ impl App {
                     );
                 }
             }
-            Classification::Blank => println!("Format: blank"),
-            Classification::Unsupported(what) => println!("Format: {what}; not supported"),
-            Classification::Unrecognized => println!("Format: not recognized"),
+            Layout::Blank => println!("Format: blank"),
+            Layout::Unsupported { description } => {
+                println!("Format: {description}; not supported")
+            }
+            Layout::Unrecognized => println!("Format: not recognized"),
         }
         Ok(())
     }
@@ -569,9 +695,12 @@ impl App {
         Ok(())
     }
 
-    fn config_show(&self, name: Option<String>) -> Result<()> {
+    fn config_show(&self, name: Option<String>, json: bool) -> Result<()> {
         let name = self.resolve_name(name)?;
-        Machine::load(&self.paths, &name)?;
+        let machine = Machine::load(&self.paths, &name)?;
+        if json {
+            return print_json(&MachineConfig { machine });
+        }
         let file = self.paths.machine(&name).join("machine.toml");
         print!("{}", fs::read_to_string(file)?);
         Ok(())
@@ -811,14 +940,18 @@ impl App {
         Ok(())
     }
 
-    fn doctor(&self, verbose: bool) -> Result<u8> {
-        let color = stdout_takes_color();
-        let mut failed = false;
-        for check in &self.doctor_checks(verbose)? {
-            failed |= check.level == CheckLevel::Fail;
-            print!("{}", doctor_line(check, color));
+    fn doctor(&self, verbose: bool, json: bool) -> Result<u8> {
+        let checks = self.doctor_checks(verbose)?;
+        let report = DoctorReport::new(&checks);
+        if json {
+            print_json(&report)?;
+        } else {
+            let color = stdout_takes_color();
+            for check in &checks {
+                print!("{}", doctor_line(check, color));
+            }
         }
-        Ok(u8::from(failed))
+        Ok(u8::from(!report.ok))
     }
 
     pub fn doctor_checks(&self, verbose: bool) -> Result<Vec<Check>> {
@@ -1154,6 +1287,31 @@ fn exit_code(status: ExitStatus) -> u8 {
         }
     }
     1
+}
+
+/// The name of `command`, if it doesn't take `--json`. These change things,
+/// and print what they did as they go, so they have no report to give.
+fn without_json(command: &Command) -> Option<&'static str> {
+    Some(match command {
+        Command::Doctor
+        | Command::List { .. }
+        | Command::Rom(RomCommand::List)
+        | Command::System(SystemCommand::List)
+        | Command::Disk(DiskCommand::Info { .. })
+        | Command::Current
+        | Command::Config(ConfigCommand::Show { .. }) => return None,
+        Command::Rom(RomCommand::Add { .. }) => "rom add",
+        Command::System(SystemCommand::Add { .. }) => "system add",
+        Command::System(SystemCommand::Remove { .. }) => "system remove",
+        Command::Disk(DiskCommand::Extract { .. }) => "disk extract",
+        Command::Create(_) => "create",
+        Command::Use { .. } => "use",
+        Command::Run(_) => "run",
+        Command::Clone { .. } => "clone",
+        Command::Export { .. } => "export",
+        Command::Import { .. } => "import",
+        Command::Remove { .. } => "remove",
+    })
 }
 
 /// One `doctor` check as printed: its status, its message, and any fix on the

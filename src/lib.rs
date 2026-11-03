@@ -10,6 +10,7 @@ pub mod machine;
 pub mod model;
 pub mod paths;
 pub mod registry;
+pub mod report;
 
 use anyhow::Result;
 use backend::Backends;
