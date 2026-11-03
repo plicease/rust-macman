@@ -3,6 +3,7 @@
 pub mod app;
 pub mod archive;
 pub mod backend;
+pub mod checkpoint;
 pub mod cli;
 pub mod completion;
 pub mod disk;

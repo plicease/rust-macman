@@ -6,9 +6,10 @@ use crate::backend::{
     Backends, CdImage, Check, CheckLevel, EmulatorBackend, LaunchRequest, ResolvedDisk,
 };
 use crate::backend::{basilisk2, minivmac, sheepshaver};
+use crate::checkpoint;
 use crate::cli::{
-    Cli, Command, ConfigCommand, CreateArgs, DiskCommand, MediaCommand, NameKind, RomCommand,
-    RunArgs, SystemCommand,
+    CheckpointCommand, Cli, Command, ConfigCommand, CreateArgs, DiskCommand, MediaCommand,
+    NameKind, RomCommand, RunArgs, SystemCommand,
 };
 use crate::disk::{self, Classification, DiskFormat, ImageLock, LockMode, Session, SessionRecord};
 use crate::fsutil::{
@@ -24,10 +25,10 @@ use crate::model::{Model, parse_display};
 use crate::paths::Paths;
 use crate::registry::{self, PowerPcRom};
 use crate::report::{
-    BuildDetails, BuildEntry, BuildList, Current, DiskInfo, DiskUsage, DisplayReport, DoctorReport,
-    Format, ImportResult, Layout, MachineConfig, MachineDetails, MachineEntry, MachineList,
-    MediaEntry, MediaInfo, MediaList, PartitionReport, RomEntry, RomList, SystemEntry, SystemList,
-    UsageEntry, UsageKind, print_json,
+    BuildDetails, BuildEntry, BuildList, CheckpointEntry, CheckpointList, Current, DiskInfo,
+    DiskUsage, DisplayReport, DoctorReport, Format, ImportResult, Layout, MachineConfig,
+    MachineDetails, MachineEntry, MachineList, MediaEntry, MediaInfo, MediaList, PartitionReport,
+    RomEntry, RomList, SystemEntry, SystemList, UsageEntry, UsageKind, print_json,
 };
 use crate::usage;
 use anyhow::{Context, Result, bail};
@@ -195,6 +196,23 @@ impl App {
             Command::Run(args) => return self.run(&args, verbose),
             Command::Config(ConfigCommand::Show { name }) => self.config_show(name, json)?,
             Command::Config(ConfigCommand::Edit { name }) => self.config_edit(name)?,
+            Command::Checkpoint(CheckpointCommand::Create { name, checkpoint }) => {
+                self.checkpoint_create(name, checkpoint.as_deref())?
+            }
+            Command::Checkpoint(CheckpointCommand::List { name }) => {
+                self.checkpoint_list(name, json)?
+            }
+            Command::Checkpoint(CheckpointCommand::Delete {
+                name,
+                checkpoint,
+                yes,
+            }) => self.checkpoint_delete(name, &checkpoint, yes)?,
+            Command::Rollback {
+                name,
+                checkpoint,
+                save,
+                yes,
+            } => self.rollback(name, &checkpoint, save.as_deref(), yes)?,
             Command::Clone { source, dest } => self.clone_machine(&source, &dest)?,
             Command::Export {
                 names,
@@ -1023,12 +1041,18 @@ impl App {
                 locks.push(disk::lock_image(&self.paths, path, LockMode::Exclusive)?);
             }
         }
-        if !delete_disks && !disks.is_empty() {
+        let checkpoints = checkpoint::list(&self.paths, name)?.len();
+        if !delete_disks && (!disks.is_empty() || checkpoints > 0) {
             let disks = disks.len();
+            let also = if checkpoints > 0 {
+                format!(" and {checkpoints} checkpoint(s)")
+            } else {
+                String::new()
+            };
             confirm(
-                &format!("Delete machine {name:?} and its {disks} private disk(s)?"),
+                &format!("Delete machine {name:?} and its {disks} private disk(s){also}?"),
                 &format!(
-                    "removing {name:?} deletes its {disks} private disk(s); \
+                    "removing {name:?} deletes its {disks} private disk(s){also}; \
                      pass --delete-disks to confirm"
                 ),
             )?;
@@ -1041,6 +1065,125 @@ impl App {
             config.save(&self.paths)?;
         }
         println!("Removed machine {name}");
+        Ok(())
+    }
+
+    fn checkpoint_create(&self, name: Option<String>, checkpoint: Option<&str>) -> Result<()> {
+        let name = self.resolve_name(name)?;
+        let machine = Machine::load(&self.paths, &name)?;
+        let saved = checkpoint::create(&self.paths, &machine, checkpoint)?;
+        println!(
+            "Saved checkpoint {} of {name} ({}, {} on the host)",
+            saved.name,
+            usage::format_bytes(saved.size),
+            usage::format_usage(usage::allocated(&checkpoint::image_file(
+                &self.paths,
+                &name,
+                &saved.name
+            )))
+        );
+        Ok(())
+    }
+
+    fn checkpoint_list(&self, name: Option<String>, json: bool) -> Result<()> {
+        let name = self.resolve_name(name)?;
+        Machine::load(&self.paths, &name)?;
+        let checkpoints: Vec<CheckpointEntry> = checkpoint::list(&self.paths, &name)?
+            .into_iter()
+            .map(|saved| CheckpointEntry {
+                host_disk_used_bytes: usage::allocated(&checkpoint::image_file(
+                    &self.paths,
+                    &name,
+                    &saved.name,
+                )),
+                name: saved.name,
+                created: saved.created,
+                disk: saved.disk,
+                size: saved.size,
+                sha256: saved.sha256,
+            })
+            .collect();
+        if json {
+            return print_json(&CheckpointList {
+                machine: name,
+                checkpoints,
+            });
+        }
+        let rows: Vec<Vec<String>> = checkpoints
+            .into_iter()
+            .map(|saved| {
+                vec![
+                    saved.name,
+                    saved.created,
+                    usage::format_bytes(saved.size),
+                    format!("used {}", usage::format_usage(saved.host_disk_used_bytes)),
+                    saved.disk,
+                ]
+            })
+            .collect();
+        print_table(&rows, &[]);
+        Ok(())
+    }
+
+    fn checkpoint_delete(&self, name: Option<String>, checkpoint: &str, yes: bool) -> Result<()> {
+        let name = self.resolve_name(name)?;
+        let machine = Machine::load(&self.paths, &name)?;
+        checkpoint::load(&self.paths, &name, checkpoint)?;
+        if !yes {
+            confirm(
+                &format!(
+                    "Delete checkpoint {checkpoint:?} of {name}? It can't be rolled back to after."
+                ),
+                &format!(
+                    "deleting checkpoint {checkpoint:?} can't be undone; pass --yes to confirm"
+                ),
+            )?;
+        }
+        checkpoint::delete(&self.paths, &machine, checkpoint)?;
+        println!("Deleted checkpoint {checkpoint} of {name}");
+        Ok(())
+    }
+
+    fn rollback(
+        &self,
+        name: Option<String>,
+        checkpoint: &str,
+        save: Option<&str>,
+        yes: bool,
+    ) -> Result<()> {
+        let name = self.resolve_name(name)?;
+        let machine = Machine::load(&self.paths, &name)?;
+        let (saved, _) = checkpoint::load(&self.paths, &name, checkpoint)?;
+        let missing = machine
+            .disk_paths(&self.paths)?
+            .iter()
+            .any(|(path, disk)| disk.boot && !path.exists());
+        if !yes && !(missing && save.is_some()) {
+            let keep = match save {
+                Some(save) => format!(" It's saved first as checkpoint {save:?}."),
+                None if missing => " The boot disk is missing, so this restores it.".to_string(),
+                None => " Its current contents will be lost; --save NAME keeps them.".to_string(),
+            };
+            confirm(
+                &format!(
+                    "Replace the boot disk of {name} with checkpoint {checkpoint:?}, taken {}?{keep}",
+                    saved.created
+                ),
+                &format!(
+                    "rolling {name} back replaces its boot disk; pass --yes to confirm, and \
+                     --save NAME to keep what's there"
+                ),
+            )?;
+        }
+        let done = checkpoint::rollback(&self.paths, &machine, checkpoint, save)?;
+        if let Some(kept) = done.saved {
+            println!("Saved the boot disk of {name} as checkpoint {}", kept.name);
+        }
+        if done.restored_missing {
+            println!("Restored the missing boot disk of {name} from checkpoint {checkpoint}");
+        } else {
+            println!("Rolled {name} back to checkpoint {checkpoint}");
+        }
         Ok(())
     }
 
@@ -1711,7 +1854,7 @@ fn confirm(question: &str, unattended: &str) -> Result<()> {
     let mut answer = String::new();
     std::io::stdin().lock().read_line(&mut answer)?;
     if !matches!(answer.trim(), "y" | "Y" | "yes") {
-        bail!("cancelled; nothing was removed");
+        bail!("cancelled; nothing was changed");
     }
     Ok(())
 }
@@ -1928,9 +2071,13 @@ fn without_json(command: &Command) -> Option<&'static str> {
         | Command::Disk(DiskCommand::Info { .. })
         | Command::Current
         | Command::Du
+        | Command::Checkpoint(CheckpointCommand::List { .. })
         | Command::Media(MediaCommand::List | MediaCommand::Info { .. })
         | Command::Config(ConfigCommand::Show { .. }) => return None,
         Command::Media(MediaCommand::Add { .. }) => "media add",
+        Command::Checkpoint(CheckpointCommand::Create { .. }) => "checkpoint create",
+        Command::Checkpoint(CheckpointCommand::Delete { .. }) => "checkpoint delete",
+        Command::Rollback { .. } => "rollback",
         Command::Media(MediaCommand::Remove { .. }) => "media remove",
         Command::Rom(RomCommand::Add { .. }) => "rom add",
         Command::System(SystemCommand::Add { .. }) => "system add",

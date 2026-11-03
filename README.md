@@ -501,6 +501,47 @@ Media names and paths never mix: `--media` takes only registered names, and `--c
 Installation CDs and floppies are copyrighted like ROMs and System Software; register
 your own, and don't redistribute them.
 
+## Checkpoints
+
+A checkpoint is a saved copy of a machine's boot disk, to come back to after an
+experiment, a failed install, or a guest that won't start any more:
+
+```sh
+macman checkpoint create wombat-6 --name clean-install
+macman checkpoint list wombat-6
+macman rollback wombat-6 --checkpoint clean-install
+macman checkpoint delete wombat-6 --name clean-install
+```
+
+Without `--name`, a checkpoint is named for when it was made, in UTC, as
+`2026-11-03T21-04-05Z`. These are copies of a disk, not snapshots of a running Mac:
+macman makes and restores them only with the machine fully shut down, and refuses while
+any emulator has one of its disks open. Shut the guest down, quit the emulator, then
+checkpoint. Only the boot disk is kept. The ROM, `machine.toml`, other disks, and the
+system image the machine came from are left as they are, and so are left alone by a
+rollback. A blank boot disk, one `create --disk-size` made and nothing has written to
+yet, has nothing to keep, and neither has a read-only one.
+
+A checkpoint never changes once it's made. It's copied to the side and checked against
+its SHA-256 before it's listed, so an interrupted `checkpoint create` leaves nothing that
+looks like a checkpoint. `rollback` asks first, or takes `--yes`. It copies the
+checkpoint beside the boot disk, checks that copy against the digest, and only then
+swaps it in, so the disk is either all as it was or all the checkpoint; a checkpoint
+that no longer matches its digest is refused, and nothing changes. The checkpoint stays,
+to roll back to again. What's on the boot disk now is lost, unless `--save NAME` keeps
+it as a checkpoint first, which makes the rollback one to undo. If the boot disk is
+missing, such as deleted by mistake, `rollback` restores it from the checkpoint and says
+so; there's nothing then for `--save` to keep, so given `--save`, it refuses and changes
+nothing.
+
+Each checkpoint is a full copy of the disk, so it takes as much space on the host as the
+disk did, less where the file system shares or skips storage: macman copies with a
+reflink where the file system can, as Btrfs, XFS, and APFS can. They're kept in the
+machine's `checkpoints/` directory. `clone` and `export` take a machine's current disks
+and none of its checkpoints, and `import` leaves a machine's checkpoints alone, as it
+never replaces a machine. `remove` deletes them with the machine, and says how many
+there are when it asks.
+
 ## Disk usage
 
 `macman list` shows each machine's boot disk capacity, as `disk`, and what all its disks
@@ -522,13 +563,15 @@ The two numbers measure different things. A disk's capacity is what the guest se
 file's length, or a Disk Copy image's data, whether or not the host has stored it all.
 Its usage is what the file system has allocated, so a 1 GiB blank disk from `create
 --disk-size` takes almost nothing on the host until the guest writes to it. A machine's
-usage counts every disk in its `machine.toml`, the boot disk and any others, and nothing
-else: not its ROM or the system image it was created from, which `du` lists on their
+usage counts every disk in its `machine.toml`, the boot disk and any others, and its
+[checkpoints](#checkpoints), and nothing else: not its ROM or the system image it was created from, which `du` lists on their
 own, and not a run's temporary copies, such as an ephemeral boot disk, which go when the
-run ends.
+run ends. Checkpoints don't change `disk`, which is the boot disk alone, and `checkpoint
+list` shows what each one uses. A checkpoint still being made isn't counted until it's
+done.
 
 `du` sorts by usage, then by type and name, so its order is the same every time. An entry
-whose usage can't be measured, such as a machine with a missing disk, shows `-`, never
+whose usage can't be measured, such as a machine with a missing disk or checkpoint, shows `-`, never
 `0 B`, and comes after the rest; listings carry on past it.
 
 Usage is allocation as the platform reports it, `st_blocks` on Linux and macOS and the
@@ -537,7 +580,7 @@ storage shared between files: a reflinked or deduplicated copy, as Btrfs, XFS, a
 can make, is counted in full for each file that shares it, so totals can overstate what
 removing something would free. Transparent compression may be
 reported either way, depending on the file system. Hard links to one file are counted
-once within a machine. Elsewhere macman makes copies rather than links, so they don't
+once within a machine, checkpoints included. Elsewhere macman makes copies rather than links, so they don't
 arise.
 
 `--json` gives the raw byte counts: `system_disk_capacity_bytes` and

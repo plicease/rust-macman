@@ -658,6 +658,33 @@ fn registered_media_install_a_blank_machine_and_are_never_written() {
 }
 
 #[test]
+fn a_machine_installed_from_a_cd_checkpoints_once_it_has_a_system() {
+    let h = harness!();
+    h.cmd(&["create", "new", "--rom", "beige", "--disk-size", "2M"])
+        .unwrap();
+    let error = h
+        .cmd(&["checkpoint", "create", "new", "--name", "empty"])
+        .unwrap_err();
+    assert!(error.to_string().contains("blank"), "{error}");
+
+    // The emulator stands in for an installer, writing to the blank disk.
+    let (cd, _) = write_partitioned_disk(h.root.path(), "installer.iso");
+    h.cmd(&["run", "new", "--cdrom", cd.to_str().unwrap()])
+        .unwrap();
+    let disk = h.paths.machine("new").join("system.dsk");
+    let installed = fs::read(&disk).unwrap();
+    h.cmd(&["checkpoint", "create", "new", "--name", "installed"])
+        .unwrap();
+    assert!(installed.windows(7).any(|w| w == b"written"));
+    // Something the guest does afterward, which the rollback undoes.
+    fs::write(&disk, vec![0xEEu8; 2 << 20]).unwrap();
+    h.cmd(&["rollback", "new", "--checkpoint", "installed", "--yes"])
+        .unwrap();
+    assert!(fs::read(&disk).unwrap() == installed, "not restored");
+    assert_eq!(fs::metadata(&disk).unwrap().len(), 2 << 20);
+}
+
+#[test]
 fn a_blank_machine_can_be_cloned_exported_and_imported() {
     let h = harness!();
     h.cmd(&["create", "new", "--rom", "beige", "--disk-size", "2M"])

@@ -10,11 +10,12 @@
 //! what removing a file would free. Hard links to one file are counted once
 //! within a total.
 
+use crate::checkpoint;
 use crate::disk::{self, Classification, DiskFormat};
 use crate::machine::Machine;
 use crate::paths::Paths;
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// What identifies a file on its volume, so hard links are counted once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -161,12 +162,27 @@ pub fn format_usage(bytes: Option<u64>) -> String {
     bytes.map_or_else(|| "-".to_string(), format_bytes)
 }
 
-/// What a machine's persistent disks take on the host: every disk its
-/// definition lists, and nothing a run makes for itself, such as an ephemeral
-/// copy, which lives in the session and goes with it.
+/// What a machine keeps on the host: every disk its definition lists, and
+/// every published checkpoint, in one total, so a file reached both ways is
+/// counted once. Not what a run makes for itself, such as an ephemeral copy,
+/// which lives in the session and goes with it, nor a checkpoint still being
+/// written, which has no metadata yet. `None` if any of it can't be measured,
+/// including a checkpoint whose image is missing.
 pub fn machine_used(paths: &Paths, machine: &Machine) -> Option<u64> {
-    let disks = machine.disk_paths(paths).ok()?;
-    allocated_total(disks.iter().map(|(path, _)| path.as_path()))
+    let mut files: Vec<PathBuf> = machine
+        .disk_paths(paths)
+        .ok()?
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
+    for checkpoint in checkpoint::list(paths, &machine.name).ok()? {
+        files.push(checkpoint::image_file(
+            paths,
+            &machine.name,
+            &checkpoint.name,
+        ));
+    }
+    allocated_total(files.iter().map(PathBuf::as_path))
 }
 
 /// The capacity of a machine's boot disk as the guest sees it: the data of a

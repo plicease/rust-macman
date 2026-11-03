@@ -972,3 +972,189 @@ fn disk_usage_is_allocated_space_listed_smallest_first() {
         .collect();
     assert_eq!(order, text_order, "the same order as the text");
 }
+
+#[test]
+fn checkpoints_count_toward_a_machine_but_not_its_capacity() {
+    use serde_json::Value;
+    let env = Env::new();
+    env.register();
+    env.create("wombat-6");
+    let json = |args: &[&str]| -> Value {
+        let mut all = vec!["--json"];
+        all.extend_from_slice(args);
+        serde_json::from_str(&env.ok(&all)).unwrap()
+    };
+    let listed = || json(&["list"])["machines"][0].clone();
+    let du_used = || {
+        json(&["du"])["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["type"] == "machine")
+            .unwrap()["host_disk_used_bytes"]
+            .clone()
+    };
+    let checkpoints = || json(&["checkpoint", "list", "wombat-6"])["checkpoints"].clone();
+    let alone = listed()["host_disk_used_bytes"].as_u64().unwrap();
+    assert_eq!(du_used(), alone);
+    assert_eq!(checkpoints(), serde_json::json!([]));
+
+    env.ok(&["checkpoint", "create", "wombat-6", "--name", "first"]);
+    env.ok(&["checkpoint", "create", "wombat-6", "--name", "second"]);
+    let both = checkpoints();
+    let entries = both.as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["name"], "first");
+    assert_eq!(entries[0]["disk"], "system.dsk");
+    assert_eq!(entries[0]["size"], 800 * 1024);
+    assert_eq!(entries[0]["sha256"].as_str().unwrap().len(), 64);
+    let own: u64 = entries
+        .iter()
+        .map(|e| e["host_disk_used_bytes"].as_u64().unwrap())
+        .sum();
+    assert!(own > 0);
+    let machine = listed();
+    assert_eq!(machine["host_disk_used_bytes"], alone + own);
+    assert_eq!(machine["system_disk_capacity_bytes"], 800 * 1024);
+    assert_eq!(du_used(), alone + own);
+    let text = env.ok(&["checkpoint", "list", "wombat-6"]);
+    assert!(text.lines().next().unwrap().starts_with("first"), "{text}");
+    assert!(text.contains("used "), "{text}");
+
+    // A staged image, never published, isn't a checkpoint and isn't counted.
+    let dir = env.path().join("data/macman/machines/wombat-6/checkpoints");
+    std::fs::write(dir.join("partial.dsk"), vec![7u8; 256 * 1024]).unwrap();
+    assert_eq!(listed()["host_disk_used_bytes"], alone + own);
+    assert_eq!(checkpoints().as_array().unwrap().len(), 2);
+    std::fs::remove_file(dir.join("partial.dsk")).unwrap();
+
+    let second = entries[1]["host_disk_used_bytes"].as_u64().unwrap();
+    env.ok(&[
+        "checkpoint",
+        "delete",
+        "wombat-6",
+        "--name",
+        "first",
+        "--yes",
+    ]);
+    assert_eq!(listed()["host_disk_used_bytes"], alone + second);
+    assert_eq!(du_used(), alone + second);
+
+    // Rolling back replaces the disk in place: the total is the same pieces.
+    env.ok(&["rollback", "wombat-6", "--checkpoint", "second", "--yes"]);
+    let after = listed()["host_disk_used_bytes"].as_u64().unwrap();
+    assert!(after > second, "{after}");
+    assert_eq!(du_used(), after);
+    assert_eq!(listed()["system_disk_capacity_bytes"], 800 * 1024);
+
+    // A failed operation leaves nothing behind to count.
+    let error = env.fails(&["checkpoint", "create", "wombat-6", "--name", "second"]);
+    assert!(error.contains("already has a checkpoint"), "{error}");
+    assert_eq!(listed()["host_disk_used_bytes"], after);
+
+    // A checkpoint whose image is gone leaves the total unknown, not short.
+    let image = dir.join("second.dsk");
+    let mut permissions = std::fs::metadata(&image).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    std::fs::set_permissions(&image, permissions).unwrap();
+    std::fs::remove_file(&image).unwrap();
+    assert!(listed()["host_disk_used_bytes"].is_null());
+    assert!(du_used().is_null());
+    let du = env.ok(&["du"]);
+    let line = du.lines().find(|l| l.contains("wombat-6")).unwrap();
+    assert!(line.ends_with(" -"), "{du}");
+    assert!(checkpoints()[0]["host_disk_used_bytes"].is_null());
+
+    let error = env.fails(&["--json", "checkpoint", "create", "wombat-6"]);
+    assert!(error.contains("--json isn't supported"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_checkpoint_hard_linked_to_the_disk_counts_once() {
+    let env = Env::new();
+    env.register();
+    env.create("wombat-6");
+    let used = || -> serde_json::Value {
+        let list: serde_json::Value = serde_json::from_str(&env.ok(&["--json", "list"])).unwrap();
+        list["machines"][0]["host_disk_used_bytes"].clone()
+    };
+    let alone = used().as_u64().unwrap();
+    env.ok(&["checkpoint", "create", "wombat-6", "--name", "kept"]);
+    // Replaced by a link to the live disk, the checkpoint adds nothing.
+    let image = env
+        .path()
+        .join("data/macman/machines/wombat-6/checkpoints/kept.dsk");
+    std::fs::remove_file(&image).unwrap();
+    std::fs::hard_link(env.machine_disk("wombat-6"), &image).unwrap();
+    assert_eq!(used(), alone);
+}
+
+#[test]
+fn rollback_restores_a_missing_boot_disk_but_wont_pretend_to_save_it() {
+    let env = Env::new();
+    env.register();
+    env.create("wombat-6");
+    env.ok(&["checkpoint", "create", "wombat-6", "--name", "clean"]);
+    let disk = env.machine_disk("wombat-6");
+    let original = std::fs::read(&disk).unwrap();
+    std::fs::remove_file(&disk).unwrap();
+    let names = || -> Vec<serde_json::Value> {
+        let list: serde_json::Value =
+            serde_json::from_str(&env.ok(&["--json", "checkpoint", "list", "wombat-6"])).unwrap();
+        list["checkpoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].clone())
+            .collect()
+    };
+
+    // There's nothing to save, so --save is refused, not skipped.
+    let error = env.fails(&[
+        "rollback",
+        "wombat-6",
+        "--checkpoint",
+        "clean",
+        "--save",
+        "before",
+        "--yes",
+    ]);
+    assert!(error.contains("missing its boot disk"), "{error}");
+    assert!(error.contains("without --save"), "{error}");
+    assert!(error.contains("nothing was changed"), "{error}");
+    assert!(!disk.exists());
+    assert_eq!(names(), ["clean"]);
+
+    // Without it, the rollback restores the disk, and says that's what it did.
+    let text = env.ok(&["rollback", "wombat-6", "--checkpoint", "clean", "--yes"]);
+    assert!(
+        text.contains("Restored the missing boot disk of wombat-6 from checkpoint clean"),
+        "{text}"
+    );
+    assert!(std::fs::read(&disk).unwrap() == original, "not restored");
+    assert_eq!(names(), ["clean"]);
+
+    // With the disk back, --save works as usual.
+    let text = env.ok(&[
+        "rollback",
+        "wombat-6",
+        "--checkpoint",
+        "clean",
+        "--save",
+        "before",
+        "--yes",
+    ]);
+    assert!(
+        text.contains("Saved the boot disk of wombat-6 as checkpoint before"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Rolled wombat-6 back to checkpoint clean"),
+        "{text}"
+    );
+    let mut all = names();
+    all.sort_by_key(ToString::to_string);
+    assert_eq!(all, ["before", "clean"]);
+}
