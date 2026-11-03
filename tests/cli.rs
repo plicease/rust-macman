@@ -661,6 +661,21 @@ fn doctor_reports_damage_without_leaking_paths() {
     assert!(!text.contains(env.path().to_str().unwrap()), "{text}");
 }
 
+/// Output that isn't a terminal, as here, is plain, so it can be read by
+/// programs and saved to files.
+#[test]
+fn doctor_writes_no_color_to_a_pipe() {
+    let env = Env::new();
+    env.register();
+    env.create("m");
+    fs::remove_file(env.machine_disk("m")).unwrap();
+    let output = env.run(&["doctor"]);
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("[FAIL] machine m cannot run"), "{text}");
+    assert!(text.contains("[  ok]"), "{text}");
+    assert!(!text.contains('\x1b'), "{text:?}");
+}
+
 /// The native folders, reached through a path with a space and non-ASCII
 /// characters, on a system where nothing sets `HOME` or `XDG_*`.
 #[cfg(windows)]
