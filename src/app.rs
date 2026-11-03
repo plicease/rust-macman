@@ -812,18 +812,11 @@ impl App {
     }
 
     fn doctor(&self, verbose: bool) -> Result<u8> {
+        let color = stdout_takes_color();
         let mut failed = false;
         for check in &self.doctor_checks(verbose)? {
-            let label = match check.level {
-                CheckLevel::Ok => "ok",
-                CheckLevel::Warn => "warn",
-                CheckLevel::Fail => "FAIL",
-            };
             failed |= check.level == CheckLevel::Fail;
-            println!("[{label:>4}] {}", check.message);
-            if let Some(fix) = &check.fix {
-                println!("       {fix}");
-            }
+            print!("{}", doctor_line(check, color));
         }
         Ok(u8::from(failed))
     }
@@ -1163,9 +1156,86 @@ fn exit_code(status: ExitStatus) -> u8 {
     1
 }
 
+/// One `doctor` check as printed: its status, its message, and any fix on the
+/// next line. With `color`, only the status word is colored, so the rest reads
+/// the same, and lines up the same, as without.
+fn doctor_line(check: &Check, color: bool) -> String {
+    let (label, ansi) = match check.level {
+        CheckLevel::Ok => ("ok", "32"),
+        CheckLevel::Warn => ("warn", "33"),
+        CheckLevel::Fail => ("FAIL", "31"),
+    };
+    let label = format!("{label:>4}");
+    let label = if color {
+        format!("\x1b[{ansi}m{label}\x1b[0m")
+    } else {
+        label
+    };
+    let mut line = format!("[{label}] {}\n", check.message);
+    if let Some(fix) = &check.fix {
+        line.push_str(&format!("       {fix}\n"));
+    }
+    line
+}
+
+/// Whether to color what goes to stdout: only a terminal there counts, never
+/// one on stderr alone, and `NO_COLOR` turns it off.
+fn stdout_takes_color() -> bool {
+    std::io::stdout().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
+        && enable_ansi()
+}
+
+/// Windows consoles show escape codes literally until asked not to.
+#[cfg(windows)]
+fn enable_ansi() -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::{
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, SetConsoleMode,
+    };
+    let handle = std::io::stdout().as_raw_handle();
+    let mut mode = 0;
+    // SAFETY: the handle is this process's stdout, and `mode` outlives both calls.
+    unsafe {
+        GetConsoleMode(handle, &mut mode) != 0
+            && (mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0
+                || SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0)
+    }
+}
+
+#[cfg(not(windows))]
+fn enable_ansi() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{accepts_repair, table};
+    use super::{Check, accepts_repair, doctor_line, table};
+
+    #[test]
+    fn doctor_colors_only_the_status_and_only_when_asked() {
+        let checks = [
+            (Check::ok("fine"), "32", "  ok"),
+            (Check::warn("iffy", "do this"), "33", "warn"),
+            (Check::fail("broken", "do that"), "31", "FAIL"),
+        ];
+        for (check, ansi, label) in checks {
+            let plain = doctor_line(&check, false);
+            assert!(!plain.contains('\x1b'), "{plain:?}");
+            assert!(plain.starts_with(&format!("[{label}] {}\n", check.message)));
+
+            let colored = doctor_line(&check, true);
+            let status = format!("[\x1b[{ansi}m{label}\x1b[0m] {}\n", check.message);
+            assert!(colored.starts_with(&status), "{colored:?}");
+            assert_eq!(
+                colored
+                    .replace(&format!("\x1b[{ansi}m"), "")
+                    .replace("\x1b[0m", ""),
+                plain,
+                "the same text, with only the status colored"
+            );
+        }
+    }
 
     fn rows(rows: &[&[&str]]) -> Vec<Vec<String>> {
         rows.iter()

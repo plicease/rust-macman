@@ -35,7 +35,9 @@ macOS needs Apple's command line tools, or Xcode with its license accepted:
 xcode-select --install
 ```
 
-Run `macman doctor` to check your setup.
+Run `macman doctor` to check your setup. On a terminal it colors each status, green for
+`ok`, yellow for `warn`, and red for `FAIL`. Redirected output, or any with `NO_COLOR` set,
+is plain text.
 
 ## Usage
 
