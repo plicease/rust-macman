@@ -50,8 +50,7 @@ use super::macemu::{
 };
 use super::source::{self, Source, SourcePin, tool_exists};
 use super::{
-    CdImage, Check, EmulatorBackend, Executable, LaunchRequest, macemu_windows,
-    sheepshaver_windows,
+    CdImage, Check, EmulatorBackend, Executable, LaunchRequest, macemu_windows, sheepshaver_windows,
 };
 use crate::disk::{self, Classification, DiskFormat};
 use crate::fsutil::sha256_bytes;
