@@ -171,6 +171,7 @@ fn roms_and_systems_are_listed() {
     assert_eq!(rom["sha256"].as_str().unwrap().len(), 64);
     assert_eq!(rom["models"], serde_json::json!(["512ke", "plus"]));
     assert_eq!(rom["backend"], "minivmac");
+    assert_eq!(rom["emulators"], serde_json::json!(["minivmac"]));
 
     let systems = env.report(&["--json", "system", "list"]);
     let system = &systems["systems"][0];
@@ -319,6 +320,129 @@ fn bad_arguments_are_a_json_error_too() {
     let (code, value) = env.json(&["--json", "no-such-command"]);
     assert_eq!(code, Some(2));
     assert!(value["error"].is_string(), "{value}");
+}
+
+/// Synthetic images of each kind macman tells apart, with no Apple code.
+fn register_rom_kinds(env: &Env) {
+    let dir = env.path();
+    let mut quadra = vec![0u8; 1024 * 1024];
+    quadra[8..10].copy_from_slice(&[0x06, 0x7C]);
+    let mut old_world = vec![0u8; 4 * 1024 * 1024];
+    old_world[0x30_D064..0x30_D06C].copy_from_slice(b"Boot TNT");
+    let mut new_world = b"<CHRP-BOOT> constant lzss-offset ".to_vec();
+    new_world.resize(64 * 1024, 0);
+    // A Classic ROM whose version word is also a 32-bit clean one's. The word
+    // it replaces moves further in, so the checksum still holds.
+    let both = write_rom(dir, "both.bin", 0xA49F_9914, 512 * 1024);
+    let mut both_bytes = fs::read(&both).unwrap();
+    assert_eq!(both_bytes[8..10], [0xFF, 0xFF]);
+    assert_eq!(both_bytes[200 * 1024..200 * 1024 + 2], [0, 0]);
+    both_bytes[8..10].copy_from_slice(&[0x06, 0x7C]);
+    both_bytes[200 * 1024..200 * 1024 + 2].copy_from_slice(&(0xFFFFu16 - 0x067C).to_be_bytes());
+    for (name, bytes) in [
+        ("quadra", quadra),
+        ("tnt", old_world),
+        ("newworld", new_world),
+        ("both", both_bytes),
+        ("mystery", vec![0x5A; 300 * 1024]),
+    ] {
+        let file = dir.join(format!("{name}.rom"));
+        fs::write(&file, bytes).unwrap();
+        env.ok(&["rom", "add", file.to_str().unwrap(), "--name", name]);
+    }
+}
+
+#[test]
+fn each_rom_lists_every_emulator_whose_check_it_passes() {
+    let env = Env::new();
+    env.register();
+    register_rom_kinds(&env);
+    let roms = env.report(&["--json", "rom", "list"]);
+    let emulators: Vec<(String, Value, Value)> = roms["roms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|rom| {
+            let name = rom["name"].as_str().unwrap().to_string();
+            (name, rom["emulators"].clone(), rom["backend"].clone())
+        })
+        .collect();
+    let expect = |name: &str, list: Value, backend: Value| {
+        let found = emulators.iter().find(|(n, ..)| n == name).unwrap();
+        assert_eq!((&found.1, &found.2), (&list, &backend), "{name}");
+    };
+    expect(
+        "plus-v3",
+        serde_json::json!(["minivmac"]),
+        "minivmac".into(),
+    );
+    expect(
+        "quadra",
+        serde_json::json!(["basilisk2"]),
+        "basilisk2".into(),
+    );
+    expect(
+        "tnt",
+        serde_json::json!(["sheepshaver"]),
+        "sheepshaver".into(),
+    );
+    expect(
+        "newworld",
+        serde_json::json!(["sheepshaver"]),
+        "sheepshaver".into(),
+    );
+    expect(
+        "both",
+        serde_json::json!(["minivmac", "basilisk2"]),
+        "minivmac".into(),
+    );
+    expect("mystery", serde_json::json!([]), Value::Null);
+
+    let text = String::from_utf8(env.run(&["rom", "list"]).stdout).unwrap();
+    let line = |name: &str| {
+        let line = text
+            .lines()
+            .find(|line| line.starts_with(&format!("{name} ")))
+            .unwrap_or_else(|| panic!("{name}: {text}"));
+        line.split("  ")
+            .filter(|cell| !cell.is_empty())
+            .map(str::trim)
+            .collect::<Vec<_>>()
+    };
+    let cells = |name: &str| {
+        let mut cells = line(name);
+        cells.remove(3); // the hash
+        cells
+    };
+    assert_eq!(
+        cells("plus-v3"),
+        ["plus-v3", "128K", "512ke/plus", "minivmac"]
+    );
+    assert_eq!(
+        cells("quadra"),
+        ["quadra", "1024K", "32-bit clean", "basilisk2"]
+    );
+    assert_eq!(
+        cells("tnt"),
+        ["tnt", "4096K", "PowerPC Old World", "sheepshaver"]
+    );
+    assert_eq!(
+        cells("newworld"),
+        ["newworld", "64K", "PowerPC New World", "sheepshaver"]
+    );
+    assert_eq!(
+        cells("both"),
+        [
+            "both",
+            "512K",
+            "classic, 32-bit clean",
+            "minivmac/basilisk2"
+        ]
+    );
+    assert_eq!(
+        cells("mystery"),
+        ["mystery", "300K", "unrecognised", "unknown"]
+    );
 }
 
 #[test]

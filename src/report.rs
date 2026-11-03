@@ -141,8 +141,10 @@ pub struct RomEntry {
     pub sha256: String,
     /// Mini vMac models this is a genuine ROM for.
     pub models: Vec<String>,
-    /// The backend it suits, if macman recognizes it.
+    /// The first of `emulators`, kept for scripts written before it.
     pub backend: Option<&'static str>,
+    /// Every backend whose ROM check it passes; empty if none.
+    pub emulators: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
