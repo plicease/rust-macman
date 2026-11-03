@@ -106,6 +106,14 @@ with a 68030 setting.
 The macOS smoke test covered Shut Down from inside the guest, killing the emulator, killing
 macman, and rebuilding a damaged build. Homebrew hasn't been tried, only MacPorts.
 
+Installing from a CD has been tried on Linux x86-64 only, and the other hosts refuse it. A
+machine made with `--disk-size 1G`, the Quadra 650 ROM, and 128M started from the Mac OS 8.1
+CD image through `macman run --cdrom`, offered to initialize the disk, and took a basic
+install, with "Update Apple Hard Disk Drivers" turned off. After Shut Down, which ended the
+run normally, it started Mac OS 8.1 from its own disk without the CD. The ISO was unchanged.
+With cue sheets, a Mac OS 8.1 machine started from its own disk with a plain and a Joliet ISO
+9660 image attached, and both mounted as data discs whose files the Finder showed.
+
 The pin is commit `f532be3d3d70` of [kanjitalk755/macemu](https://github.com/kanjitalk755/macemu),
 the maintained fork, and its SHA-256 is that of the archive GitHub generates for it. If
 GitHub changed how it generates archives, downloads would be refused, not trusted.
@@ -118,7 +126,7 @@ what this backend is for.
 
 | Host | Status |
 |---|---|
-| Linux x86-64 | Candidate: **builds and boots Mac OS 8.1**, smoke test unfinished |
+| Linux x86-64 | Candidate: **boots Mac OS 8.1, and installs and boots 9.0.4**, smoke test unfinished |
 | Windows x86-64 | No: refused |
 | macOS ARM64 | No: refused |
 
@@ -139,11 +147,40 @@ These parts of the smoke test have been seen to work on that host:
 - A 68k ROM is refused. A ROM macman accepts and the emulator refuses, with
   `Unsupported ROM type.` and exit code 0, is reported as a failed start.
 - Killing the emulator is reported as signal 9, and a crash as signal 11.
+- Shut Down from inside the guest ends the run normally, and leaves the disk marked
+  cleanly unmounted.
+- Installing from a CD, below, and then cloning, exporting, and importing the installed
+  machine, whose copies are byte for byte the same and boot.
 
-These haven't been tested: Shut Down from inside the guest, sound on a real device, `slirp`
-networking, a shared folder, a CD or a read-only disk mounted in a running guest, killing
-macman, rebuilding a damaged build, booting an imported machine, and any installation done
-under SheepShaver itself.
+These haven't been tested: sound on a real device, `slirp` networking, a shared folder, a
+read-only disk mounted in a running guest, killing macman, and rebuilding a damaged build.
+
+### Installing from a CD
+
+On the same host, with a retail Mac OS 9.0.4 CD image (a partitioned ISO) and the New World
+ROM:
+
+1. `macman create ss904 --backend sheepshaver --rom nw --disk-size 1G --memory 256M` made
+   a 1G sparse disk, using 2M on the host.
+2. `macman run ss904 --cdrom <the ISO>` started from the CD, which showed as a CD, and the
+   Finder offered to initialize the blank disk, as Mac OS Standard.
+3. The installer hung at "Updating Apple hard disk drivers". After a forced quit, the next
+   run with the CD, and the installer with that option turned off, installed Mac OS 9
+   in about two minutes. Shut Down in the guest then ended the run normally.
+4. `macman run ss904`, without `--cdrom`, started Mac OS 9 from its own disk, at the Setup
+   Assistant.
+5. With a working system on its disk, a run with the 9.0.4 CD still started from the CD. A
+   plain ISO 9660 image, with no HFS volume, didn't stop it starting from its disk.
+6. Before cue sheets, a plain ISO 9660 image showed in Mac OS 9 as "Audio CD 1", holding one
+   audio track. With them, plain, Joliet, and Rock Ridge images made by `genisoimage` and
+   `xorriso` mounted as data discs and opened in the Finder, four at once. With the
+   emulator set to start from a CD, the first drive's ISO 9660 disc never mounted, so that's
+   now only set for a disc with HFS. With a plain ISO given before the 9.0.4 CD, the Mac
+   started from the 9.0.4 CD, whose system offered to initialize the plain disc.
+
+The ISOs were unchanged after every run. The same 9.0.4 CD also started on the Old World
+ROM, as did the Mac OS 8.1 CD, and the Old World ROM offered to initialize a blank disk
+too. Nothing was installed with it.
 
 Windows and macOS are refused, whatever Basilisk II does there. Upstream's Windows build
 is 32-bit, and macman's 64-bit recipe is for Basilisk II, whose memory and JIT
@@ -154,8 +191,11 @@ would need a recipe of its own, and real tests.
 |---|---|---|
 | Mac OS 8.1 | Old World 4M dump (TNT nanokernel) | Boots to the Finder, 128M at 800x600. The disk was installed under Basilisk II |
 | Mac OS 8.1 | New World `Mac OS ROM` (labelled 8.6) | **Crashes the emulator** (SIGSEGV), from the disk or the CD image |
+| Mac OS 8.1 CD | Old World 4M dump (TNT nanokernel) | Starts from the CD |
+| Mac OS 9.0.4 | New World `Mac OS ROM` (labelled 8.6) | Installed from the CD, then boots from its own disk |
+| Mac OS 9.0.4 CD | Old World 4M dump (TNT nanokernel) | Starts from the CD. Not installed |
 | No system, a blank disk | Either of those ROMs | Stays up. New World reaches the question-mark disk |
-| Mac OS 7.5.2 to 8.0, 8.5 to 9.0.4 | One that suits the guest | Untested |
+| Mac OS 7.5.2 to 8.0, 8.5 to 9.0 | One that suits the guest | Untested |
 | Mac OS 9.1, 9.2.x, Mac OS X | Any | Not claimed. The emulator decodes such ROMs, but macman makes no promise |
 
 macman accepts a 4M dump with a nanokernel the emulator knows (TNT, Alchemy, Zanzibar,
@@ -163,10 +203,9 @@ Gazelle, Gossamer, or NewWorld), or a compressed `Mac OS ROM` file under 4M, and
 everything else. That says it can be decoded, not that a given guest will boot from it.
 
 The New World crash happened with the JIT on or off, and at 64M, 128M, and 256M, and only
-once a Mac OS 8.1 system was involved. New World ROMs were made for Mac OS 8.5 and later,
-so the likely cause is that pairing, but that isn't confirmed: no 8.5 or later guest has
-been tried, so no New World ROM has booted anything yet. Until then, use an Old World ROM
-for Mac OS 8.1.
+once a Mac OS 8.1 system was involved. The same ROM starts and installs Mac OS 9.0.4, and
+New World ROMs were made for Mac OS 8.5 and later, so the cause is most likely the pairing.
+Use an Old World ROM for Mac OS 8.1.
 
 It's a generic PowerPC Mac: the emulator patches the ROM to look like a Power Mac 9500,
 and models no particular machine. No Power Mac's own hardware or timing is represented.

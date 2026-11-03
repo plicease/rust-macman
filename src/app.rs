@@ -2,14 +2,17 @@
 
 use crate::archive::{self, Outcome};
 use crate::backend::minivmac::{MANIFEST, Manifest};
-use crate::backend::{Backends, Check, CheckLevel, LaunchRequest, ResolvedDisk};
+use crate::backend::{
+    Backends, CdImage, Check, CheckLevel, EmulatorBackend, LaunchRequest, ResolvedDisk,
+};
 use crate::backend::{basilisk2, sheepshaver};
 use crate::cli::{
     Cli, Command, ConfigCommand, CreateArgs, DiskCommand, RomCommand, RunArgs, SystemCommand,
 };
 use crate::disk::{self, Classification, DiskFormat, ImageLock, LockMode, Session, SessionRecord};
 use crate::fsutil::{
-    atomic_copy, list_dir, read_toml, sha256_file, validate_name, without_verbatim_prefix,
+    atomic_copy, list_dir, parse_disk_size, read_toml, sha256_file, validate_name,
+    without_verbatim_prefix,
 };
 use crate::machine::{
     Basilisk2Settings, Config, Disk, Display, EmulatorConfig, Hardware, Machine, SCHEMA_VERSION,
@@ -375,17 +378,33 @@ impl App {
             None => bail!("--model is required, such as --model plus"),
         };
         let (rom, rom_path) = registry::load_rom(&self.paths, &args.rom)?;
-        let (system, template) = registry::load_system(&self.paths, &args.system)?;
-        let format = disk::detect_format(&template)?;
-        if let Some(model) = model
-            && format == disk::DiskFormat::RawHfs
-            && !model.reads_hfs()
-        {
-            eprintln!(
-                "warning: model {model} cannot read HFS, so {} will not boot",
-                system.name
-            );
-        }
+        let (version, boot_disk) = match (&args.system, &args.disk_size) {
+            (Some(system), None) => {
+                let (system, template) = registry::load_system(&self.paths, system)?;
+                let format = disk::detect_format(&template)?;
+                if let Some(model) = model
+                    && format == disk::DiskFormat::RawHfs
+                    && !model.reads_hfs()
+                {
+                    eprintln!(
+                        "warning: model {model} cannot read HFS, so {} will not boot",
+                        system.name
+                    );
+                }
+                (system.version, BootDisk::Template(template))
+            }
+            (None, Some(size)) => {
+                if !backend.installs_from_cd() {
+                    bail!(
+                        "--disk-size needs a backend that installs from a CD, which {} doesn't \
+                         on this host; use --system",
+                        backend.name()
+                    );
+                }
+                (None, BootDisk::Blank(parse_disk_size(size)?))
+            }
+            _ => bail!("give --system or --disk-size"),
+        };
 
         let (width, height, depth) = match (&args.display, model) {
             (Some(display), _) => parse_display(display)?,
@@ -419,9 +438,7 @@ impl App {
                 scale: args.scale,
                 fullscreen: args.fullscreen,
             },
-            system: SystemInfo {
-                version: system.version,
-            },
+            system: SystemInfo { version },
             basilisk2: basilisk2_settings,
             sheepshaver: sheepshaver_settings,
             disks: vec![Disk {
@@ -434,11 +451,21 @@ impl App {
         backend.check_rom(&machine, &rom, &rom_path)?;
         backend.validate(&machine)?;
 
-        self.publish_machine(&machine, |dir| {
-            let _guard = disk::lock_image(&self.paths, &template, LockMode::Shared)?;
-            atomic_copy(&template, &dir.join(SYSTEM_DISK))
+        self.publish_machine(&machine, |dir| match &boot_disk {
+            BootDisk::Template(template) => {
+                let _guard = disk::lock_image(&self.paths, template, LockMode::Shared)?;
+                atomic_copy(template, &dir.join(SYSTEM_DISK))
+            }
+            BootDisk::Blank(size) => create_blank_disk(&dir.join(SYSTEM_DISK), *size),
         })?;
-        println!("Created machine {}", args.name);
+        match boot_disk {
+            BootDisk::Template(_) => println!("Created machine {}", args.name),
+            BootDisk::Blank(size) => println!(
+                "Created machine {} with a blank {size}-byte boot disk; install onto it with \
+                 `macman run {} --cdrom FILE`",
+                args.name, args.name
+            ),
+        }
         Ok(())
     }
 
@@ -562,7 +589,18 @@ impl App {
             // On Windows, a running emulator shuts out even readers.
             drop(disk::lock_image(&self.paths, path, LockMode::Shared)?);
             backend.check_disk(path, !saved.readonly)?;
-            if disk::detect_format(path)? == disk::DiskFormat::DiskCopy42 && !saved.readonly {
+            if saved.boot
+                && args.cdroms.is_empty()
+                && disk::classify(path)? == Classification::Blank
+            {
+                eprintln!(
+                    "note: the boot disk of {name} is blank, so it will stop at a question \
+                     mark; install onto it with `macman run {name} --cdrom FILE`"
+                );
+            }
+            if saved_disk_format(backend, path)? == Some(disk::DiskFormat::DiskCopy42)
+                && !saved.readonly
+            {
                 disk::warn_disk_copy_read_only(path);
             }
         }
@@ -573,6 +611,17 @@ impl App {
             if !(partitioned && backend.mounts_partitioned_disks()) {
                 disk::check_attachable(path, args.any_format, !args.readonly)?;
             }
+        }
+        if !args.cdroms.is_empty() && !backend.installs_from_cd() {
+            bail!(
+                "--cdrom isn't available for {} on this host; try --disk",
+                backend.name()
+            );
+        }
+        let mut volumes = Vec::new();
+        for path in &args.cdroms {
+            drop(disk::lock_image(&self.paths, path, LockMode::Shared)?);
+            volumes.push(disk::check_cd_image(path)?);
         }
         backend.validate_disks(&machine, saved_disks.len() + args.disks.len())?;
         self.offer_boot_disk_repair(&machine)?;
@@ -601,6 +650,16 @@ impl App {
         for path in &args.disks {
             disks.push(self.attach(&session, &mut locks, path, !args.readonly, disks.len())?);
         }
+        // Not copied, as these are big, and the emulator opens them read-only.
+        let mut cdroms: Vec<CdImage> = Vec::new();
+        for (path, volume) in args.cdroms.iter().zip(volumes) {
+            locks.push(disk::lock_image(&self.paths, path, LockMode::Shared)?);
+            cdroms.push(CdImage {
+                path: fs::canonicalize(path)
+                    .with_context(|| format!("cannot resolve {}", path.display()))?,
+                volume,
+            });
+        }
         if args.readonly {
             println!(
                 "Attaching read-only throwaway copies of {} disk(s); guest changes cannot reach \
@@ -625,6 +684,7 @@ impl App {
             executable: &executable,
             rom: &rom_path,
             disks: &disks,
+            cdroms: &cdroms,
             workdir: &session.dir,
             verbose,
         });
@@ -914,11 +974,43 @@ impl App {
             }
             // A disk in use belongs to a running machine, and may be unreadable.
             if disk::lock_image(&self.paths, &path, LockMode::Shared).is_ok() {
-                disk::detect_format(&path)?;
+                saved_disk_format(backend, &path)?;
             }
         }
         Ok(())
     }
+}
+
+/// What a new machine's boot disk comes from.
+enum BootDisk {
+    /// A registered system image, to copy.
+    Template(PathBuf),
+    /// Zeros, of this many bytes.
+    Blank(u64),
+}
+
+/// A sparse file where the filesystem allows, and all zeros to whoever reads it.
+/// The guest initializes it, so nothing here formats it.
+fn create_blank_disk(path: &Path, size: u64) -> Result<()> {
+    let file =
+        fs::File::create(path).with_context(|| format!("cannot create {}", path.display()))?;
+    file.set_len(size)
+        .with_context(|| format!("cannot make {} {size} bytes", path.display()))
+}
+
+/// The format of a disk a machine owns. A machine that installs from a CD starts
+/// blank, and what the guest then does with its disk is its own business, so
+/// those give `None`. Anything else has to be a format macman knows.
+fn saved_disk_format(backend: &dyn EmulatorBackend, path: &Path) -> Result<Option<DiskFormat>> {
+    if backend.installs_from_cd()
+        && matches!(
+            disk::classify(path)?,
+            Classification::Blank | Classification::Partitioned(_)
+        )
+    {
+        return Ok(None);
+    }
+    disk::detect_format(path).map(Some)
 }
 
 /// What `macman create` was asked for under `[basilisk2]` or `[sheepshaver]`.

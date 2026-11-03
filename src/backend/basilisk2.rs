@@ -51,7 +51,7 @@ use super::macemu::{
 };
 use super::minivmac::{gcc_target, is_mingw_x64, macos_toolchain_identity};
 use super::source::{self, Source, SourcePin, tool_exists};
-use super::{Check, EmulatorBackend, Executable, LaunchRequest, macemu_windows};
+use super::{CdImage, Check, EmulatorBackend, Executable, LaunchRequest, macemu_windows};
 use crate::disk::{self, Classification, DiskFormat};
 use crate::fsutil::{atomic_copy, sha256_bytes, without_verbatim_prefix};
 use crate::machine::{Basilisk2Settings, Cpu, Display, Machine, Network};
@@ -69,6 +69,11 @@ pub const DEFAULT_DISPLAY: (u32, u32, u32) = (640, 480, 8);
 const LABEL: &str = "Basilisk II";
 const WINDOWS: bool = cfg!(all(windows, target_arch = "x86_64"));
 const MACOS: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+/// Where `run --cdrom` and `create --disk-size` have been tried. On Windows and
+/// macOS the emulator finds CDs its own way, which hasn't been.
+const INSTALLS_FROM_CD: bool = cfg!(all(target_os = "linux", target_arch = "x86_64"));
+/// The reference number of the CD driver (`CDROMRefNum`).
+const CDROM_DRIVER: i32 = -62;
 const EXECUTABLE: &str = if WINDOWS {
     macemu_windows::EXECUTABLE
 } else {
@@ -320,8 +325,19 @@ fn cpu_level(cpu: Cpu) -> u32 {
 /// Upstream's default is `/`, a read-write volume of the whole host, and
 /// `ExtFSInit` gives up on a path it can't `stat`. A shared folder replaces it
 /// from the command line.
-fn preferences(machine: &Machine) -> String {
+///
+/// A run with a CD image turns `nocdrom` off, which installs the CD driver,
+/// and sets `bootdriver` to it, so the Mac starts from the CD through PRAM, if
+/// one can start it (see [`macemu::starts_from_cd`]). The
+/// emulator then adds `/dev/cdrom` too, which can't be prevented.
+fn preferences(machine: &Machine, cdroms: &[CdImage]) -> String {
     let settings = settings(machine);
+    let cdrom = !cdroms.is_empty();
+    let bootdriver = if macemu::starts_from_cd(cdroms) {
+        CDROM_DRIVER
+    } else {
+        0
+    };
     let display = &machine.display;
     let megabytes = megabytes(&machine.hardware.memory).unwrap_or(0);
     let model_id = match settings.cpu {
@@ -341,11 +357,11 @@ fn preferences(machine: &Machine) -> String {
          displaycolordepth {depth}\n\
          mag_rate {scale}\n\
          nosound {nosound}\n\
-         nocdrom true\n\
+         nocdrom {nocdrom}\n\
          jit false\n\
          idlewait true\n\
          bootdrive 0\n\
-         bootdriver 0\n\
+         bootdriver {bootdriver}\n\
          extfs \n\
          {host}",
         name = machine.name,
@@ -357,6 +373,7 @@ fn preferences(machine: &Machine) -> String {
         depth = display.depth,
         scale = display.scale,
         nosound = !settings.sound,
+        nocdrom = !cdrom,
         // Without these, Windows would offer the host's drives and media.
         host = if WINDOWS {
             "enableextfs false\npollmedia false\n"
@@ -371,7 +388,7 @@ fn preferences(machine: &Machine) -> String {
 }
 
 /// The emulator's arguments.
-fn arguments(request: &LaunchRequest<'_>, preferences: &Path) -> Vec<OsString> {
+fn arguments(request: &LaunchRequest<'_>, preferences: &Path, cdroms: &[PathBuf]) -> Vec<OsString> {
     let mut arguments: Vec<OsString> = vec![
         "--config".into(),
         preferences.into(),
@@ -380,6 +397,9 @@ fn arguments(request: &LaunchRequest<'_>, preferences: &Path) -> Vec<OsString> {
     ];
     for disk in request.disks {
         arguments.extend(["--disk".into(), disk_argument(disk)]);
+    }
+    for cdrom in cdroms {
+        arguments.extend(["--cdrom".into(), cdrom.into()]);
     }
     if let Some(folder) = settings(request.machine).shared_folder {
         arguments.extend(["--extfs".into(), folder.into()]);
@@ -525,6 +545,10 @@ impl EmulatorBackend for Basilisk2 {
         true
     }
 
+    fn installs_from_cd(&self) -> bool {
+        INSTALLS_FROM_CD
+    }
+
     fn mounts_partitioned_disks(&self) -> bool {
         true
     }
@@ -551,13 +575,14 @@ impl EmulatorBackend for Basilisk2 {
             }
         }
         let file = request.workdir.join(PREFERENCES);
-        fs::write(&file, preferences(request.machine))
+        fs::write(&file, preferences(request.machine, request.cdroms))
             .with_context(|| format!("cannot write {}", file.display()))?;
 
         let arguments = if WINDOWS {
             windows_arguments(request)?
         } else {
-            arguments(request, &file)
+            let cdroms = macemu::cd_paths(request.workdir, request.cdroms)?;
+            arguments(request, &file, &cdroms)
         };
         let mut command = Command::new(&request.executable.path);
         command.args(arguments).current_dir(request.workdir);
@@ -624,6 +649,7 @@ impl EmulatorBackend for Basilisk2 {
 mod tests {
     use super::*;
     use crate::backend::ResolvedDisk;
+    use crate::disk::CdVolume;
     use crate::machine::{EmulatorConfig, Hardware};
 
     fn backend() -> Basilisk2 {
@@ -664,7 +690,7 @@ mod tests {
 
     #[test]
     fn translates_a_machine_to_preferences() {
-        let text = preferences(&machine());
+        let text = preferences(&machine(), &[]);
         let mut expected = vec![
             "nogui true",
             "title quadra",
@@ -690,6 +716,27 @@ mod tests {
     }
 
     #[test]
+    fn a_cd_turns_on_its_driver_and_is_what_starts() {
+        let hfs = CdImage {
+            path: "/installer.iso".into(),
+            volume: CdVolume::Hfs,
+        };
+        let iso = CdImage {
+            path: "/data.iso".into(),
+            volume: CdVolume::Iso9660,
+        };
+        let text = preferences(&machine(), &[iso.clone(), hfs]);
+        for line in ["nocdrom false", "bootdriver -62"] {
+            assert!(text.lines().any(|l| l == line), "{line}: {text}");
+        }
+        // Starting from a disc with no HFS would fail, and leave it unmounted.
+        let text = preferences(&machine(), &[iso]);
+        for line in ["nocdrom false", "bootdriver 0"] {
+            assert!(text.lines().any(|l| l == line), "{line}: {text}");
+        }
+    }
+
+    #[test]
     fn options_reach_the_preferences() {
         let mut m = machine();
         m.display.fullscreen = true;
@@ -700,7 +747,7 @@ mod tests {
             network: Network::Slirp,
             shared_folder: None,
         });
-        let text = preferences(&m);
+        let text = preferences(&m, &[]);
         for line in [
             "cpu 3",
             "fpu false",
@@ -715,7 +762,7 @@ mod tests {
 
     #[test]
     fn the_guest_gets_no_host_files_unless_it_is_given_a_folder() {
-        let text = preferences(&machine());
+        let text = preferences(&machine(), &[]);
         assert!(
             text.lines().any(|line| line.trim_end() == "extfs"),
             "{text}"
@@ -725,7 +772,7 @@ mod tests {
     #[test]
     fn no_preference_line_can_hold_a_path_or_outgrow_the_parser() {
         // Names are checked elsewhere; the longest here is the title.
-        for line in preferences(&machine()).lines() {
+        for line in preferences(&machine(), &[]).lines() {
             assert!(line.len() < 256, "{line}");
             assert!(!line.contains('/') || line.starts_with("screen"), "{line}");
         }
@@ -755,11 +802,16 @@ mod tests {
             executable: &executable,
             rom: Path::new("/roms/q.rom"),
             disks: &disks,
+            cdroms: &[],
             workdir: Path::new("/session"),
             verbose: false,
         };
         assert_eq!(
-            arguments(&request, Path::new("/session/prefs")),
+            arguments(
+                &request,
+                Path::new("/session/prefs"),
+                &[PathBuf::from("/session/cd-1.cue")]
+            ),
             [
                 "--config",
                 "/session/prefs",
@@ -769,6 +821,8 @@ mod tests {
                 "/boot disk.dsk",
                 "--disk",
                 "*/session/1-app.dsk",
+                "--cdrom",
+                "/session/cd-1.cue",
                 "--extfs",
                 "/shared folder",
             ]

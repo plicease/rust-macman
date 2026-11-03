@@ -270,6 +270,40 @@ volume needs its HFS wrapper, which disks formatted by Mac OS have. `--readonly`
 `--readonly`, the shared folder stays out of exports, and NVRAM lasts one run. If macman
 is killed, it takes the emulator with it.
 
+## Installing from a CD
+
+A SheepShaver machine, or a Basilisk II one on Linux, can start with a blank disk instead
+of a system image, and install from a CD image of your own:
+
+```sh
+macman create ss904 --backend sheepshaver --rom newworld --disk-size 1G --memory 256M
+macman run ss904 --cdrom Mac-OS-9.0.4.iso
+
+macman create q81 --backend basilisk2 --rom quadra --disk-size 1G --memory 128M
+macman run q81 --cdrom MacOS8_1.iso
+```
+
+Basilisk II on Windows and macOS refuses both options for now, as its builds there find
+CDs in other ways, which haven't been tried. `macman run --disk` still attaches a CD image
+there, as a disk.
+
+`--disk-size` takes K, M, or G, from 1M to 2048G, and makes a sparse file of zeros. It
+isn't formatted: the guest offers to initialize it. It's the machine's own disk from then
+on, and clone, export, and locks treat it like any other.
+
+`--cdrom` attaches an image as a CD for that run only. It's never written to, and never
+copied. It takes a `.iso` or `.toast` image with an HFS volume, partitioned or not, and
+the Mac starts from it. Leave it off to start from the machine's disk. A plain ISO 9660
+image, with no HFS volume, attaches as a data disc, which the Mac reads with ISO 9660 File
+Access but can't start from, so with only such discs it starts from its own disk. It can
+be repeated: discs with HFS go first, and the first is the one the Mac starts from. An
+installer CD's own system may not read a plain ISO 9660 disc, and offers to initialize it,
+which it can't. While a CD image is attached, the guest also sees the host's
+`/dev/cdrom`, if there is one.
+
+If the installer stops at "Updating Apple hard disk drivers", start it again with that
+option turned off under Options. The emulator's disk isn't an Apple drive.
+
 ## Moving machines between hosts
 
 `macman export` writes machines to an archive, with each one's current disks and the

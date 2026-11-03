@@ -258,6 +258,33 @@ pub fn write_toml_new<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     result.with_context(|| format!("cannot write {}", path.display()))
 }
 
+/// The smallest and largest disk `macman create --disk-size` makes. The top is
+/// the limit of an HFS or HFS+ volume under Mac OS 9.
+const MIN_DISK_SIZE: u64 = 1 << 20;
+const MAX_DISK_SIZE: u64 = 2 << 40;
+
+/// A disk size in bytes, from a whole number of K, M, or G, in units of 1024.
+pub fn parse_disk_size(text: &str) -> Result<u64> {
+    let invalid = || anyhow::anyhow!("invalid disk size {text:?}: use a size such as 800M or 1G");
+    let unit = text.chars().last().ok_or_else(invalid)?;
+    let number = &text[..text.len() - unit.len_utf8()];
+    let unit: u64 = match unit.to_ascii_uppercase() {
+        'K' => 1 << 10,
+        'M' => 1 << 20,
+        'G' => 1 << 30,
+        _ => return Err(invalid()),
+    };
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    let size = number
+        .parse::<u64>()
+        .ok()
+        .and_then(|number| number.checked_mul(unit))
+        .filter(|size| (MIN_DISK_SIZE..=MAX_DISK_SIZE).contains(size));
+    size.with_context(|| format!("disk size {text:?} is out of range: use 1M to 2048G"))
+}
+
 /// Names become file names, so restrict them to a safe alphabet.
 pub fn validate_name(kind: &str, name: &str) -> Result<()> {
     let valid_chars = name
@@ -564,5 +591,27 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names.len(), 2, "nothing left behind: {names:?}");
+    }
+
+    #[test]
+    fn disk_sizes_are_whole_units_within_range() {
+        assert_eq!(parse_disk_size("1G").unwrap(), 1 << 30);
+        assert_eq!(parse_disk_size("800m").unwrap(), 800 << 20);
+        assert_eq!(parse_disk_size("1024K").unwrap(), 1 << 20);
+        assert_eq!(parse_disk_size("2048G").unwrap(), 2 << 40);
+        for bad in ["", "G", "1", "1.5G", "-1G", "1 G", "1T", "1GB", "é"] {
+            let error = parse_disk_size(bad).unwrap_err().to_string();
+            assert!(error.contains("invalid disk size"), "{bad:?}: {error}");
+        }
+        for bad in [
+            "0M",
+            "1023K",
+            "2049G",
+            "99999999999999999999G",
+            "18014398509481984G",
+        ] {
+            let error = parse_disk_size(bad).unwrap_err().to_string();
+            assert!(error.contains("out of range"), "{bad:?}: {error}");
+        }
     }
 }

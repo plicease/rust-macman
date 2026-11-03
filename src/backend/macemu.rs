@@ -5,26 +5,29 @@
 
 use super::minivmac::{MANIFEST, Manifest};
 use super::source::{SourcePin, tool_exists};
-use super::{Check, ResolvedDisk};
+use super::{CdImage, Check, ResolvedDisk};
+use crate::disk::CdVolume;
 use crate::fsutil::{sha256_file, write_toml};
 use crate::paths::Paths;
 use anyhow::{Context, Result, bail};
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 
 /// How `ErrorAlert` reports without a GUI (`STR_SHELL_ERROR_PREFIX`).
 const ERROR_PREFIX: &str = "ERROR: ";
 /// SDL for video and sound, and no GTK, whose dialogs would wait for a click
-/// in place of the `ERROR:` lines macman reads.
+/// in place of the `ERROR:` lines macman reads. Cue sheets are for CD images
+/// with no HFS volume: see [`cd_paths`].
 pub const CONFIGURE_OPTIONS: &[&str] = &[
     "--enable-sdl-video",
     "--enable-sdl-audio",
     "--with-gtk=no",
     "--with-esd=no",
+    "--with-bincue",
 ];
 
 /// A commit, as macemu's releases are rare. The archive is one GitHub generates
@@ -190,6 +193,61 @@ pub fn megabytes(memory: &str) -> Option<u32> {
     memory.strip_suffix('M')?.parse().ok()
 }
 
+/// Whether the guest is to start from a CD. A disc with no HFS volume can't
+/// start it, and once Mac OS has tried, it leaves that drive unmounted.
+pub fn starts_from_cd(cdroms: &[CdImage]) -> bool {
+    cdroms.iter().any(|cdrom| cdrom.volume == CdVolume::Hfs)
+}
+
+/// What each CD is given to the emulator as. Discs with HFS go first, as the
+/// first drive is the one the guest starts from, otherwise their order is kept.
+///
+/// The emulator asks a CD image for its table of contents as it would a drive,
+/// with an `ioctl` that fails on a file, so the guest sees a disc of one audio
+/// track. An HFS volume is found by reading blocks, so an HFS disc mounts all
+/// the same, and is passed as it is. ISO 9660 File Access goes by the table,
+/// though, so an ISO 9660 disc gets a cue sheet that makes it one data track.
+/// The emulator joins the sheet's file name to the sheet's own directory, so
+/// the image is linked in beside it, under a name that needs no quoting.
+pub fn cd_paths(workdir: &Path, cdroms: &[CdImage]) -> Result<Vec<PathBuf>> {
+    let mut cdroms = cdroms.to_vec();
+    cdroms.sort_by_key(|cdrom| cdrom.volume != CdVolume::Hfs);
+    let mut paths = Vec::new();
+    for (index, cdrom) in cdroms.iter().enumerate() {
+        if cdrom.volume == CdVolume::Hfs {
+            paths.push(cdrom.path.clone());
+            continue;
+        }
+        let image = format!("cd-{}.iso", index + 1);
+        link(&cdrom.path, &workdir.join(&image))?;
+        let sheet = workdir.join(format!("cd-{}.cue", index + 1));
+        fs::write(&sheet, cue_sheet(&image))
+            .with_context(|| format!("cannot write {}", sheet.display()))?;
+        paths.push(sheet);
+    }
+    Ok(paths)
+}
+
+/// One data track of 2048-byte sectors. The first line has to be `FILE`.
+fn cue_sheet(image: &str) -> String {
+    format!("FILE \"{image}\" BINARY\n  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n")
+}
+
+#[cfg(unix)]
+fn link(original: &Path, link: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(original, link)
+        .with_context(|| format!("cannot link {} into the session", original.display()))
+}
+
+/// Only Linux hosts take CDs.
+#[cfg(not(unix))]
+fn link(original: &Path, _link: &Path) -> Result<()> {
+    bail!(
+        "{} can't be attached as a CD on this host",
+        original.display()
+    )
+}
+
 /// A disk's `--disk` value. A `*` asks for read-only, on top of the throwaway
 /// copy already being a read-only file.
 pub fn disk_argument(disk: &ResolvedDisk) -> OsString {
@@ -320,6 +378,36 @@ pub fn supervise(mut command: Command, label: &str, verbose: bool) -> Result<Exi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn an_iso_9660_disc_is_given_a_data_track_and_hfs_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("session");
+        fs::create_dir(&session).unwrap();
+        let iso = dir.path().join("my \"disc\".iso");
+        fs::write(&iso, vec![0u8; 4096]).unwrap();
+        let cdroms = [
+            CdImage {
+                path: iso.clone(),
+                volume: CdVolume::Iso9660,
+            },
+            CdImage {
+                path: "/installer.toast".into(),
+                volume: CdVolume::Hfs,
+            },
+        ];
+        let paths = cd_paths(&session, &cdroms).unwrap();
+        assert_eq!(
+            paths,
+            [PathBuf::from("/installer.toast"), session.join("cd-2.cue")]
+        );
+        assert_eq!(
+            fs::read_to_string(&paths[1]).unwrap(),
+            "FILE \"cd-2.iso\" BINARY\n  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n"
+        );
+        assert_eq!(fs::read_link(session.join("cd-2.iso")).unwrap(), iso);
+    }
 
     /// The signal goes out when the spawning thread ends, which is what macman
     /// dying looks like from here, without killing the tests.

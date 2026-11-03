@@ -41,7 +41,7 @@ use super::macemu::{
     supervise, tool_checks,
 };
 use super::source::{self, Source, SourcePin};
-use super::{Check, EmulatorBackend, Executable, LaunchRequest};
+use super::{CdImage, Check, EmulatorBackend, Executable, LaunchRequest};
 use crate::disk::{self, Classification, DiskFormat};
 use crate::fsutil::sha256_bytes;
 use crate::machine::{Display, Machine, Network, SheepShaverSettings};
@@ -72,6 +72,8 @@ const UNSUPPORTED_HOST: &str =
 const LOW_MEMORY_ERROR: &str = "Low Memory";
 const LOW_MEMORY_FIX: &str = "run `sudo sysctl vm.mmap_min_addr=0`, which lets programs map \
                               address 0 until the next reboot; see docs/PLATFORMS.md";
+/// The reference number of the CD driver (`CDROMRefNum`).
+const CDROM_DRIVER: i32 = -62;
 const MMAP_MIN_ADDR: &str = "/proc/sys/vm/mmap_min_addr";
 const INSTALL: &str = "install what SheepShaver builds with (Debian/Ubuntu: apt install \
                        build-essential autoconf automake pkg-config libsdl2-dev)";
@@ -193,9 +195,19 @@ fn settings(machine: &Machine) -> SheepShaverSettings {
 ///
 /// `extfs` is there to be empty, as for Basilisk II: upstream's default is `/`,
 /// a read-write volume of the whole host. `nocdrom` keeps the guest off the
-/// host's drive, and CD images are attached with `--disk`.
-fn preferences(machine: &Machine) -> String {
+/// host's drive, but also leaves out the CD driver, so a run with a CD image
+/// turns it off. The emulator then adds `/dev/cdrom` itself, and that can't be
+/// prevented. `bootdriver` is what makes the guest start from the CD, on an Old
+/// World ROM through PRAM, and on a New World one by reordering the drives. It's
+/// set only for a disc that can start a Mac: see [`macemu::starts_from_cd`].
+fn preferences(machine: &Machine, cdroms: &[CdImage]) -> String {
     let settings = settings(machine);
+    let cdrom = !cdroms.is_empty();
+    let bootdriver = if macemu::starts_from_cd(cdroms) {
+        CDROM_DRIVER
+    } else {
+        0
+    };
     let display = &machine.display;
     let megabytes = megabytes(&machine.hardware.memory).unwrap_or(0);
     let screen = if display.fullscreen { "dga" } else { "win" };
@@ -207,11 +219,11 @@ fn preferences(machine: &Machine) -> String {
          screen {screen}/{width}/{height}\n\
          mag_rate {scale}\n\
          nosound {nosound}\n\
-         nocdrom true\n\
+         nocdrom {nocdrom}\n\
          jit true\n\
          idlewait true\n\
          bootdrive 0\n\
-         bootdriver 0\n\
+         bootdriver {bootdriver}\n\
          extfs \n",
         name = machine.name,
         ramsize = u64::from(megabytes) * 1024 * 1024,
@@ -219,6 +231,7 @@ fn preferences(machine: &Machine) -> String {
         height = display.height,
         scale = display.scale,
         nosound = !settings.sound,
+        nocdrom = !cdrom,
     );
     if settings.network == Network::Slirp {
         text.push_str("ether slirp\n");
@@ -228,7 +241,7 @@ fn preferences(machine: &Machine) -> String {
 
 /// The emulator's arguments. Paths go here, as the file's lines are cut at 256
 /// bytes.
-fn arguments(request: &LaunchRequest<'_>, preferences: &Path) -> Vec<OsString> {
+fn arguments(request: &LaunchRequest<'_>, preferences: &Path, cdroms: &[PathBuf]) -> Vec<OsString> {
     let mut arguments: Vec<OsString> = vec![
         "--config".into(),
         preferences.into(),
@@ -237,6 +250,9 @@ fn arguments(request: &LaunchRequest<'_>, preferences: &Path) -> Vec<OsString> {
     ];
     for disk in request.disks {
         arguments.extend(["--disk".into(), disk_argument(disk)]);
+    }
+    for cdrom in cdroms {
+        arguments.extend(["--cdrom".into(), cdrom.into()]);
     }
     if let Some(folder) = settings(request.machine).shared_folder {
         arguments.extend(["--extfs".into(), folder.into()]);
@@ -326,6 +342,10 @@ impl EmulatorBackend for SheepShaver {
         true
     }
 
+    fn installs_from_cd(&self) -> bool {
+        true
+    }
+
     fn mounts_partitioned_disks(&self) -> bool {
         true
     }
@@ -347,12 +367,13 @@ impl EmulatorBackend for SheepShaver {
             bail!("the shared folder {} is missing", folder.display());
         }
         let file = request.workdir.join(PREFERENCES);
-        fs::write(&file, preferences(request.machine))
+        fs::write(&file, preferences(request.machine, request.cdroms))
             .with_context(|| format!("cannot write {}", file.display()))?;
 
+        let cdroms = macemu::cd_paths(request.workdir, request.cdroms)?;
         let mut command = Command::new(&request.executable.path);
         command
-            .args(arguments(request, &file))
+            .args(arguments(request, &file, &cdroms))
             .current_dir(request.workdir);
         supervise(command, LABEL, request.verbose).map_err(|error| {
             let message = error.to_string();
@@ -386,6 +407,7 @@ impl EmulatorBackend for SheepShaver {
 mod tests {
     use super::*;
     use crate::backend::{CheckLevel, ResolvedDisk};
+    use crate::disk::CdVolume;
     use crate::machine::{EmulatorConfig, Hardware};
 
     fn backend() -> SheepShaver {
@@ -427,7 +449,7 @@ mod tests {
     #[test]
     fn translates_a_machine_to_preferences() {
         assert_eq!(
-            lines(&preferences(&machine())),
+            lines(&preferences(&machine(), &[])),
             [
                 "nogui true",
                 "title beige",
@@ -448,9 +470,30 @@ mod tests {
     /// An unknown keyword would only be a warning in the emulator's output.
     #[test]
     fn only_preferences_sheepshaver_has_are_written() {
-        let text = preferences(&machine());
+        let text = preferences(&machine(), &[]);
         for keyword in ["cpu ", "fpu ", "modelid ", "displaycolordepth "] {
             assert!(!text.contains(keyword), "{keyword}: {text}");
+        }
+    }
+
+    #[test]
+    fn a_cd_turns_on_its_driver_and_is_what_starts() {
+        let hfs = CdImage {
+            path: "/installer.iso".into(),
+            volume: CdVolume::Hfs,
+        };
+        let iso = CdImage {
+            path: "/data.iso".into(),
+            volume: CdVolume::Iso9660,
+        };
+        let text = preferences(&machine(), &[iso.clone(), hfs]);
+        for line in ["nocdrom false", "bootdriver -62"] {
+            assert!(text.lines().any(|l| l == line), "{line}: {text}");
+        }
+        // Starting from a disc with no HFS would fail, and leave it unmounted.
+        let text = preferences(&machine(), &[iso]);
+        for line in ["nocdrom false", "bootdriver 0"] {
+            assert!(text.lines().any(|l| l == line), "{line}: {text}");
         }
     }
 
@@ -463,7 +506,7 @@ mod tests {
             network: Network::Slirp,
             shared_folder: None,
         });
-        let text = preferences(&m);
+        let text = preferences(&m, &[]);
         for line in ["screen dga/800/600", "nosound true", "ether slirp"] {
             assert!(lines(&text).contains(&line), "{line}: {text}");
         }
@@ -471,7 +514,7 @@ mod tests {
 
     #[test]
     fn the_guest_gets_no_host_files_unless_it_is_given_a_folder() {
-        let text = preferences(&machine());
+        let text = preferences(&machine(), &[]);
         assert!(
             text.lines().any(|line| line.trim_end() == "extfs"),
             "{text}"
@@ -480,7 +523,7 @@ mod tests {
 
     #[test]
     fn no_preference_line_can_hold_a_path_or_outgrow_the_parser() {
-        for line in preferences(&machine()).lines() {
+        for line in preferences(&machine(), &[]).lines() {
             assert!(line.len() < 256, "{line}");
             assert!(!line.contains('/') || line.starts_with("screen"), "{line}");
         }
@@ -510,11 +553,13 @@ mod tests {
             executable: &executable,
             rom: Path::new("/roms/ppc.rom"),
             disks: &disks,
+            cdroms: &[],
             workdir: Path::new("/session"),
             verbose: false,
         };
+        let cdroms = [PathBuf::from("/installer disc.iso")];
         assert_eq!(
-            arguments(&request, Path::new("/session/prefs")),
+            arguments(&request, Path::new("/session/prefs"), &cdroms),
             [
                 "--config",
                 "/session/prefs",
@@ -524,6 +569,8 @@ mod tests {
                 "/boot disk.dsk",
                 "--disk",
                 "*/session/1-app.dsk",
+                "--cdrom",
+                "/installer disc.iso",
                 "--extfs",
                 "/shared folder",
             ]

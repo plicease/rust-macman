@@ -223,6 +223,7 @@ On Windows it also differs from its Linux self. `src/backend/macemu_windows.rs` 
 - **Host files:** `extfs` is ignored, and `enableextfs` shows whole drives, so it's always off, and a shared folder is refused.
 - **Locks:** `CreateFile` opens disks with no sharing, so Windows protects them itself, and the emulator can outlive macman.
 - **Disks:** `GetFileSize` is read as 32 bits, so disks of 4G or more are refused.
+- **Installing:** `create --disk-size` and `run --cdrom` are refused, here and on macOS, until they're tried there. On Linux they work as for SheepShaver, below.
 
 On macOS ARM64 it builds as on Linux, and differs in these ways:
 
@@ -240,6 +241,8 @@ Read from the pinned macemu source, tested with a stand-in for the emulator, and
 - **Addressing:** upstream's default, real addressing, which needs `vm.mmap_min_addr` to be 0. `doctor` and failed starts say so, and the requirement has been confirmed on a real run.
 - **JIT:** on, unlike Basilisk II, as the interpreter is too slow for its guests.
 - **Hosts:** only Linux x86-64 is offered. Basilisk II's other hosts don't carry over.
+- **Installing:** `create --disk-size` makes a sparse, unformatted boot disk in place of a system image's copy. `run --cdrom` passes images with `--cdrom`, not as disks, and turns `nocdrom` off and sets `bootdriver` to the CD driver's -62 for that run, so the Mac starts from the CD. The emulator opens them read-only, so they're locked shared and not copied. Turning `nocdrom` off also makes the emulator add `/dev/cdrom`. A blank or partitioned boot disk is fine for this backend, as the guest formats its own.
+- **ISO 9660 discs:** the emulator reads a CD image's table of contents with a drive `ioctl`, which fails on a file and leaves the guest seeing one audio track. HFS is found by reading blocks, so HFS discs are passed as they are. An image with only ISO 9660 is linked into the session beside a cue sheet of one `MODE1/2048` track, which the emulator reads with `--with-bincue`, so ISO 9660 File Access sees a data disc. Both emulators share this.
 
 ### Shared code
 

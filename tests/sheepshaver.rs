@@ -9,7 +9,7 @@ mod common;
 
 use anyhow::Result;
 use clap::Parser;
-use common::write_disk;
+use common::{write_disk, write_partitioned_disk};
 use macman::app::App;
 use macman::archive;
 use macman::backend::macemu::pin;
@@ -541,4 +541,107 @@ fn the_production_backends_offer_it_after_the_others() {
     let backends = macman::default_backends(&Paths::under(root.path())).unwrap();
     assert!(backends.get(BACKEND_NAME).is_ok());
     assert_eq!(backends.default_backend().name(), "minivmac");
+}
+
+#[test]
+fn a_blank_machine_installs_from_a_cd_it_does_not_keep() {
+    let h = harness!();
+    h.cmd(&["create", "new", "--rom", "beige", "--disk-size", "2M"])
+        .unwrap();
+    let disk = h.paths.machine("new").join("system.dsk");
+    assert_eq!(fs::metadata(&disk).unwrap().len(), 2 << 20);
+    assert!(fs::read(&disk).unwrap().iter().all(|byte| *byte == 0));
+    assert!(h.doctor_says("machine new is runnable"));
+
+    let (cd, _) = write_partitioned_disk(h.root.path(), "installer disc.iso");
+    let before = fs::read(&cd).unwrap();
+    let cd_path = cd.to_str().unwrap();
+    assert_eq!(h.cmd(&["run", "new", "--cdrom", cd_path]).unwrap(), 0);
+    let log = h.log();
+    assert!(log.contains(&format!("--cdrom {cd_path}")), "{log}");
+    assert!(log.contains("nocdrom false"), "{log}");
+    assert!(log.contains("bootdriver -62"), "{log}");
+    assert_eq!(fs::read(&cd).unwrap(), before);
+    assert!(fs::read(&disk).unwrap().windows(7).any(|w| w == b"written"));
+    let saved = fs::read_to_string(h.paths.machine("new").join("machine.toml")).unwrap();
+    assert!(!saved.contains("disc"), "{saved}");
+
+    // Without it, this is an ordinary machine, which keeps what was written.
+    fs::remove_file(&h.log).unwrap();
+    assert_eq!(h.cmd(&["run", "new"]).unwrap(), 0);
+    let log = h.log();
+    assert!(!log.contains("--cdrom"), "{log}");
+    assert!(log.contains("nocdrom true"), "{log}");
+    assert!(log.contains("bootdriver 0"), "{log}");
+}
+
+#[test]
+fn a_blank_machine_can_be_cloned_exported_and_imported() {
+    let h = harness!();
+    h.cmd(&["create", "new", "--rom", "beige", "--disk-size", "2M"])
+        .unwrap();
+    h.cmd(&["clone", "new", "copy"]).unwrap();
+    let copy = h.paths.machine("copy").join("system.dsk");
+    assert_eq!(fs::metadata(&copy).unwrap().len(), 2 << 20);
+
+    let archive = h.root.path().join("new.tar.gz");
+    let archive = archive.to_str().unwrap();
+    h.cmd(&["export", "new", "-o", archive]).unwrap();
+    h.cmd(&["import", archive, "--rename", "back"]).unwrap();
+    let back = h.paths.machine("back").join("system.dsk");
+    assert_eq!(fs::metadata(&back).unwrap().len(), 2 << 20);
+    assert_eq!(h.cmd(&["run", "back"]).unwrap(), 0);
+}
+
+#[test]
+fn only_cd_images_are_attached_as_cds() {
+    let h = harness!();
+    h.create("a");
+    let dir = h.root.path();
+    let junk = dir.join("junk.iso");
+    fs::write(&junk, vec![7u8; 8192]).unwrap();
+    let blank = dir.join("blank.iso");
+    fs::write(&blank, vec![0u8; 8192]).unwrap();
+    let archive = dir.join("cd.zip");
+    fs::write(&archive, b"PK\x03\x04 and more").unwrap();
+    for (file, expected) in [
+        (&junk, "in a format macman doesn't know"),
+        (&blank, "is blank"),
+        (&archive, "a zip archive"),
+    ] {
+        let error = h
+            .cmd(&["run", "a", "--cdrom", file.to_str().unwrap()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+    assert!(h.cmd(&["run", "a", "--cdrom", "/no/such.iso"]).is_err());
+    assert_eq!(h.count("run"), 0);
+}
+
+#[test]
+fn a_disk_and_a_size_for_the_boot_disk_are_exclusive() {
+    let both = [
+        "macman",
+        "create",
+        "a",
+        "--rom",
+        "r",
+        "--system",
+        "s",
+        "--disk-size",
+        "1G",
+    ];
+    assert!(Cli::try_parse_from(both).is_err());
+    assert!(Cli::try_parse_from(["macman", "create", "a", "--rom", "r"]).is_err());
+}
+
+#[test]
+fn a_bad_size_makes_no_machine() {
+    let h = harness!();
+    for size in ["0M", "1", "2049G"] {
+        let args = ["create", "new", "--rom", "beige", "--disk-size", size];
+        assert!(h.cmd(&args).is_err(), "{size}");
+    }
+    assert!(!h.paths.machine("new").exists());
 }

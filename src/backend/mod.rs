@@ -7,6 +7,7 @@ pub mod minivmac;
 pub mod sheepshaver;
 pub mod source;
 
+use crate::disk::CdVolume;
 use crate::machine::Machine;
 use crate::registry::{self, Rom};
 use anyhow::Result;
@@ -22,6 +23,13 @@ pub struct Executable {
     pub built: bool,
 }
 
+/// A CD image for one run, which the guest can't write to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CdImage {
+    pub path: PathBuf,
+    pub volume: CdVolume,
+}
+
 /// A disk as presented to the emulator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedDisk {
@@ -35,6 +43,8 @@ pub struct LaunchRequest<'a> {
     pub rom: &'a Path,
     /// Boot disk first.
     pub disks: &'a [ResolvedDisk],
+    /// CD images for this run, which the guest starts from and can't write to.
+    pub cdroms: &'a [CdImage],
     /// Private working directory for this run.
     pub workdir: &'a Path,
     pub verbose: bool,
@@ -122,6 +132,11 @@ pub trait EmulatorBackend {
 
     /// Whether the emulator finds the volume in a partitioned disk by itself.
     fn mounts_partitioned_disks(&self) -> bool {
+        false
+    }
+
+    /// Whether a machine can start from a blank disk and take `run --cdrom`.
+    fn installs_from_cd(&self) -> bool {
         false
     }
 
