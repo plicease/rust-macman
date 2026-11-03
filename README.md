@@ -94,7 +94,7 @@ takes no room at first; elsewhere it's a full copy. It lives in the run's sessio
 directory, and if macman is killed, the next `run` removes it.
 
 Other commands: `list [--builds]`, `current`, `rom list`, `system list`, `system remove`,
-`config show`, `clone`, `export`, `import`, `remove`, and `doctor`. Add `--verbose` for build and launch
+`config show`, `config edit`, `clone`, `export`, `import`, `remove`, and `doctor`. Add `--verbose` for build and launch
 logs. Add `--json` to `list`, `doctor`, `rom list`, `system list`, `disk info`, `config show`, or
 `current` for output that scripts can read; [docs/JSON.md](docs/JSON.md) has the fields.
 
@@ -120,6 +120,43 @@ Short names are normally on for the system drive. If a build says otherwise, set
 
 Mini vMac refuses to quit from its window while disks are mounted, so shut down the
 Mac first, or use Control Mode: hold Ctrl and press Q, then Y.
+
+### Changing a machine's settings
+
+`macman config edit [MACHINE]` opens an editor in the terminal for a machine's settings,
+grouped as Machine, Hardware, Display, and, for Basilisk II and SheepShaver, Emulator. It
+offers only what the machine's backend has: Mini vMac has no CPU, sound, network, or shared
+folder settings, and a Mac Plus is offered at most 4M of memory and a 1-bit display. Each
+list of choices marks with `✗` those that won't work with the rest of the machine, and
+says why when one is highlighted, such as a ROM another backend needs. The checks are the
+ones `create` and `run` make, so anything the editor saves, `run` accepts.
+
+| Key | Does |
+| --- | --- |
+| `↑`/`↓` or `k`/`j` | Move between settings, or between choices |
+| `Enter` or `Space` | Turn a setting on or off, open its choices, or pick one |
+| `←`/`→` or `h`/`l` | Step to the previous or next choice that works |
+| `e` | Type a value, for memory, display size, or the shared folder |
+| `u` | Put the selected setting back as it was saved |
+| `s` | Review the changes, then `y` to save them |
+| `q` or `Esc` | Leave; with unsaved changes, it asks first |
+| `Ctrl-C` | Leave at once, saving nothing |
+
+Changed settings are marked `*`, and the title says `[unsaved changes]`. The review lists
+each change, with notes such as that Mini vMac will build a new emulator for a different
+memory size or display, or that a different ROM may not start the installed system.
+Nothing is written until you confirm, and then `machine.toml` is replaced at once, never
+left half-written.
+
+The name, backend, model, and disks are shown but can't be changed here: they decide
+what was built and what's installed, so make a new machine (or `clone` one) instead. The
+machine's id, disk paths, and everything else the editor doesn't show are kept as they
+were. It refuses a machine that's running, and won't save over a `machine.toml` that
+something else changed while the editor was open.
+
+`config edit` needs an interactive terminal. With its input or output redirected, it
+fails with an error, writing no escape sequences, and changes nothing; use `config show`
+to read the settings instead. It refuses `--json`.
 
 ## Shell completion
 

@@ -151,6 +151,7 @@ impl App {
             Command::Current => println!("{}", self.current()?),
             Command::Run(args) => return self.run(&args, verbose),
             Command::Config(ConfigCommand::Show { name }) => self.config_show(name, json)?,
+            Command::Config(ConfigCommand::Edit { name }) => self.config_edit(name)?,
             Command::Clone { source, dest } => self.clone_machine(&source, &dest)?,
             Command::Export {
                 names,
@@ -808,6 +809,24 @@ impl App {
         }
         let file = self.paths.machine(&name).join("machine.toml");
         print!("{}", fs::read_to_string(file)?);
+        Ok(())
+    }
+
+    fn config_edit(&self, name: Option<String>) -> Result<()> {
+        let name = self.resolve_name(name)?;
+        Machine::load(&self.paths, &name)?;
+        // Refuse before drawing anything, so redirected output gets no escapes.
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            bail!(
+                "`macman config edit` needs an interactive terminal; use `macman config show {name}` \
+                 to read the configuration, or edit its machine.toml by hand"
+            );
+        }
+        let editor = crate::edit::Editor::open(&self.paths, &self.backends, &name)?;
+        match crate::tui::run(editor)? {
+            crate::tui::Ending::Saved => println!("Saved machine {name}"),
+            crate::tui::Ending::Cancelled => println!("Nothing was changed"),
+        }
         Ok(())
     }
 
@@ -1556,6 +1575,7 @@ fn without_json(command: &Command) -> Option<&'static str> {
         Command::Import { dry_run: true, .. } => return None,
         Command::Import { .. } => "import",
         Command::Remove { .. } => "remove",
+        Command::Config(ConfigCommand::Edit { .. }) => "config edit",
         // It explains this itself; it doesn't change anything.
         Command::Completions { .. } => return None,
     })

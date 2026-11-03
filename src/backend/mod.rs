@@ -141,6 +141,12 @@ pub trait EmulatorBackend {
         false
     }
 
+    /// Whether `after` needs an emulator build that `before` doesn't, as when
+    /// a setting is built in rather than given at run time.
+    fn builds_differently(&self, _before: &Machine, _after: &Machine) -> bool {
+        false
+    }
+
     /// Build or reuse the emulator for `machine`.
     fn prepare(&self, machine: &Machine, verbose: bool) -> Result<Executable>;
 
