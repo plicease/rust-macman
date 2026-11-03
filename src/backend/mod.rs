@@ -7,6 +7,7 @@ pub mod minivmac;
 pub mod sheepshaver;
 pub mod source;
 
+use crate::disk::CdVolume;
 use crate::machine::Machine;
 use crate::registry::{self, Rom};
 use anyhow::Result;
@@ -20,6 +21,13 @@ pub struct Executable {
     pub build_key: String,
     /// False when an existing cached build was reused.
     pub built: bool,
+}
+
+/// A CD image for one run, which the guest can't write to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CdImage {
+    pub path: PathBuf,
+    pub volume: CdVolume,
 }
 
 /// A disk as presented to the emulator.
@@ -36,7 +44,7 @@ pub struct LaunchRequest<'a> {
     /// Boot disk first.
     pub disks: &'a [ResolvedDisk],
     /// CD images for this run, which the guest starts from and can't write to.
-    pub cdroms: &'a [PathBuf],
+    pub cdroms: &'a [CdImage],
     /// Private working directory for this run.
     pub workdir: &'a Path,
     pub verbose: bool,

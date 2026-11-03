@@ -143,6 +143,7 @@ On macOS, these replace the matching steps:
 | Quit that emulator, then `macman run q7` | Boots. |
 | On Linux: `macman create qn --backend basilisk2 --rom quadra --disk-size 1G --memory 128M`, then `macman run qn --cdrom MacOS8_1.iso` | Starts from the CD, and offers to initialize the disk. Install, with "Update Apple Hard Disk Drivers" off under Options, then Shut Down. |
 | On Linux: `macman run qn` | Starts Mac OS 8.1 from its own disk. The ISO's hash is unchanged. |
+| On Linux: make two data discs with `genisoimage -o a.iso DIR` and `genisoimage -J -o b.iso DIR`, then `macman run qn --cdrom a.iso --cdrom b.iso` | Starts from its own disk, and both discs mount with their files, not as audio CDs. |
 | On Windows or macOS: `macman create ... --disk-size 1G`, or `macman run q7 --cdrom MacOS8_1.iso` | Refused, saying it isn't available on this host. |
 
 ## SheepShaver
@@ -190,4 +191,6 @@ macman create p9b --backend sheepshaver --rom ppc --system mac-os-9 --memory 256
 | `macman run pn --cdrom MacOS9.iso` | Starts from the CD, which shows as a CD, and offers to initialize the disk. Install onto it, turning off "Update Apple Hard Disk Drivers" under Options, then Shut Down. |
 | `macman run pn` | Starts from its own disk. The ISO's hash is unchanged. |
 | `macman run pn --cdrom MacOS9.iso` again | Starts from the CD, even though the disk has a system. |
+| `macman run pn --cdrom a.iso --cdrom b.iso`, with the data discs above | Starts from its own disk, and both discs mount with their files, not as audio CDs. |
+| `macman run pn --cdrom a.iso --cdrom MacOS9.iso` | Starts from the 9.0.4 CD, though it was named second. |
 | `sudo sysctl vm.mmap_min_addr=65536`, or your distribution's value | Puts the host back as it was. |

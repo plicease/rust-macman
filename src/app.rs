@@ -2,7 +2,9 @@
 
 use crate::archive::{self, Outcome};
 use crate::backend::minivmac::{MANIFEST, Manifest};
-use crate::backend::{Backends, Check, CheckLevel, EmulatorBackend, LaunchRequest, ResolvedDisk};
+use crate::backend::{
+    Backends, CdImage, Check, CheckLevel, EmulatorBackend, LaunchRequest, ResolvedDisk,
+};
 use crate::backend::{basilisk2, sheepshaver};
 use crate::cli::{
     Cli, Command, ConfigCommand, CreateArgs, DiskCommand, RomCommand, RunArgs, SystemCommand,
@@ -616,9 +618,10 @@ impl App {
                 backend.name()
             );
         }
+        let mut volumes = Vec::new();
         for path in &args.cdroms {
             drop(disk::lock_image(&self.paths, path, LockMode::Shared)?);
-            disk::check_cd_image(path)?;
+            volumes.push(disk::check_cd_image(path)?);
         }
         backend.validate_disks(&machine, saved_disks.len() + args.disks.len())?;
         self.offer_boot_disk_repair(&machine)?;
@@ -648,13 +651,14 @@ impl App {
             disks.push(self.attach(&session, &mut locks, path, !args.readonly, disks.len())?);
         }
         // Not copied, as these are big, and the emulator opens them read-only.
-        let mut cdroms: Vec<PathBuf> = Vec::new();
-        for path in &args.cdroms {
+        let mut cdroms: Vec<CdImage> = Vec::new();
+        for (path, volume) in args.cdroms.iter().zip(volumes) {
             locks.push(disk::lock_image(&self.paths, path, LockMode::Shared)?);
-            cdroms.push(
-                fs::canonicalize(path)
+            cdroms.push(CdImage {
+                path: fs::canonicalize(path)
                     .with_context(|| format!("cannot resolve {}", path.display()))?,
-            );
+                volume,
+            });
         }
         if args.readonly {
             println!(

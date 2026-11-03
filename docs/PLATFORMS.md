@@ -111,6 +111,8 @@ machine made with `--disk-size 1G`, the Quadra 650 ROM, and 128M started from th
 CD image through `macman run --cdrom`, offered to initialize the disk, and took a basic
 install, with "Update Apple Hard Disk Drivers" turned off. After Shut Down, which ended the
 run normally, it started Mac OS 8.1 from its own disk without the CD. The ISO was unchanged.
+With cue sheets, a Mac OS 8.1 machine started from its own disk with a plain and a Joliet ISO
+9660 image attached, and both mounted as data discs whose files the Finder showed.
 
 The pin is commit `f532be3d3d70` of [kanjitalk755/macemu](https://github.com/kanjitalk755/macemu),
 the maintained fork, and its SHA-256 is that of the archive GitHub generates for it. If
@@ -169,6 +171,12 @@ ROM:
    Assistant.
 5. With a working system on its disk, a run with the 9.0.4 CD still started from the CD. A
    plain ISO 9660 image, with no HFS volume, didn't stop it starting from its disk.
+6. Before cue sheets, a plain ISO 9660 image showed in Mac OS 9 as "Audio CD 1", holding one
+   audio track. With them, plain, Joliet, and Rock Ridge images made by `genisoimage` and
+   `xorriso` mounted as data discs and opened in the Finder, four at once. With the
+   emulator set to start from a CD, the first drive's ISO 9660 disc never mounted, so that's
+   now only set for a disc with HFS. With a plain ISO given before the 9.0.4 CD, the Mac
+   started from the 9.0.4 CD, whose system offered to initialize the plain disc.
 
 The ISOs were unchanged after every run. The same 9.0.4 CD also started on the Old World
 ROM, as did the Mac OS 8.1 CD, and the Old World ROM offered to initialize a blank disk

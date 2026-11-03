@@ -237,9 +237,18 @@ pub fn classify(path: &Path) -> Result<Classification> {
     }
 }
 
+/// What a guest reads on a CD image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CdVolume {
+    /// An HFS volume, alone or in a partition map, which a Mac can start from.
+    Hfs,
+    /// Only ISO 9660, which a Mac reads with ISO 9660 File Access.
+    Iso9660,
+}
+
 /// Refuse anything that `run --cdrom` can't present as a CD. It takes the whole
 /// image, partition map included, so this looks for a volume and extracts nothing.
-pub fn check_cd_image(path: &Path) -> Result<()> {
+pub fn check_cd_image(path: &Path) -> Result<CdVolume> {
     use Classification::{Blank, Partitioned, Supported, Unrecognized, Unsupported};
 
     let classification = classify(path)?;
@@ -251,15 +260,15 @@ pub fn check_cd_image(path: &Path) -> Result<()> {
         _ => false,
     };
     if has_hfs {
-        return Ok(());
+        return Ok(CdVolume::Hfs);
     }
     if is_iso9660(path)? {
         eprintln!(
             "note: {} has no HFS volume, so a Mac can't start from it, and can only read it \
-             with Foreign File Access",
+             with ISO 9660 File Access",
             path.display()
         );
-        return Ok(());
+        return Ok(CdVolume::Iso9660);
     }
     let what = match classification {
         Supported(DiskFormat::DiskCopy42) => "a Disk Copy 4.2 image".to_string(),
@@ -803,12 +812,15 @@ mod tests {
         };
         let hfs = write("hfs.toast", &raw_image(b"BD"));
         let partitioned = write("disc.iso", &partitioned_image(&[(96, b"BD")]));
-        check_cd_image(&hfs).unwrap();
-        check_cd_image(&partitioned).unwrap();
+        assert_eq!(check_cd_image(&hfs).unwrap(), CdVolume::Hfs);
+        assert_eq!(check_cd_image(&partitioned).unwrap(), CdVolume::Hfs);
 
         let mut plain = vec![0u8; 64 * 1024];
         plain[0x8001..0x8006].copy_from_slice(b"CD001");
-        check_cd_image(&write("plain.iso", &plain)).unwrap();
+        assert_eq!(
+            check_cd_image(&write("plain.iso", &plain)).unwrap(),
+            CdVolume::Iso9660
+        );
 
         let mfs = write("mfs.dsk", &raw_image(&[0xD2, 0xD7]));
         let error = check_cd_image(&mfs).unwrap_err().to_string();

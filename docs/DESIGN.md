@@ -242,6 +242,7 @@ Read from the pinned macemu source, tested with a stand-in for the emulator, and
 - **JIT:** on, unlike Basilisk II, as the interpreter is too slow for its guests.
 - **Hosts:** only Linux x86-64 is offered. Basilisk II's other hosts don't carry over.
 - **Installing:** `create --disk-size` makes a sparse, unformatted boot disk in place of a system image's copy. `run --cdrom` passes images with `--cdrom`, not as disks, and turns `nocdrom` off and sets `bootdriver` to the CD driver's -62 for that run, so the Mac starts from the CD. The emulator opens them read-only, so they're locked shared and not copied. Turning `nocdrom` off also makes the emulator add `/dev/cdrom`. A blank or partitioned boot disk is fine for this backend, as the guest formats its own.
+- **ISO 9660 discs:** the emulator reads a CD image's table of contents with a drive `ioctl`, which fails on a file and leaves the guest seeing one audio track. HFS is found by reading blocks, so HFS discs are passed as they are. An image with only ISO 9660 is linked into the session beside a cue sheet of one `MODE1/2048` track, which the emulator reads with `--with-bincue`, so ISO 9660 File Access sees a data disc. Both emulators share this.
 
 ### Shared code
 

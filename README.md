@@ -291,12 +291,15 @@ there, as a disk.
 isn't formatted: the guest offers to initialize it. It's the machine's own disk from then
 on, and clone, export, and locks treat it like any other.
 
-`--cdrom` attaches an image as a CD for that run only, and the Mac starts from it. It's
-never written to, and never copied. It can be repeated, though several discs at once
-haven't been tried. Leave it off
-to start from the machine's disk. It takes a `.iso` or `.toast` image with an HFS volume,
-partitioned or not. A plain ISO 9660 image attaches, but a Mac can't start from it. While
-a CD image is attached, the guest also sees the host's `/dev/cdrom`, if there is one.
+`--cdrom` attaches an image as a CD for that run only. It's never written to, and never
+copied. It takes a `.iso` or `.toast` image with an HFS volume, partitioned or not, and
+the Mac starts from it. Leave it off to start from the machine's disk. A plain ISO 9660
+image, with no HFS volume, attaches as a data disc, which the Mac reads with ISO 9660 File
+Access but can't start from, so with only such discs it starts from its own disk. It can
+be repeated: discs with HFS go first, and the first is the one the Mac starts from. An
+installer CD's own system may not read a plain ISO 9660 disc, and offers to initialize it,
+which it can't. While a CD image is attached, the guest also sees the host's
+`/dev/cdrom`, if there is one.
 
 If the installer stops at "Updating Apple hard disk drivers", start it again with that
 option turned off under Options. The emulator's disk isn't an Apple drive.
