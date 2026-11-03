@@ -742,3 +742,29 @@ fn the_ephemeral_setting_shows_and_lasts_through_a_clone() {
         "{help}"
     );
 }
+
+#[test]
+fn config_edit_needs_a_terminal_and_writes_no_escapes() {
+    let env = Env::new();
+    env.register();
+    env.create("wombat-6");
+    let file = env
+        .path()
+        .join("data/macman/machines/wombat-6/machine.toml");
+    let before = std::fs::read(&file).unwrap();
+
+    let output = env.run(&["config", "edit", "wombat-6"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = stderr(&output);
+    assert!(error.contains("needs an interactive terminal"), "{error}");
+    assert!(error.contains("macman config show wombat-6"), "{error}");
+    assert!(!error.contains('\x1b'), "{error:?}");
+
+    let error = env.fails(&["--json", "config", "edit", "wombat-6"]);
+    assert!(error.contains("config edit"), "{error}");
+    let error = env.fails(&["config", "edit", "no-such"]);
+    assert!(error.contains("no-such"), "{error}");
+    assert!(!error.contains("terminal"), "{error}");
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+}

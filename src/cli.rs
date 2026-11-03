@@ -144,7 +144,7 @@ pub enum Command {
     Current,
     /// Launch a machine (the current one by default)
     Run(RunArgs),
-    /// Inspect configuration
+    /// Inspect or change a machine's configuration
     #[command(subcommand)]
     Config(ConfigCommand),
     /// Copy a machine and its private disks
@@ -363,6 +363,11 @@ impl RunArgs {
 pub enum ConfigCommand {
     /// Print a machine's configuration (the current one by default)
     Show {
+        #[arg(value_name = "MACHINE", value_hint = MACHINE)]
+        name: Option<String>,
+    },
+    /// Change a machine's settings in an interactive editor (the current one by default)
+    Edit {
         #[arg(value_name = "MACHINE", value_hint = MACHINE)]
         name: Option<String>,
     },

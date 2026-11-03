@@ -69,6 +69,7 @@ macman run
 macman run macii-7
 macman run wombat-6 --disk ./build/tico68.dsk --readonly
 macman config show wombat-6
+macman config edit wombat-6
 macman clone wombat-6 wombat-test
 macman remove wombat-test
 macman system remove system-6.0.8

@@ -293,6 +293,7 @@ mod tests {
             arg(&["use"], at(0), NameKind::Machines),
             arg(&["run"], at(0), NameKind::Machines),
             arg(&["config", "show"], at(0), NameKind::Machines),
+            arg(&["config", "edit"], at(0), NameKind::Machines),
             arg(&["clone"], at(0), NameKind::Machines),
             arg(
                 &["export"],

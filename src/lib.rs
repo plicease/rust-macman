@@ -6,12 +6,14 @@ pub mod backend;
 pub mod cli;
 pub mod completion;
 pub mod disk;
+pub mod edit;
 pub mod fsutil;
 pub mod machine;
 pub mod model;
 pub mod paths;
 pub mod registry;
 pub mod report;
+pub mod tui;
 
 use anyhow::Result;
 use backend::Backends;

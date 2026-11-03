@@ -820,6 +820,11 @@ impl EmulatorBackend for MiniVmac {
         validate_display(model, &machine.display)
     }
 
+    /// The model, memory, and display are built into Mini vMac.
+    fn builds_differently(&self, before: &Machine, after: &Machine) -> bool {
+        build_options(before).ok() != build_options(after).ok()
+    }
+
     fn validate_disks(&self, machine: &Machine, count: usize) -> Result<()> {
         let model = machine.hardware.require_model()?;
         let limit = drive_count(model);

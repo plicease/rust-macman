@@ -39,8 +39,8 @@ The message is also printed to stderr, as `error: ...`, as it is without `--json
 
 These change things and report as they go, so they have no single result to give:
 `create`, `run`, `use`, `clone`, `remove`, `export`, `import` (except with `--dry-run`),
-`rom add`, `system add`, `system remove`, and `disk extract`. Given `--json`, they do
-nothing, and fail with an error as above.
+`rom add`, `system add`, `system remove`, `disk extract`, and `config edit`, which is
+interactive. Given `--json`, they do nothing, and fail with an error as above.
 
 ## `macman list`
 
