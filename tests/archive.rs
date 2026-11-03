@@ -202,6 +202,10 @@ fn walk(root: &Path, dir: &Path, found: &mut BTreeMap<String, String>, skip_lock
         if path.is_dir() {
             found.insert(relative, "dir".to_string());
             walk(root, &path, found, skip_locks);
+        } else if path.extension().is_some_and(|ext| ext == "lock") {
+            // A held lock can't be read on Windows, and holds no data anyway.
+            let len = fs::metadata(&path).unwrap().len();
+            found.insert(relative, format!("lock of {len} bytes"));
         } else {
             found.insert(relative, sha256_file(&path).unwrap());
         }
