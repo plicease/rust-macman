@@ -110,6 +110,9 @@ Use XDG paths on Linux and macOS, respecting `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
       machine.toml
       system.dsk
       data.dsk
+      checkpoints/
+        clean-install.dsk   # read-only copy of the boot disk
+        clean-install.toml  # created, disk, size, sha256; written last
     macii-7/
       machine.toml
       system.dsk
@@ -123,6 +126,8 @@ Use XDG paths on Linux and macOS, respecting `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
 ```
 
 `macman import` also uses `staging/` under the data directory, and `import.lock` beside it.
+
+A checkpoint exists once its `.toml` does. The image is copied, verified, and made read-only first, so a `.dsk` without one is an unfinished checkpoint that nothing lists, counts, or rolls back to, and the next `checkpoint create` of that name replaces it. Rollback copies the checkpoint to a temporary file beside the boot disk, verifies it, and renames it over the disk.
 
 Machine files and templates live in the data directory; generated executables and source checkouts can be evicted and rebuilt from the cache. Avoid implicit deletion of user-owned disks. Use atomic writes for configuration and registration metadata.
 

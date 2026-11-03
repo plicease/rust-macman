@@ -1332,3 +1332,223 @@ fn ephemeral_runs_share_the_boot_disk_but_a_persistent_run_waits() {
         Harness::last_boot_disk(&mock).path
     );
 }
+
+/// What a second macman, as another process would be, does with a machine.
+fn other_macman(paths: &Paths, args: &[&str]) -> Result<u8> {
+    let app = App::new(
+        paths.clone(),
+        Backends::new(vec![Box::new(Mock::default())]),
+    );
+    let argv = std::iter::once("macman").chain(args.iter().copied());
+    app.execute(Cli::parse_from(argv))
+}
+
+#[test]
+fn a_checkpoint_restores_the_boot_disk_exactly_and_again() {
+    let (h, _mock) = Harness::mock();
+    let disk = h.system_disk("plus-a");
+    let original = fs::read(&disk).unwrap();
+    // An extra disk, which checkpoints neither take nor touch.
+    let extra = h.paths.machine("plus-a").join("data.dsk");
+    fs::write(&extra, b"data").unwrap();
+    let definition = h.paths.machine("plus-a").join("machine.toml");
+    let mut text = fs::read_to_string(&definition).unwrap();
+    text.push_str("\n[[disks]]\npath = \"data.dsk\"\n");
+    fs::write(&definition, text).unwrap();
+    let rom = sha256_file(&h.paths.roms().join("plus.rom")).unwrap();
+    let template = sha256_file(&h.paths.systems().join("sys.dsk")).unwrap();
+
+    h.cmd(&["checkpoint", "create", "plus-a", "--name", "clean"])
+        .unwrap();
+    let image = h.paths.machine("plus-a").join("checkpoints/clean.dsk");
+    assert_eq!(fs::read(&image).unwrap(), original);
+    assert!(fs::metadata(&image).unwrap().permissions().readonly());
+    let error = h
+        .cmd(&["checkpoint", "create", "plus-a", "--name", "clean"])
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("already has a checkpoint"),
+        "{error}"
+    );
+
+    for round in 0..2 {
+        let mut changed = original.clone();
+        changed[4096] = 0xEE;
+        changed[5000 + round] = 0x11;
+        fs::write(&disk, &changed).unwrap();
+        fs::write(&extra, b"changed").unwrap();
+        h.cmd(&["rollback", "plus-a", "--checkpoint", "clean", "--yes"])
+            .unwrap();
+        assert_eq!(fs::read(&disk).unwrap(), original, "round {round}");
+        assert_eq!(
+            fs::read(&image).unwrap(),
+            original,
+            "the checkpoint is kept"
+        );
+        assert_eq!(
+            fs::read(&extra).unwrap(),
+            b"changed",
+            "other disks are left"
+        );
+        assert!(!fs::metadata(&disk).unwrap().permissions().readonly());
+        fs::write(&extra, b"data").unwrap();
+    }
+
+    // Rolling back can keep the state it replaces, so it can be undone.
+    let mut changed = original.clone();
+    changed[4096] = 0x42;
+    fs::write(&disk, &changed).unwrap();
+    h.cmd(&[
+        "rollback",
+        "plus-a",
+        "--checkpoint",
+        "clean",
+        "--save",
+        "before-rollback",
+        "--yes",
+    ])
+    .unwrap();
+    assert_eq!(fs::read(&disk).unwrap(), original);
+    h.cmd(&[
+        "rollback",
+        "plus-a",
+        "--checkpoint",
+        "before-rollback",
+        "--yes",
+    ])
+    .unwrap();
+    assert_eq!(fs::read(&disk).unwrap(), changed);
+
+    let error = h
+        .cmd(&["rollback", "plus-a", "--checkpoint", "nope", "--yes"])
+        .unwrap_err();
+    assert!(error.to_string().contains("no checkpoint named"), "{error}");
+    assert!(
+        h.cmd(&["rollback", "plus-a", "--checkpoint", "clean"])
+            .is_err(),
+        "needs --yes"
+    );
+    assert_eq!(fs::read(&disk).unwrap(), changed);
+    assert_eq!(sha256_file(&h.paths.roms().join("plus.rom")).unwrap(), rom);
+    assert_eq!(
+        sha256_file(&h.paths.systems().join("sys.dsk")).unwrap(),
+        template
+    );
+
+    h.cmd(&["checkpoint", "delete", "plus-a", "--name", "clean", "--yes"])
+        .unwrap();
+    assert!(!image.exists());
+    assert!(
+        h.cmd(&["checkpoint", "delete", "plus-a", "--name", "clean", "--yes"])
+            .is_err()
+    );
+}
+
+#[test]
+fn nothing_is_checkpointed_or_rolled_back_while_the_machine_runs() {
+    let (h, mock) = Harness::mock();
+    h.cmd(&["checkpoint", "create", "plus-a", "--name", "clean"])
+        .unwrap();
+    let disk = h.system_disk("plus-a");
+    let paths = h.paths.clone();
+    let tried = Rc::new(RefCell::new(Vec::new()));
+    let seen = tried.clone();
+    mock.0.borrow_mut().during = Some(Box::new(move |_: &Launch| {
+        for args in [
+            &["checkpoint", "create", "plus-a", "--name", "live"][..],
+            &["rollback", "plus-a", "--checkpoint", "clean", "--yes"],
+            &["checkpoint", "delete", "plus-a", "--name", "clean", "--yes"],
+        ] {
+            let error = other_macman(&paths, args).unwrap_err();
+            seen.borrow_mut().push(format!("{error:#}"));
+        }
+    }));
+    let before = fs::read(&disk).unwrap();
+    h.cmd(&["run", "plus-a"]).unwrap();
+    let tried = tried.borrow();
+    assert_eq!(tried.len(), 3);
+    for error in tried.iter() {
+        assert!(error.contains("is running"), "{error}");
+    }
+    assert_eq!(fs::read(&disk).unwrap(), before);
+    assert!(
+        !h.paths
+            .machine("plus-a")
+            .join("checkpoints/live.dsk")
+            .exists()
+    );
+    assert!(
+        h.paths
+            .machine("plus-a")
+            .join("checkpoints/clean.toml")
+            .exists()
+    );
+
+    // An ephemeral run holds its saved disk too, as does any other reader.
+    let held = lock_image(&h.paths, &disk, LockMode::Shared).unwrap();
+    let error = h
+        .cmd(&["checkpoint", "create", "plus-a", "--name", "x"])
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("is running"), "{error}");
+    drop(held);
+    h.cmd(&["checkpoint", "create", "plus-a", "--name", "x"])
+        .unwrap();
+}
+
+#[test]
+fn a_damaged_checkpoint_or_an_unfinished_one_is_never_used() {
+    let (h, _mock) = Harness::mock();
+    h.cmd(&["checkpoint", "create", "plus-a", "--name", "clean"])
+        .unwrap();
+    let dir = h.paths.machine("plus-a").join("checkpoints");
+    let disk = h.system_disk("plus-a");
+    let live = fs::read(&disk).unwrap();
+
+    // Changed behind macman's back: refused, and the live disk is kept.
+    let image = dir.join("clean.dsk");
+    let mut perms = fs::metadata(&image).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    fs::set_permissions(&image, perms).unwrap();
+    let mut bytes = fs::read(&image).unwrap();
+    bytes[2000] ^= 1;
+    fs::write(&image, bytes).unwrap();
+    let error = h
+        .cmd(&["rollback", "plus-a", "--checkpoint", "clean", "--yes"])
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("damaged"), "{error}");
+    assert_eq!(fs::read(&disk).unwrap(), live);
+    assert_eq!(
+        fs::read_dir(h.paths.machine("plus-a")).unwrap().count(),
+        3,
+        "no staging left"
+    );
+
+    // An image with no metadata is an interrupted create: not listed, and
+    // a create of that name replaces it.
+    fs::write(dir.join("half.dsk"), b"partial").unwrap();
+    let names = |h: &Harness| {
+        macman::checkpoint::list(&h.paths, "plus-a")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&h), ["clean"]);
+    assert!(
+        h.cmd(&["rollback", "plus-a", "--checkpoint", "half", "--yes"])
+            .is_err()
+    );
+    h.cmd(&["checkpoint", "create", "plus-a", "--name", "half"])
+        .unwrap();
+    assert_eq!(fs::read(dir.join("half.dsk")).unwrap(), live);
+
+    // Without a name, one is made from the time.
+    h.cmd(&["checkpoint", "create", "plus-a"]).unwrap();
+    let all = names(&h);
+    assert_eq!(all.len(), 3);
+    assert!(
+        all.iter().any(|n| n.ends_with('Z') && n.contains('T')),
+        "{all:?}"
+    );
+}

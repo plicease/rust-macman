@@ -87,7 +87,10 @@ every registered name has its own entry, so a ROM registered twice under differe
 names arrives under both, sharing one blob. Without it, a machine's ROM has one entry
 for its contents, as in format 1.
 
-Archives leave out builds, source and build caches, logs, locks, and session data. Disk paths are
+Archives leave out builds, source and build caches, logs, locks, session data, and
+[checkpoints](../README.md#checkpoints): a machine travels with its current disks only,
+and import, which never replaces a local machine, leaves the checkpoints of one that's
+already here as they are. Disk paths are
 relative to the machine, so nothing in an archive depends on where macman stores files
 on the source host. An imported machine builds or reuses its emulator on its first
 `run`, and import itself compiles nothing. Hosts can build different Mini vMac revisions,

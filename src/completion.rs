@@ -299,6 +299,10 @@ mod tests {
             arg(&["run"], option("media"), NameKind::Media),
             arg(&["config", "show"], at(0), NameKind::Machines),
             arg(&["config", "edit"], at(0), NameKind::Machines),
+            arg(&["checkpoint", "create"], at(0), NameKind::Machines),
+            arg(&["checkpoint", "list"], at(0), NameKind::Machines),
+            arg(&["checkpoint", "delete"], at(0), NameKind::Machines),
+            arg(&["rollback"], at(0), NameKind::Machines),
             arg(&["clone"], at(0), NameKind::Machines),
             arg(
                 &["export"],

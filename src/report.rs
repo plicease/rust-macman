@@ -213,6 +213,26 @@ impl MediaEntry {
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct CheckpointList {
+    pub machine: String,
+    /// Oldest first.
+    pub checkpoints: Vec<CheckpointEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CheckpointEntry {
+    pub name: String,
+    /// When it was taken, in UTC, as RFC 3339.
+    pub created: String,
+    /// The boot disk it's of, as `machine.toml` names it.
+    pub disk: String,
+    pub size: u64,
+    pub sha256: String,
+    /// Host storage allocated to the checkpoint's image; null if unavailable.
+    pub host_disk_used_bytes: Option<u64>,
+}
+
 /// `macman du`: everything registered, smallest first.
 #[derive(Debug, Serialize)]
 pub struct DiskUsage {

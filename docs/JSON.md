@@ -39,7 +39,8 @@ The message is also printed to stderr, as `error: ...`, as it is without `--json
 
 These change things and report as they go, so they have no single result to give:
 `create`, `run`, `use`, `clone`, `remove`, `export`, `import` (except with `--dry-run`),
-`rom add`, `system add`, `system remove`, `media add`, `media remove`, `disk extract`, and
+`rom add`, `system add`, `system remove`, `media add`, `media remove`, `checkpoint
+create`, `checkpoint delete`, `rollback`, `disk extract`, and
 `config edit`, which is interactive. Given `--json`, they do nothing, and fail with an error as above.
 
 ## `macman list`
@@ -176,6 +177,25 @@ will boot on it. Mac OS 8.1, for one, crashes SheepShaver with a New World ROM.
 `media` is as in `media list`. `verified` says whether the stored image still matches
 its digest, read in full. The layout fields are those of `disk info`, below. With
 `verified` false, this is still what's printed, and the exit code is 1.
+
+## `macman checkpoint list NAME`
+
+```json
+{"machine": "wombat-6", "checkpoints": [{"name": "clean-install", "created": "2026-11-03T21:04:05Z", "disk": "system.dsk", "size": 819200, "sha256": "...", "host_disk_used_bytes": 823296}]}
+```
+
+| Field | Type | |
+|---|---|---|
+| `name` | string | |
+| `created` | string | When it was made, RFC 3339 in UTC |
+| `disk` | string | The boot disk it was taken from, relative to the machine |
+| `size` | number | Its length in bytes |
+| `sha256` | string | Of the image, checked before every rollback |
+| `host_disk_used_bytes` | number or null | Host storage allocated to it; `null` if it can't be measured, such as when the image is missing |
+
+Oldest first. A machine's `host_disk_used_bytes` in `list` and `du` includes all of its
+checkpoints, and is `null` if any of them can't be measured; `system_disk_capacity_bytes`
+is the boot disk alone.
 
 ## `macman du`
 

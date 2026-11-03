@@ -156,6 +156,23 @@ pub enum Command {
     /// Inspect or change a machine's configuration
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// Save, list, and delete copies of a machine's boot disk, taken while it's shut down
+    #[command(subcommand)]
+    Checkpoint(CheckpointCommand),
+    /// Restore a machine's boot disk from one of its checkpoints, which is kept
+    Rollback {
+        #[arg(value_name = "MACHINE", value_hint = MACHINE)]
+        name: Option<String>,
+        /// The checkpoint to restore
+        #[arg(long, value_name = "NAME")]
+        checkpoint: String,
+        /// First save the disk as it stands as this new checkpoint, so this can be undone
+        #[arg(long, value_name = "NAME")]
+        save: Option<String>,
+        /// Replace the boot disk without prompting
+        #[arg(long)]
+        yes: bool,
+    },
     /// Copy a machine and its private disks
     Clone {
         #[arg(value_name = "MACHINE", value_hint = MACHINE)]
@@ -251,6 +268,33 @@ pub enum SystemCommand {
     Remove {
         #[arg(value_name = "SYSTEM", value_hint = SYSTEM)]
         name: String,
+        /// Delete it without prompting
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CheckpointCommand {
+    /// Save the boot disk of a shut-down machine (the current one by default)
+    Create {
+        #[arg(value_name = "MACHINE", value_hint = MACHINE)]
+        name: Option<String>,
+        /// What to call it; the time, such as 2026-11-03T21-04-05Z, if not given
+        #[arg(long = "name", value_name = "NAME")]
+        checkpoint: Option<String>,
+    },
+    /// List a machine's checkpoints, oldest first
+    List {
+        #[arg(value_name = "MACHINE", value_hint = MACHINE)]
+        name: Option<String>,
+    },
+    /// Delete a checkpoint, to reclaim its space
+    Delete {
+        #[arg(value_name = "MACHINE", value_hint = MACHINE)]
+        name: Option<String>,
+        #[arg(long = "name", value_name = "NAME")]
+        checkpoint: String,
         /// Delete it without prompting
         #[arg(long)]
         yes: bool,
