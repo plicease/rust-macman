@@ -243,7 +243,7 @@ Each partition has `index` (a number, from 1), `type` (a string, from the partit
 keys. That's the format in [DESIGN.md](DESIGN.md), and it holds what the file does,
 including any shared folder's host path.
 
-## `macman config set [NAME] KEY VALUE...`
+## `macman config set [--machine NAME | NAME] KEY VALUE...`
 
 ```json
 {"machine": "wombat-6", "changes": [{"key": "hardware.memory", "before": "4M", "after": "1M"}, {"key": "display.scale", "before": 2, "after": 3}], "notes": ["Mini vMac builds memory and the display into the emulator, so ..."]}

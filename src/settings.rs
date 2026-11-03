@@ -395,13 +395,56 @@ pub fn set(editor: &mut Editor, pairs: &[(String, String)]) -> Result<Vec<Change
         .collect())
 }
 
-/// Split `config set`'s words into a machine, if named, and pairs. With an odd
-/// number, the first is the machine; with an even number, there's none.
-pub fn split(words: &[String]) -> Result<(Option<&str>, Vec<Pair>)> {
-    let (machine, rest) = if words.len() % 2 == 1 {
-        (Some(words[0].as_str()), &words[1..])
-    } else {
-        (None, words)
+/// Split `config set`'s words into the machine, if named, and pairs. The
+/// machine is `option`, from `--machine`, or else, given an odd number of
+/// words, the first; with neither, it's the current one. `is_machine` says
+/// whether a word names a machine, to explain a value left out rather than
+/// read the words some other way.
+pub fn split<'a>(
+    words: &'a [String],
+    option: Option<&'a str>,
+    is_machine: &dyn Fn(&str) -> bool,
+) -> Result<(Option<&'a str>, Vec<Pair>)> {
+    let first = words.first().map_or("", String::as_str);
+    let looks_like_machine = !first.is_empty() && !is_key(first) && is_machine(first);
+    let missing = |rest: &[String]| -> Result<()> {
+        match rest.last() {
+            Some(last) if rest.len() % 2 == 1 => bail!(
+                "{last:?} has no value; give KEY VALUE pairs, such as `hardware.memory 4M`; \
+                 nothing was changed"
+            ),
+            _ => Ok(()),
+        }
+    };
+    let (machine, rest) = match option {
+        Some(named) => {
+            if looks_like_machine {
+                bail!(
+                    "the machine is given twice, as --machine {named} and as {first:?}; name it \
+                     one way or the other; nothing was changed"
+                );
+            }
+            if words.len() % 2 == 1 && !is_key(first) {
+                bail!(
+                    "{first:?} isn't a key, and with --machine every word is a KEY or its VALUE; \
+                     see `macman config keys {named}`; nothing was changed"
+                );
+            }
+            missing(words)?;
+            (Some(named), words)
+        }
+        // A key first means a value is missing, not that a machine is named.
+        None if words.len() % 2 == 1 && is_key(first) => {
+            missing(words)?;
+            unreachable!("an odd number of words has a last one")
+        }
+        None if words.len() % 2 == 1 => (Some(first), &words[1..]),
+        None => {
+            if looks_like_machine {
+                missing(&words[1..])?;
+            }
+            (None, words)
+        }
     };
     if rest.is_empty() {
         bail!("give a key and a value to set, such as `hardware.memory 4M`");
@@ -424,11 +467,20 @@ pub fn complete(
     machines: &[String],
     words: &[String],
 ) -> Vec<String> {
-    let words: Vec<String> = words
-        .iter()
-        .filter(|w| !w.starts_with('-'))
-        .cloned()
-        .collect();
+    // `--machine NAME` names the machine; other options are passed over.
+    let mut option: Option<String> = None;
+    let mut plain: Vec<String> = Vec::new();
+    let mut given = words.iter();
+    while let Some(word) = given.next() {
+        if word == "--machine" {
+            option = given.next().cloned();
+        } else if let Some(name) = word.strip_prefix("--machine=") {
+            option = Some(name.to_string());
+        } else if !word.starts_with('-') {
+            plain.push(word.clone());
+        }
+    }
+    let words = plain;
     let key_names = |name: &str| -> Vec<String> {
         Editor::inspect(paths, backends, name)
             .map(|editor| {
@@ -439,16 +491,19 @@ pub fn complete(
             })
             .unwrap_or_default()
     };
-    let (machine, rest) = match words.first() {
-        None => {
+    let (machine, rest) = match (option.as_deref(), words.first()) {
+        (Some(named), _) => (named, &words[..]),
+        (None, None) => {
             let mut offered = machines.to_vec();
             if let Some(current) = current {
                 offered.extend(key_names(current));
             }
             return offered;
         }
-        Some(first) if machines.contains(first) && !is_key(first) => (first.as_str(), &words[1..]),
-        Some(_) => match current {
+        (None, Some(first)) if machines.contains(first) && !is_key(first) => {
+            (first.as_str(), &words[1..])
+        }
+        (None, Some(_)) => match current {
             Some(current) => (current, &words[..]),
             None => return Vec::new(),
         },
@@ -487,7 +542,7 @@ mod tests {
     use std::fs;
 
     fn pairs(text: &str) -> Vec<(String, String)> {
-        split(&words(text)).unwrap().1
+        split(&words(text), Some("test"), &|_| false).unwrap().1
     }
 
     fn saved(paths: &Paths, name: &str) -> String {
@@ -709,6 +764,18 @@ mod tests {
         assert_eq!(offer(Some("plus"), "display.depth"), ["1"]);
         assert!(offer(None, "display.depth").is_empty(), "no machine to ask");
         assert!(offer(None, "plus no.such.key").is_empty());
+        // With --machine, the first word is a key, and no machine is offered.
+        let keys = offer(None, "--machine plus");
+        assert!(
+            keys.contains(&"display.depth".to_string()) && !keys.contains(&"plus".to_string()),
+            "{keys:?}"
+        );
+        assert_eq!(offer(None, "--machine plus display.depth"), ["1"]);
+        assert_eq!(offer(None, "--machine=plus ephemeral"), ["true", "false"]);
+        assert_eq!(
+            offer(None, "-v --machine plus ephemeral true display.depth"),
+            ["1"]
+        );
     }
 
     fn words(text: &str) -> Vec<String> {
@@ -716,17 +783,63 @@ mod tests {
     }
 
     #[test]
-    fn an_odd_count_names_the_machine() {
+    fn the_machine_is_named_once_and_a_missing_value_is_said() {
+        let is_machine = |name: &str| name == "wombat";
+        let split_words = |text: &str, option: Option<&str>| -> Result<(Option<String>, usize)> {
+            let w = words(text);
+            split(&w, option, &is_machine)
+                .map(|(machine, pairs)| (machine.map(str::to_string), pairs.len()))
+        };
+        let error = |text: &str, option: Option<&str>| {
+            format!("{:#}", split_words(text, option).unwrap_err())
+        };
+
+        // By position, as before.
         let w = words("wombat hardware.memory 4M");
-        let (machine, pairs) = split(&w).unwrap();
+        let (machine, pairs) = split(&w, None, &is_machine).unwrap();
         assert_eq!(machine, Some("wombat"));
         assert_eq!(pairs, [("hardware.memory".into(), "4M".into())]);
-        let w = words("hardware.memory 4M display.scale 2");
-        let (machine, pairs) = split(&w).unwrap();
-        assert_eq!(machine, None);
-        assert_eq!(pairs.len(), 2);
-        assert!(split(&words("wombat")).is_err());
-        assert!(split(&[]).is_err());
+        assert_eq!(
+            split_words("hardware.memory 4M display.scale 2", None).unwrap(),
+            (None, 2)
+        );
+        // A machine that doesn't exist is still taken as one, for load to report.
+        assert_eq!(
+            split_words("nobody ephemeral true", None).unwrap(),
+            (Some("nobody".into()), 1)
+        );
+
+        // By --machine, every word is a key or a value.
+        assert_eq!(
+            split_words("display.width 640 display.height 480", Some("wombat")).unwrap(),
+            (Some("wombat".into()), 2)
+        );
+
+        // A value left out is said, wherever the machine came from.
+        for (text, option) in [
+            ("wombat hardware.memory", None),
+            ("wombat ephemeral true display.scale", None),
+            ("ephemeral true display.scale", None),
+            ("hardware.memory", Some("wombat")),
+            ("ephemeral true display.scale", Some("wombat")),
+        ] {
+            let message = error(text, option);
+            assert!(message.contains("has no value"), "{text}: {message}");
+        }
+        assert!(
+            error("ephemeral true display.scale", None).contains("\"display.scale\" has no value")
+        );
+
+        // Both ways at once is refused, not read as a key.
+        let message = error("wombat ephemeral true", Some("wombat"));
+        assert!(message.contains("given twice"), "{message}");
+        let message = error("wombat ephemeral true", Some("other"));
+        assert!(message.contains("given twice"), "{message}");
+        let message = error("typo ephemeral true", Some("wombat"));
+        assert!(message.contains("isn't a key"), "{message}");
+
+        assert!(split_words("wombat", None).is_err());
+        assert!(split(&[], None, &is_machine).is_err());
     }
 
     #[test]

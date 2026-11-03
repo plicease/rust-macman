@@ -490,8 +490,14 @@ pub enum ConfigCommand {
     },
     /// Change settings from a script, as `config set wombat-6 hardware.memory 4M`; several
     /// KEY VALUE pairs are checked and saved together, and without MACHINE, the current one
-    #[command(override_usage = "macman config set [MACHINE] KEY VALUE [KEY VALUE]...")]
+    #[command(
+        override_usage = "macman config set [--machine MACHINE | MACHINE] KEY VALUE [KEY VALUE]..."
+    )]
     Set {
+        /// The machine to change, rather than giving it as the first word; then every word
+        /// is a KEY or a VALUE
+        #[arg(long, value_name = "MACHINE", value_hint = MACHINE)]
+        machine: Option<String>,
         /// The machine, if not the current one, then KEY VALUE pairs; given an odd number of
         /// words, the first is the machine
         #[arg(

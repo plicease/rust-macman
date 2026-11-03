@@ -71,6 +71,7 @@ macman run wombat-6 --disk ./build/tico68.dsk --readonly
 macman config show wombat-6
 macman config edit wombat-6
 macman config set wombat-6 hardware.memory 4M display.scale 2
+macman config set --machine wombat-6 display.width 640 display.height 480
 macman config keys wombat-6
 macman clone wombat-6 wombat-test
 macman remove wombat-test

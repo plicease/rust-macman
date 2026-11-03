@@ -460,7 +460,18 @@ fn config_set_completes_machines_then_keys_then_values() {
 fn every_shell_completes_config_set_by_position() {
     let zsh = script("zsh");
     assert!(zsh.contains(":_macman_names config-set'"), "zsh");
-    assert!(zsh.contains("before=(\"${(@)words[1,CURRENT-1]}\")"), "zsh");
+    assert!(
+        zsh.contains("before+=(\"${(@)words[1,CURRENT-1]}\")"),
+        "zsh"
+    );
+    assert!(
+        zsh.contains("before=(--machine \"${opt_args[--machine]}\")"),
+        "zsh"
+    );
+    assert!(
+        zsh.contains(":MACHINE:_macman_names machines'"),
+        "zsh: --machine takes names"
+    );
     let fish = script("fish");
     assert!(
         fish.contains(r#"complete -c macman -n "__fish_macman_using_subcommand config; and __fish_seen_subcommand_from set" -f -a "(macman __complete-names config-set (__fish_macman_config_set_words))""#),
@@ -491,6 +502,10 @@ fn every_shell_completes_config_set_by_position() {
             complete_line "macman -v config set alpha ephemeral "
             complete_line "macman config set alpha ephemeral true display.f"
             complete_line "macman config set alpha display.scale 2 hardware.memory 4"
+            complete_line "macman config set --machine "
+            complete_line "macman config set --machine alpha "
+            complete_line "macman config set --machine alpha display.depth "
+            complete_line "macman config set ephemeral true --machine alpha display.d"
         "#;
         let output = in_shell(root.path(), "bash", &[], check, &[&file]);
         let expected = "\
@@ -500,6 +515,10 @@ macman config set alpha display.depth -> 1
 macman -v config set alpha ephemeral -> true false
 macman config set alpha ephemeral true display.f-> display.fullscreen
 macman config set alpha display.scale 2 hardware.memory 4-> 4M
+macman config set --machine -> alpha beta
+macman config set --machine alpha -> ephemeral hardware.rom hardware.memory display.width display.height display.depth display.scale display.fullscreen
+macman config set --machine alpha display.depth -> 1
+macman config set ephemeral true --machine alpha display.d-> display.depth
 ";
         assert_eq!(output, expected);
     }
@@ -515,9 +534,20 @@ macman config set alpha display.scale 2 hardware.memory 4-> 4M
             words=(alpha display.depth ''); CURRENT=3; _macman_names -J -default- config-set
             words=(alpha ephemeral ''); CURRENT=3; _macman_names config-set
             words=(''); CURRENT=1; _macman_names config-set
+            typeset -A opt_args; opt_args=(--machine alpha)
+            words=(display.depth ''); CURRENT=2; _macman_names -J -default- config-set
+            words=(''); CURRENT=1; _macman_names -J -default- config-set
         "#;
         let output = in_shell(root.path(), "zsh", &["-f"], check, &[&file]);
-        assert_eq!(output, "1\ntrue\nfalse\nalpha\nbeta\n");
+        let lines: Vec<_> = output.lines().collect();
+        assert_eq!(
+            lines[..6],
+            ["1", "true", "false", "alpha", "beta", "1"],
+            "{output}"
+        );
+        // With --machine, the first word is a key: no machine names.
+        assert_eq!(lines[6], "ephemeral", "{output}");
+        assert!(!lines[6..].contains(&"alpha"), "{output}");
     }
     if have("fish") {
         let file = root.path().join("macman.fish");
@@ -527,7 +557,9 @@ macman config set alpha display.scale 2 hardware.memory 4-> 4M
             echo --
             complete -C "macman config set alpha "
             echo --
-            complete -C "macman -v config set alpha ephemeral ""#;
+            complete -C "macman -v config set alpha ephemeral "
+            echo --
+            complete -C "macman config set --machine alpha display.depth ""#;
         let output = in_shell(root.path(), "fish", &[], check, &[&file]);
         let parts: Vec<_> = output.split("--\n").collect();
         assert_eq!(parts[0].trim(), "1", "{output}");
@@ -537,5 +569,6 @@ macman config set alpha display.scale 2 hardware.memory 4-> 4M
         );
         let values: Vec<_> = parts[2].lines().collect();
         assert_eq!(values, ["true", "false"], "{output}");
+        assert_eq!(parts[3].trim(), "1", "{output}");
     }
 }

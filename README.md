@@ -167,6 +167,7 @@ by name:
 macman config set wombat-6 hardware.memory 4M
 macman config set wombat-6 display.width 640 display.height 480 display.depth 8
 macman config set ss904 sheepshaver.network slirp
+macman config set --machine wombat-6 display.width 640 display.height 480
 macman config set ephemeral true    # the current machine
 ```
 
@@ -175,8 +176,13 @@ that only work together, such as a display's width and height or a CPU and its F
 are applied together, and then the machine they make is checked once, whole, with the
 same checks `config edit` makes before it saves, so the two accept and refuse the same
 configurations. If anything is wrong, nothing is written, and the error says why, with the
-values that would work where there's a list of them. A machine name comes first, unless
-it's the current one: with an odd number of words, the first is the machine.
+values that would work where there's a list of them.
+
+Name the machine with `--machine NAME`, or as the first word, or leave it out for the
+current one. Without `--machine`, an odd number of words means the first is the machine.
+`--machine` is clearer in scripts: every other word is then a key or its value, and the
+machine can't also be given as a word. Either way, a value left out is reported as missing,
+such as `"display.scale" has no value`, never read as a different machine or key.
 
 | Key | Takes | Machines |
 | --- | --- | --- |

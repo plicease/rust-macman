@@ -116,9 +116,12 @@ _macman_names() {{
     # kind, which is last; they're compadd's.
     local kind=${{@[-1]}}
     local -a names before
-    # `config set` is completed knowing the words before this one, which
-    # are all of $words there.
-    [[ $kind == config-set ]] && before=("${{(@)words[1,CURRENT-1]}}")
+    # `config set` is completed knowing the words before this one: those of
+    # $words there, which are its positionals, and its --machine.
+    if [[ $kind == config-set ]]; then
+        [[ -n ${{opt_args[--machine]}} ]] && before=(--machine "${{opt_args[--machine]}}")
+        before+=("${{(@)words[1,CURRENT-1]}}")
+    fi
     names=(${{(f)"$(macman {COMPLETE_NAMES} $kind "${{before[@]}}" 2>/dev/null)"}})
     compadd "${{(@)@[1,-2]}}" -a names
 }}
@@ -178,7 +181,6 @@ fn bash(generated: &str, command: &clap::Command, args: &[NameArg]) -> String {
 _macman_with_names() {{
     local cur="${{COMP_WORDS[COMP_CWORD]}}" prev="${{COMP_WORDS[COMP_CWORD-1]}}"
     local path="" word i positional=0 value_next=0
-    local -a before=()
     for (( i = 1; i < COMP_CWORD; i++ )); do
         word="${{COMP_WORDS[i]}}"
         if (( value_next )); then
@@ -192,7 +194,7 @@ _macman_with_names() {{
                 case "$path" in
                     "") path="$word" ;;
                     {groups}) path="$path $word" ;;
-                    *) positional=$(( positional + 1 )); before+=("$word") ;;
+                    *) positional=$(( positional + 1 )) ;;
                 esac
                 ;;
         esac
@@ -208,8 +210,19 @@ _macman_with_names() {{
 
     if [[ -n $kind ]]; then
         local IFS=$'\n'
+        # `config set` is completed knowing every word after it, options too.
         local -a extra=()
-        [[ $kind == config-set ]] && extra=("${{before[@]}}")
+        if [[ $kind == config-set ]]; then
+            local seen=0
+            for (( i = 1; i < COMP_CWORD; i++ )); do
+                word="${{COMP_WORDS[i]}}"
+                case $seen in
+                    2) extra+=("$word") ;;
+                    1) [[ $word == set ]] && seen=2 ;;
+                    0) [[ $word == config ]] && seen=1 ;;
+                esac
+            done
+        fi
         COMPREPLY=( $(compgen -W "$(macman {COMPLETE_NAMES} "$kind" "${{extra[@]}}" 2>/dev/null)" -- "$cur") )
         return 0
     fi
@@ -241,13 +254,13 @@ fn collect_value_options(command: &clap::Command, found: &mut Vec<String>) {
 }
 
 /// The words after `config set` on fish's command line, before the cursor,
-/// leaving out options.
+/// options too, which macman sorts out.
 const FISH_CONFIG_SET_WORDS: &str = r#"function __fish_macman_config_set_words
     set -l seen 0
     for token in (commandline -opc)
         switch $seen
             case 2
-                string match -q -- '-*' $token; or printf '%s\n' $token
+                printf '%s\n' $token
             case 1
                 string match -q -- set $token; and set seen 2
             case 0
@@ -341,6 +354,7 @@ mod tests {
                 },
                 NameKind::Settings,
             ),
+            arg(&["config", "set"], option("machine"), NameKind::Machines),
             arg(&["config", "keys"], at(0), NameKind::Machines),
             arg(&["checkpoint", "create"], at(0), NameKind::Machines),
             arg(&["checkpoint", "list"], at(0), NameKind::Machines),

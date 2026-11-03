@@ -1347,3 +1347,92 @@ fn concurrent_config_sets_each_take_effect() {
     assert_eq!(value("display.fullscreen"), true);
     assert_eq!(value("hardware.memory"), "1M");
 }
+
+#[test]
+fn config_set_takes_the_machine_by_option_or_position_but_not_both() {
+    let env = Env::new();
+    env.register();
+    env.create("wombat-6");
+    env.create("other");
+    let definition = |name: &str| {
+        std::fs::read_to_string(
+            env.path()
+                .join(format!("data/macman/machines/{name}/machine.toml")),
+        )
+        .unwrap()
+    };
+
+    let text = env.ok(&[
+        "config",
+        "set",
+        "--machine",
+        "wombat-6",
+        "display.scale",
+        "3",
+        "ephemeral",
+        "true",
+    ]);
+    assert!(text.ends_with("Saved machine wombat-6\n"), "{text}");
+    assert!(definition("wombat-6").contains("scale = 3"));
+    assert!(
+        !definition("other").contains("scale = 3"),
+        "only the one named"
+    );
+    // The option may come after the pairs, too.
+    env.ok(&["config", "set", "display.scale", "1", "--machine=other"]);
+    assert!(definition("other").contains("scale = 1"));
+
+    let wombat = definition("wombat-6");
+    let other = definition("other");
+    for (args, says) in [
+        // A value left out is said, however the machine is named.
+        (
+            &["--machine", "wombat-6", "hardware.memory"][..],
+            "\"hardware.memory\" has no value",
+        ),
+        (
+            &[
+                "--machine",
+                "wombat-6",
+                "ephemeral",
+                "false",
+                "display.scale",
+            ],
+            "\"display.scale\" has no value",
+        ),
+        (
+            &["wombat-6", "ephemeral", "false", "display.scale"],
+            "\"display.scale\" has no value",
+        ),
+        (
+            &["ephemeral", "false", "display.scale"],
+            "\"display.scale\" has no value",
+        ),
+        // Both at once is refused, whichever machine each names.
+        (
+            &["--machine", "wombat-6", "wombat-6", "ephemeral", "false"],
+            "given twice",
+        ),
+        (
+            &["--machine", "other", "wombat-6", "ephemeral", "false"],
+            "given twice",
+        ),
+        (
+            &["--machine", "wombat-6", "colour", "ephemeral", "false"],
+            "isn't a key",
+        ),
+        (&["--machine", "nobody", "ephemeral", "false"], "nobody"),
+    ] {
+        let mut all = vec!["config", "set"];
+        all.extend_from_slice(args);
+        let error = env.fails(&all);
+        assert!(error.contains(says), "{args:?}: {error}");
+        assert_eq!(definition("wombat-6"), wombat, "{args:?}");
+        assert_eq!(definition("other"), other, "{args:?}");
+    }
+    let help = env.ok(&["config", "set", "--help"]);
+    assert!(
+        help.contains("[--machine MACHINE | MACHINE] KEY VALUE"),
+        "{help}"
+    );
+}

@@ -198,7 +198,9 @@ impl App {
             Command::Run(args) => return self.run(&args, verbose),
             Command::Config(ConfigCommand::Show { name }) => self.config_show(name, json)?,
             Command::Config(ConfigCommand::Edit { name }) => self.config_edit(name)?,
-            Command::Config(ConfigCommand::Set { words }) => self.config_set(&words, json)?,
+            Command::Config(ConfigCommand::Set { machine, words }) => {
+                self.config_set(machine.as_deref(), &words, json)?
+            }
             Command::Config(ConfigCommand::Keys { name }) => self.config_keys(name, json)?,
             Command::Checkpoint(CheckpointCommand::Create { name, checkpoint }) => {
                 self.checkpoint_create(name, checkpoint.as_deref())?
@@ -1220,19 +1222,12 @@ impl App {
         Ok(())
     }
 
-    fn config_set(&self, words: &[String], json: bool) -> Result<()> {
-        let (named, pairs) = settings::split(words)?;
-        if named.is_none()
-            && !settings::is_key(&words[0])
-            && self.paths.machine(&words[0]).join("machine.toml").is_file()
-        {
-            bail!(
-                "{:?} has no value; give KEY VALUE pairs after the machine name, such as \
-                 `macman config set {} hardware.memory 4M`",
-                words[words.len() - 1],
-                words[0]
-            );
-        }
+    fn config_set(&self, machine: Option<&str>, words: &[String], json: bool) -> Result<()> {
+        let is_machine = |name: &str| {
+            validate_name("machine", name).is_ok()
+                && self.paths.machine(name).join("machine.toml").is_file()
+        };
+        let (named, pairs) = settings::split(words, machine, &is_machine)?;
         let name = self.resolve_name(named.map(str::to_string))?;
         let mut editor = crate::edit::Editor::open_locked(&self.paths, &self.backends, &name)?;
         let changes = settings::set(&mut editor, &pairs)?;
