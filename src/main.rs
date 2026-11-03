@@ -1,14 +1,18 @@
 use anyhow::Result;
 use clap::Parser;
 use clap::error::ErrorKind;
-use macman::app::App;
-use macman::cli::Cli;
+use macman::app::{App, print_completions};
+use macman::cli::{Cli, Command};
 use macman::default_backends;
 use macman::paths::Paths;
 use macman::report::error_json;
 use std::process::ExitCode;
 
 fn run(cli: Cli) -> Result<u8> {
+    // Completion needs nothing from the environment, so it works anywhere.
+    if let Command::Completions { shell } = cli.command {
+        return print_completions(shell, cli.json);
+    }
     let paths = Paths::from_env()?;
     let backends = default_backends(&paths)?;
     App::new(paths, backends).execute(cli)

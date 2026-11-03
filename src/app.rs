@@ -171,6 +171,7 @@ impl App {
                 return self.import(&file, rename.as_deref(), dry_run, json);
             }
             Command::Remove { name, delete_disks } => self.remove(&name, delete_disks)?,
+            Command::Completions { shell } => return print_completions(shell, json),
         }
         Ok(0)
     }
@@ -1326,6 +1327,20 @@ fn exit_code(status: ExitStatus) -> u8 {
 
 /// The name of `command`, if it doesn't take `--json`. These change things,
 /// and print what they did as they go, so they have no report to give.
+/// `macman completions`: the script for `shell` on stdout, written whole or
+/// not at all. It needs nothing from this host, not even its directories.
+pub fn print_completions(shell: clap_complete::Shell, json: bool) -> Result<u8> {
+    if json {
+        bail!("--json doesn't apply to `macman completions`, which prints a shell script");
+    }
+    let script = crate::cli::completion_script(shell);
+    let mut stdout = std::io::stdout().lock();
+    std::io::Write::write_all(&mut stdout, &script)
+        .and_then(|()| std::io::Write::flush(&mut stdout))
+        .context("cannot write the completion script")?;
+    Ok(0)
+}
+
 fn without_json(command: &Command) -> Option<&'static str> {
     Some(match command {
         Command::Doctor
@@ -1347,6 +1362,8 @@ fn without_json(command: &Command) -> Option<&'static str> {
         Command::Import { dry_run: true, .. } => return None,
         Command::Import { .. } => "import",
         Command::Remove { .. } => "remove",
+        // It explains this itself; it doesn't change anything.
+        Command::Completions { .. } => return None,
     })
 }
 

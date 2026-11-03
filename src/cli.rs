@@ -1,8 +1,53 @@
 //! Command-line interface (design §5).
 
 use crate::machine::{Cpu, Network};
-use clap::{Parser, Subcommand};
+use crate::model::ALL_MODELS;
+use clap::builder::{PossibleValue, TypedValueParser};
+use clap::{CommandFactory, Parser, Subcommand, ValueHint};
+use clap_complete::Shell;
+use std::ffi::OsStr;
 use std::path::PathBuf;
+
+/// The backends a machine can name, for completion. A test checks it against
+/// what this macman really has.
+pub const BACKEND_NAMES: [&str; 3] = ["minivmac", "basilisk2", "sheepshaver"];
+
+/// Accepts any string, as `String` does, so macman itself explains a bad
+/// value, but offers `choices` to shell completion and `--help`.
+#[derive(Clone)]
+struct Suggest(fn() -> Vec<&'static str>);
+
+impl TypedValueParser for Suggest {
+    type Value = String;
+
+    fn parse_ref(
+        &self,
+        command: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &OsStr,
+    ) -> Result<String, clap::Error> {
+        clap::builder::StringValueParser::new().parse_ref(command, arg, value)
+    }
+
+    fn possible_values(&self) -> Option<Box<dyn Iterator<Item = PossibleValue> + '_>> {
+        Some(Box::new((self.0)().into_iter().map(PossibleValue::new)))
+    }
+}
+
+fn backends() -> Suggest {
+    Suggest(|| BACKEND_NAMES.to_vec())
+}
+
+fn models() -> Suggest {
+    Suggest(|| ALL_MODELS.iter().map(|model| model.name()).collect())
+}
+
+/// The completion script for `shell`, generated from this definition.
+pub fn completion_script(shell: Shell) -> Vec<u8> {
+    let mut script = Vec::new();
+    clap_complete::generate(shell, &mut Cli::command(), "macman", &mut script);
+    script
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -63,11 +108,12 @@ pub enum Command {
         #[arg(long, conflicts_with = "names")]
         all: bool,
         /// Archive to create, such as machines.tar.gz
-        #[arg(short, long, value_name = "FILE")]
+        #[arg(short, long, value_name = "FILE", value_hint = ValueHint::FilePath)]
         output: PathBuf,
     },
     /// Bring in machines from an archive; existing data is never replaced
     Import {
+        #[arg(value_hint = ValueHint::FilePath)]
         file: PathBuf,
         /// Import an independent copy under this name (one-machine archives only)
         #[arg(long, value_name = "NAME")]
@@ -83,12 +129,18 @@ pub enum Command {
         #[arg(long)]
         delete_disks: bool,
     },
+    /// Print a shell completion script, such as for `macman completions zsh > ~/.zfunc/_macman`
+    Completions {
+        /// The shell to complete for
+        shell: Shell,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum RomCommand {
     /// Import a ROM file you legally own
     Add {
+        #[arg(value_hint = ValueHint::FilePath)]
         file: PathBuf,
         #[arg(long)]
         name: String,
@@ -101,6 +153,7 @@ pub enum RomCommand {
 pub enum SystemCommand {
     /// Register an existing bootable disk image
     Add {
+        #[arg(value_hint = ValueHint::FilePath)]
         file: PathBuf,
         #[arg(long)]
         name: String,
@@ -125,10 +178,15 @@ pub enum SystemCommand {
 #[derive(Debug, Subcommand)]
 pub enum DiskCommand {
     /// Show an image's format and partitions
-    Info { file: PathBuf },
+    Info {
+        #[arg(value_hint = ValueHint::FilePath)]
+        file: PathBuf,
+    },
     /// Copy a volume out of a partitioned or Disk Copy image; the source is unchanged
     Extract {
+        #[arg(value_hint = ValueHint::FilePath)]
         source: PathBuf,
+        #[arg(value_hint = ValueHint::FilePath)]
         dest: PathBuf,
         /// Partition to extract, if the image has several volumes
         #[arg(long, value_name = "N")]
@@ -143,10 +201,10 @@ pub enum DiskCommand {
 pub struct CreateArgs {
     pub name: String,
     /// Emulator: minivmac (the default), basilisk2, or sheepshaver
-    #[arg(long)]
+    #[arg(long, value_parser = backends(), hide_possible_values = true)]
     pub backend: Option<String>,
     /// Hardware model, such as plus, se, classic, ii, or iix (Mini vMac only)
-    #[arg(long)]
+    #[arg(long, value_parser = models(), hide_possible_values = true)]
     pub model: Option<String>,
     /// Name of an imported ROM
     #[arg(long)]
@@ -187,7 +245,7 @@ pub struct CreateArgs {
     #[arg(long, value_enum)]
     pub network: Option<Network>,
     /// Host folder to show the guest as a volume (Basilisk II and SheepShaver only)
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
     pub shared_folder: Option<PathBuf>,
 }
 
@@ -195,7 +253,7 @@ pub struct CreateArgs {
 pub struct RunArgs {
     pub name: Option<String>,
     /// Attach an extra disk for this run only (repeatable)
-    #[arg(long = "disk", value_name = "FILE")]
+    #[arg(long = "disk", value_name = "FILE", value_hint = ValueHint::FilePath)]
     pub disks: Vec<PathBuf>,
     /// Give the emulator read-only throwaway copies of the --disk files
     #[arg(long, requires = "disks")]
@@ -205,7 +263,7 @@ pub struct RunArgs {
     pub any_format: bool,
     /// Attach a CD image, read-only, for this run only, and start from it (repeatable;
     /// SheepShaver, and Basilisk II on Linux)
-    #[arg(long = "cdrom", value_name = "FILE")]
+    #[arg(long = "cdrom", value_name = "FILE", value_hint = ValueHint::FilePath)]
     pub cdroms: Vec<PathBuf>,
 }
 
@@ -213,4 +271,22 @@ pub struct RunArgs {
 pub enum ConfigCommand {
     /// Print a machine's configuration (the current one by default)
     Show { name: Option<String> },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::Paths;
+
+    #[test]
+    fn completion_offers_the_backends_this_macman_has() {
+        let root = tempfile::tempdir().unwrap();
+        let backends = crate::default_backends(&Paths::under(root.path())).unwrap();
+        assert_eq!(backends.names(), BACKEND_NAMES);
+    }
+
+    #[test]
+    fn the_definition_is_consistent() {
+        Cli::command().debug_assert();
+    }
 }
