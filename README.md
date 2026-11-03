@@ -529,7 +529,10 @@ checkpoint beside the boot disk, checks that copy against the digest, and only t
 swaps it in, so the disk is either all as it was or all the checkpoint; a checkpoint
 that no longer matches its digest is refused, and nothing changes. The checkpoint stays,
 to roll back to again. What's on the boot disk now is lost, unless `--save NAME` keeps
-it as a checkpoint first, which makes the rollback one to undo.
+it as a checkpoint first, which makes the rollback one to undo. If the boot disk is
+missing, such as deleted by mistake, `rollback` restores it from the checkpoint and says
+so; there's nothing then for `--save` to keep, so given `--save`, it refuses and changes
+nothing.
 
 Each checkpoint is a full copy of the disk, so it takes as much space on the host as the
 disk did, less where the file system shares or skips storage: macman copies with a

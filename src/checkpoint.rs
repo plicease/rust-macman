@@ -270,18 +270,41 @@ pub fn delete(paths: &Paths, machine: &Machine, name: &str) -> Result<()> {
 /// Replace the machine's boot disk with checkpoint `name`, which is left as
 /// it is. With `save`, first keep the disk as it stands as a new checkpoint,
 /// so this can be undone; it's returned.
+/// What a rollback did, beyond restoring the checkpoint.
+#[derive(Debug)]
+pub struct RolledBack {
+    /// The checkpoint `--save` made of the boot disk first.
+    pub saved: Option<Checkpoint>,
+    /// Whether the boot disk was missing, and so recreated, not replaced.
+    pub restored_missing: bool,
+}
+
+/// Replace the boot disk of `machine` with checkpoint `name`, keeping the disk
+/// first as checkpoint `save`, if given. A missing boot disk is restored, which
+/// is how to recover one deleted by mistake, but then there's nothing to save,
+/// so `save` is refused rather than skipped.
 pub fn rollback(
     paths: &Paths,
     machine: &Machine,
     name: &str,
     save: Option<&str>,
-) -> Result<Option<Checkpoint>> {
+) -> Result<RolledBack> {
     let (checkpoint, image) = load(paths, &machine.name, name)?;
     if let Some(save) = save {
         validate_name("checkpoint", save)?;
     }
     let _shut = shut_down(paths, machine)?;
     let (live, disk) = boot_disk(paths, machine)?;
+    let missing = !live.exists();
+    if missing && save.is_some() {
+        bail!(
+            "machine {:?} is missing its boot disk {}, so there's nothing for --save to keep; \
+             roll back without --save to restore the disk from the checkpoint; nothing was \
+             changed",
+            machine.name,
+            live.display()
+        );
+    }
     if checkpoint.disk != disk {
         bail!(
             "checkpoint {name:?} is of disk {:?}, but machine {:?} now boots from {disk:?}",
@@ -298,8 +321,8 @@ pub fn rollback(
         );
     }
     let saved = match save {
-        Some(save) if live.exists() => Some(capture(paths, machine, &live, &disk, save)?),
-        _ => None,
+        Some(save) => Some(capture(paths, machine, &live, &disk, save)?),
+        None => None,
     };
 
     let staged = live.with_file_name(format!(
@@ -328,7 +351,10 @@ pub fn rollback(
             machine.name
         )
     })?;
-    Ok(saved)
+    Ok(RolledBack {
+        saved,
+        restored_missing: missing,
+    })
 }
 
 fn set_readonly(path: &Path, readonly: bool) -> Result<()> {

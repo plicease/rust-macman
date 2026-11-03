@@ -1090,3 +1090,71 @@ fn a_checkpoint_hard_linked_to_the_disk_counts_once() {
     std::fs::hard_link(env.machine_disk("wombat-6"), &image).unwrap();
     assert_eq!(used(), alone);
 }
+
+#[test]
+fn rollback_restores_a_missing_boot_disk_but_wont_pretend_to_save_it() {
+    let env = Env::new();
+    env.register();
+    env.create("wombat-6");
+    env.ok(&["checkpoint", "create", "wombat-6", "--name", "clean"]);
+    let disk = env.machine_disk("wombat-6");
+    let original = std::fs::read(&disk).unwrap();
+    std::fs::remove_file(&disk).unwrap();
+    let names = || -> Vec<serde_json::Value> {
+        let list: serde_json::Value =
+            serde_json::from_str(&env.ok(&["--json", "checkpoint", "list", "wombat-6"])).unwrap();
+        list["checkpoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].clone())
+            .collect()
+    };
+
+    // There's nothing to save, so --save is refused, not skipped.
+    let error = env.fails(&[
+        "rollback",
+        "wombat-6",
+        "--checkpoint",
+        "clean",
+        "--save",
+        "before",
+        "--yes",
+    ]);
+    assert!(error.contains("missing its boot disk"), "{error}");
+    assert!(error.contains("without --save"), "{error}");
+    assert!(error.contains("nothing was changed"), "{error}");
+    assert!(!disk.exists());
+    assert_eq!(names(), ["clean"]);
+
+    // Without it, the rollback restores the disk, and says that's what it did.
+    let text = env.ok(&["rollback", "wombat-6", "--checkpoint", "clean", "--yes"]);
+    assert!(
+        text.contains("Restored the missing boot disk of wombat-6 from checkpoint clean"),
+        "{text}"
+    );
+    assert!(std::fs::read(&disk).unwrap() == original, "not restored");
+    assert_eq!(names(), ["clean"]);
+
+    // With the disk back, --save works as usual.
+    let text = env.ok(&[
+        "rollback",
+        "wombat-6",
+        "--checkpoint",
+        "clean",
+        "--save",
+        "before",
+        "--yes",
+    ]);
+    assert!(
+        text.contains("Saved the boot disk of wombat-6 as checkpoint before"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Rolled wombat-6 back to checkpoint clean"),
+        "{text}"
+    );
+    let mut all = names();
+    all.sort_by_key(ToString::to_string);
+    assert_eq!(all, ["before", "clean"]);
+}

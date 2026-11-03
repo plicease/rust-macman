@@ -1154,9 +1154,14 @@ impl App {
         let name = self.resolve_name(name)?;
         let machine = Machine::load(&self.paths, &name)?;
         let (saved, _) = checkpoint::load(&self.paths, &name, checkpoint)?;
-        if !yes {
+        let missing = machine
+            .disk_paths(&self.paths)?
+            .iter()
+            .any(|(path, disk)| disk.boot && !path.exists());
+        if !yes && !(missing && save.is_some()) {
             let keep = match save {
                 Some(save) => format!(" It's saved first as checkpoint {save:?}."),
+                None if missing => " The boot disk is missing, so this restores it.".to_string(),
                 None => " Its current contents will be lost; --save NAME keeps them.".to_string(),
             };
             confirm(
@@ -1170,11 +1175,15 @@ impl App {
                 ),
             )?;
         }
-        let kept = checkpoint::rollback(&self.paths, &machine, checkpoint, save)?;
-        if let Some(kept) = kept {
+        let done = checkpoint::rollback(&self.paths, &machine, checkpoint, save)?;
+        if let Some(kept) = done.saved {
             println!("Saved the boot disk of {name} as checkpoint {}", kept.name);
         }
-        println!("Rolled {name} back to checkpoint {checkpoint}");
+        if done.restored_missing {
+            println!("Restored the missing boot disk of {name} from checkpoint {checkpoint}");
+        } else {
+            println!("Rolled {name} back to checkpoint {checkpoint}");
+        }
         Ok(())
     }
 
