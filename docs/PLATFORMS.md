@@ -106,13 +106,18 @@ with a 68030 setting.
 The macOS smoke test covered Shut Down from inside the guest, killing the emulator, killing
 macman, and rebuilding a damaged build. Homebrew hasn't been tried, only MacPorts.
 
-Installing from a CD has been tried on Linux x86-64 only, and the other hosts refuse it. A
-machine made with `--disk-size 1G`, the Quadra 650 ROM, and 128M started from the Mac OS 8.1
+Installing from a CD has been tried on Linux x86-64 and macOS ARM64, and Windows refuses
+it. On Linux, a machine made with `--disk-size 1G`, the Quadra 650 ROM, and 128M started from the Mac OS 8.1
 CD image through `macman run --cdrom`, offered to initialize the disk, and took a basic
 install, with "Update Apple Hard Disk Drivers" turned off. After Shut Down, which ended the
 run normally, it started Mac OS 8.1 from its own disk without the CD. The ISO was unchanged.
 With cue sheets, a Mac OS 8.1 machine started from its own disk with a plain and a Joliet ISO
 9660 image attached, and both mounted as data discs whose files the Finder showed.
+
+On macOS, a machine made the same way installed Mac OS 8.1 from its CD image, again with
+"Update Apple Hard Disk Drivers" off, and then started 8.1 from its own disk. The build
+there now has `--with-bincue`, for the cue sheets, so a macOS Basilisk II build from before
+is rebuilt once. The CD image's hash was unchanged.
 
 The pin is commit `f532be3d3d70` of [kanjitalk755/macemu](https://github.com/kanjitalk755/macemu),
 the maintained fork, and its SHA-256 is that of the archive GitHub generates for it. If
@@ -128,7 +133,7 @@ what this backend is for.
 |---|---|
 | Linux x86-64 | Candidate: **boots Mac OS 8.1, and installs and boots 9.0.4**, smoke test unfinished |
 | Windows x86-64 | Candidate: **builds and boots Mac OS 9.0.4**, interpreted, smoke test unfinished |
-| macOS ARM64 | No: refused |
+| macOS ARM64 | Candidate: **builds and boots Mac OS 9.0.4**, interpreted, smoke test unfinished |
 
 On Linux x86-64 macman offers the backend, so that it can be tested. It's been built from
 the pinned source and run on one host, Ubuntu 26.04 with GCC 15.2 and SDL 2.32. The build
@@ -212,10 +217,36 @@ menu bar. `run --cdrom` and `create --disk-size` are refused there, as for Basil
 since the emulator finds CDs its own way on Windows, which hasn't been tried. Mac OS 8.x
 hasn't been tried there either.
 
-### Other hosts, and guests
+On macOS ARM64, macman builds it as it does Basilisk II there, with `configure`, not
+upstream's Xcode project, and with SDL 2 from MacPorts or Homebrew. `configure` names the
+host `arm-apple-darwin`, and gives it upstream's fixed offset for Mac addresses,
+`0x400000000000`, as a 64-bit Mach-O program can't map address 0. So nothing is mapped
+there, and `vm.mmap_min_addr` doesn't come into it. There's no JIT, as `configure` makes one
+only for ELF, so the build says `--disable-jit` and the PowerPC code is interpreted. The
+emulator locks its disks there, so if macman dies it keeps running, and macman refuses those
+disks until it's quit. It locks CD images there too, so a run holds its CDs exclusively,
+not shared as on Linux, and a second machine naming one is refused rather than left without
+it. With a CD attached, the emulator also adds a drive that follows the host's own CD
+media, as it adds `/dev/cdrom` on Linux.
 
-macOS ARM64 is refused, whatever Basilisk II does there: there's no JIT, and upstream goes
-through Xcode. It would need a recipe of its own, and real tests.
+On an M1 Max with Xcode 26.3 and MacPorts SDL 2.32.10, it built from the pinned source, and
+booted Mac OS 9.0.4 to the Finder on a New World `Mac OS ROM`, with 128M at 800x600. Shut
+Down from inside the guest ended the run with exit code 0 and left no session. A second
+machine, with 256M, reused the build. A second run of a running machine was refused.
+Killing macman left the emulator running with its disk held, and the next run was refused,
+saying why. Killing the emulator was reported as signal 9.
+
+A machine made with `--disk-size 1G`, the same ROM, and 256M started from the Mac OS 9.0.4
+CD image through `macman run --cdrom`, and installed onto the disk once "Update Apple Hard
+Disk Drivers" was turned off; with it on, the installer stalled there, as on Linux. After
+Shut Down it started 9.0.4 from its own disk, with a plain ISO 9660 image attached, which
+mounted as a data disc with its folder and file. While the install ran, a second machine
+naming the same CD image was refused. The CD images' hashes were unchanged.
+
+Sound, `slirp`, full screen, a shared folder, read-only disks, a damaged build, Mac OS 8.x,
+Homebrew, several HFS CDs at once, and host CD media haven't been tried there.
+
+### Other hosts, and guests
 
 | Guest | ROM | Status |
 |---|---|---|
@@ -226,6 +257,7 @@ through Xcode. It would need a recipe of its own, and real tests.
 | Mac OS 9.0.4 CD | Old World 4M dump (TNT nanokernel) | Starts from the CD. Not installed |
 | No system, a blank disk | Either of those ROMs | Stays up. New World reaches the question-mark disk |
 | Mac OS 9.0.4, on Windows | New World `Mac OS ROM` | Boots to the Finder, 64M at 800x600 |
+| Mac OS 9.0.4, on macOS | New World `Mac OS ROM` | Boots to the Finder, 128M at 800x600 |
 | Mac OS 7.5.2 to 8.0, 8.5 to 9.0 | One that suits the guest | Untested |
 | Mac OS 9.1, 9.2.x, Mac OS X | Any | Not claimed. The emulator decodes such ROMs, but macman makes no promise |
 

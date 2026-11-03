@@ -3,7 +3,10 @@
 //! script, which records how it was called and acts out what the real one does.
 //! None of this shows that the real emulator builds or boots: for that, see
 //! docs/SMOKE_TEST.md.
-#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#![cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64"),
+))]
 
 mod common;
 
@@ -17,6 +20,8 @@ use macman::backend::sheepshaver::{BACKEND_NAME, SheepShaver};
 use macman::backend::source::SourcePin;
 use macman::backend::{Backends, CheckLevel};
 use macman::cli::Cli;
+#[cfg(target_os = "macos")]
+use macman::disk::{self, LockMode};
 use macman::fsutil::{list_dir, sha256_file};
 use macman::machine::{Machine, Network};
 use macman::paths::Paths;
@@ -448,6 +453,8 @@ fn a_refusal_that_exits_zero_is_still_a_failure() {
     assert_eq!(h.sessions(), 0);
 }
 
+/// Only Linux maps low memory at address 0.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_failure_to_map_low_memory_names_the_fix() {
     let h = harness!();
@@ -558,7 +565,11 @@ fn a_blank_machine_installs_from_a_cd_it_does_not_keep() {
     let cd_path = cd.to_str().unwrap();
     assert_eq!(h.cmd(&["run", "new", "--cdrom", cd_path]).unwrap(), 0);
     let log = h.log();
-    assert!(log.contains(&format!("--cdrom {cd_path}")), "{log}");
+    let resolved = fs::canonicalize(&cd).unwrap();
+    assert!(
+        log.contains(&format!("--cdrom {}", resolved.display())),
+        "{log}"
+    );
     assert!(log.contains("nocdrom false"), "{log}");
     assert!(log.contains("bootdriver -62"), "{log}");
     assert_eq!(fs::read(&cd).unwrap(), before);
@@ -644,4 +655,59 @@ fn a_bad_size_makes_no_machine() {
         assert!(h.cmd(&args).is_err(), "{size}");
     }
     assert!(!h.paths.machine("new").exists());
+}
+
+/// macman's own locks go with it, so only the emulator's show one left behind.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_disk_held_by_an_emulator_that_outlived_macman_is_refused() {
+    let h = harness!();
+    h.create("a");
+    let held = fs::File::open(h.paths.machine("a").join("system.dsk")).unwrap();
+    held.lock().unwrap();
+
+    let error = h.cmd(&["run", "a"]).unwrap_err();
+    assert!(error.to_string().contains("outlived macman"), "{error}");
+    assert!(!h.log().contains("run --config"), "{}", h.log());
+
+    drop(held);
+    assert_eq!(h.cmd(&["run", "a"]).unwrap(), 0);
+}
+
+/// Neither the JIT nor low memory comes into a macOS build.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_macos_build_is_interpreted() {
+    let h = harness!();
+    h.create("a");
+    assert_eq!(h.cmd(&["run", "a"]).unwrap(), 0);
+    let log = h.log();
+    assert!(log.contains("--disable-jit"), "{log}");
+    assert!(log.lines().any(|line| line == "jit false"), "{log}");
+    assert!(!h.doctor_says("mmap_min_addr"));
+}
+
+/// The emulator locks CD images on macOS too, so a second run would go
+/// without the disc, and one left behind by a killed macman holds it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_cd_another_run_or_emulator_holds_is_refused() {
+    let h = harness!();
+    h.create("a");
+    let (cd, _) = write_partitioned_disk(h.root.path(), "installer disc.iso");
+    let cd_path = cd.to_str().unwrap();
+
+    let other = disk::lock_image(&h.paths, &cd, LockMode::Shared).unwrap();
+    let error = h.cmd(&["run", "a", "--cdrom", cd_path]).unwrap_err();
+    assert!(error.to_string().contains("in use"), "{error}");
+    drop(other);
+
+    let held = fs::File::open(&cd).unwrap();
+    held.lock().unwrap();
+    let error = h.cmd(&["run", "a", "--cdrom", cd_path]).unwrap_err();
+    assert!(error.to_string().contains("outlived macman"), "{error}");
+    assert!(!h.log().contains("run --config"), "{}", h.log());
+    drop(held);
+
+    assert_eq!(h.cmd(&["run", "a", "--cdrom", cd_path]).unwrap(), 0);
 }

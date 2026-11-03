@@ -189,6 +189,73 @@ pub fn linux_toolchain_identity() -> Result<String> {
     Ok(format!("{compiler} SDL {}", sdl.as_deref().unwrap_or("?")))
 }
 
+/// Both emulators build on ARM64 macOS as on Linux, with `configure`, rather
+/// than with upstream's Xcode projects, which want their libraries installed
+/// system-wide. Neither has a JIT there.
+pub const MACOS: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+
+/// What `configure` builds with on macOS that Apple's tools don't provide.
+/// Mini vMac's `doctor` checks already cover those.
+pub const MACOS_TOOLS: &[&str] = &["autoconf", "aclocal", "pkg-config"];
+
+/// What the compiler needs to be told to find `libraries` on macOS, by their
+/// `pkg-config` names. MacPorts and Homebrew put them where Apple's clang
+/// doesn't look, and `configure` doesn't ask.
+pub fn macos_library_flags(libraries: &[(&str, &str)], option: &str) -> String {
+    let packages = libraries.iter().map(|(package, _)| *package);
+    let args: Vec<&str> = std::iter::once(option).chain(packages).collect();
+    first_line("pkg-config", &args).unwrap_or_default()
+}
+
+/// The `bash` for [`run_configure_build`] on macOS. `gcc` there may be a real
+/// GCC from a package manager, not Apple's clang.
+pub fn macos_build_command(libraries: &[(&str, &str)]) -> Command {
+    let mut command = Command::new("bash");
+    command
+        .env("CC", "clang")
+        .env("CXX", "clang++")
+        .env(
+            "CPPFLAGS",
+            macos_library_flags(libraries, "--cflags-only-I"),
+        )
+        .env("LDFLAGS", macos_library_flags(libraries, "--libs-only-L"));
+    command
+}
+
+/// A build links `libraries` dynamically, so it's only good for the versions
+/// it saw, where it found them.
+pub fn macos_toolchain_identity(libraries: &[(&str, &str)]) -> Result<String> {
+    let versions = libraries
+        .iter()
+        .map(|(package, name)| {
+            let version = first_line("pkg-config", &["--modversion", package]);
+            format!("{name} {}", version.as_deref().unwrap_or("?"))
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok(format!(
+        "{} {versions} {}",
+        super::minivmac::macos_toolchain_identity()?,
+        macos_library_flags(libraries, "--libs-only-L"),
+    ))
+}
+
+/// Refuse a disk that an emulator holds, which macman's own locks can't show
+/// once the macman that started it has gone. On macOS, `Sys_open` takes
+/// `O_EXLOCK` on every disk file, and a second emulator would only print a
+/// warning that stays in its buffer, and show no disk. A file system without
+/// locks can't be held, and the emulator goes on without them there too.
+pub fn refuse_held_disk(disk: &Path, label: &str) -> Result<()> {
+    let file = File::open(disk).with_context(|| format!("cannot open {}", disk.display()))?;
+    if let Err(std::fs::TryLockError::WouldBlock) = file.try_lock() {
+        bail!(
+            "{} is held by a {label} that outlived macman; quit that emulator first",
+            disk.display()
+        );
+    }
+    Ok(())
+}
+
 pub fn megabytes(memory: &str) -> Option<u32> {
     memory.strip_suffix('M')?.parse().ok()
 }

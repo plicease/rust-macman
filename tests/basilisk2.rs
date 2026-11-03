@@ -578,8 +578,6 @@ fn doctor_fails_for_a_missing_dependency_only_if_a_machine_needs_it() {
     assert_eq!(level(BACKEND_NAME), CheckLevel::Fail);
 }
 
-/// macOS has its own way of finding CDs, which hasn't been tried.
-#[cfg(target_os = "linux")]
 #[test]
 fn a_blank_machine_installs_from_a_cd_it_does_not_keep() {
     let h = harness!();
@@ -593,7 +591,11 @@ fn a_blank_machine_installs_from_a_cd_it_does_not_keep() {
     let cd_path = cd.to_str().unwrap();
     assert_eq!(h.cmd(&["run", "new", "--cdrom", cd_path]).unwrap(), 0);
     let log = h.log();
-    assert!(log.contains(&format!("--cdrom {cd_path}")), "{log}");
+    let resolved = fs::canonicalize(&cd).unwrap();
+    assert!(
+        log.contains(&format!("--cdrom {}", resolved.display())),
+        "{log}"
+    );
     assert!(log.contains("nocdrom false"), "{log}");
     assert!(log.contains("bootdriver -62"), "{log}");
     assert_eq!(fs::read(&cd).unwrap(), before);

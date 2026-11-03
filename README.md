@@ -222,12 +222,13 @@ Mac OS X, or G4 and G5 machines.
 **This backend is a preview.** On Linux x86-64 it has booted Mac OS 8.1 on an Old World ROM,
 and installed and booted Mac OS 9.0.4 on a New World ROM, and `slirp` networking, a shared
 folder, read-only disks, and sound on a real device work. On Windows x86-64 it has booted
-Mac OS 9.0.4, with `slirp`, full screen, and sound working. Treat it as a preview until
+Mac OS 9.0.4, with `slirp`, full screen, and sound working, and on macOS ARM64 it has
+installed and booted Mac OS 9.0.4 and shut down cleanly. Treat it as a preview until
 [the smoke test](docs/SMOKE_TEST.md#sheepshaver) has passed; see
 [docs/PLATFORMS.md](docs/PLATFORMS.md#sheepshaver).
 
-It's offered on Linux x86-64 and Windows x86-64. On Linux it compiles with the same
-packages as Basilisk II:
+It's offered on Linux x86-64, Windows x86-64, and macOS ARM64. On Linux it compiles with
+the same packages as Basilisk II:
 
 ```sh
 apt install build-essential autoconf automake pkg-config libsdl2-dev
@@ -238,6 +239,16 @@ A shared folder and installing from a CD aren't available, disks must be under 4
 macman is killed the emulator keeps running, with Windows keeping others off its disks. For
 sound, choose "Built-in" as the output in the guest's Sound control panel; see
 [docs/PLATFORMS.md](docs/PLATFORMS.md#sheepshaver).
+
+On macOS it needs what Basilisk II does there, less MPFR:
+
+```sh
+port install autoconf automake pkgconfig libsdl2
+brew install autoconf automake pkg-config sdl2
+```
+
+It builds without a JIT there too, so it's slower. If macman is killed, the emulator keeps running and holds a lock on its disks,
+as Basilisk II does, and macman refuses those disks until it's quit.
 
 On Linux it builds to upstream's defaults, where Mac addresses are host addresses, so it needs to
 map memory at address 0, which most distributions forbid. `macman doctor` says when that
@@ -281,8 +292,8 @@ if macman is killed, it takes the emulator with it.
 
 ## Installing from a CD
 
-On Linux, a SheepShaver or Basilisk II machine can start with a blank disk instead of a
-system image, and install from a CD image of your own:
+On Linux and macOS, a SheepShaver or Basilisk II machine can start with a blank disk
+instead of a system image, and install from a CD image of your own:
 
 ```sh
 macman create ss904 --backend sheepshaver --rom newworld --disk-size 1G --memory 256M
@@ -292,9 +303,9 @@ macman create q81 --backend basilisk2 --rom quadra --disk-size 1G --memory 128M
 macman run q81 --cdrom MacOS8_1.iso
 ```
 
-Both emulators on Windows, and Basilisk II on macOS, refuse both options for now, as their
-builds there find CDs in other ways, which haven't been tried. `macman run --disk` still attaches a CD image
-there, as a disk.
+Both emulators on Windows refuse both options for now, as their builds there find CDs in
+another way, which hasn't been tried. `macman run --disk` still attaches a CD image there,
+as a disk.
 
 `--disk-size` takes K, M, or G, from 1M to 2048G, and makes a sparse file of zeros. It
 isn't formatted: the guest offers to initialize it. It's the machine's own disk from then
@@ -308,7 +319,10 @@ Access but can't start from, so with only such discs it starts from its own disk
 be repeated: discs with HFS go first, and the first is the one the Mac starts from. An
 installer CD's own system may not read a plain ISO 9660 disc, and offers to initialize it,
 which it can't. While a CD image is attached, the guest also sees the host's
-`/dev/cdrom`, if there is one.
+`/dev/cdrom` on Linux, if there is one, and on macOS whatever CD media the host has.
+
+On macOS the emulator locks each CD image while it runs, so one image serves one machine at
+a time, and macman refuses a second run that names it.
 
 If the installer stops at "Updating Apple hard disk drivers", start it again with that
 option turned off under Options. The emulator's disk isn't an Apple drive.

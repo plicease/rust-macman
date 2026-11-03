@@ -141,15 +141,15 @@ On macOS, these replace the matching steps:
 | `macman doctor` before installing anything | Names the missing tools and libraries, including MPFR, as warnings until a machine needs them. |
 | Kill `macman` with `kill -9` while the emulator runs | The emulator carries on. `macman run q7` warns about the earlier run, then refuses, saying the disk is held by a Basilisk II that outlived macman. |
 | Quit that emulator, then `macman run q7` | Boots. |
-| On Linux: `macman create qn --backend basilisk2 --rom quadra --disk-size 1G --memory 128M`, then `macman run qn --cdrom MacOS8_1.iso` | Starts from the CD, and offers to initialize the disk. Install, with "Update Apple Hard Disk Drivers" off under Options, then Shut Down. |
+| On Linux or macOS: `macman create qn --backend basilisk2 --rom quadra --disk-size 1G --memory 128M`, then `macman run qn --cdrom MacOS8_1.iso` | Starts from the CD, and offers to initialize the disk. Install, with "Update Apple Hard Disk Drivers" off under Options, then Shut Down. |
 | On Linux: `macman run qn` | Starts Mac OS 8.1 from its own disk. The ISO's hash is unchanged. |
 | On Linux: make two data discs with `genisoimage -o a.iso DIR` and `genisoimage -J -o b.iso DIR`, then `macman run qn --cdrom a.iso --cdrom b.iso` | Starts from its own disk, and both discs mount with their files, not as audio CDs. |
-| On Windows or macOS: `macman create ... --disk-size 1G`, or `macman run q7 --cdrom MacOS8_1.iso` | Refused, saying it isn't available on this host. |
+| On Windows: `macman create ... --disk-size 1G`, or `macman run q7 --cdrom MacOS8_1.iso` | Refused, saying it isn't available on this host. |
 
 ## SheepShaver
 
-Run this on Linux x86-64 or Windows x86-64, the candidate hosts. It has been run in part,
-with Mac OS 8.1 and 9.0.4 on Linux and 9.0.4 on Windows, and
+Run this on Linux x86-64, Windows x86-64, or macOS ARM64, the candidate hosts. It has been
+run in part, with Mac OS 8.1 and 9.0.4 on Linux and 9.0.4 on Windows and macOS, and
 [PLATFORMS.md](PLATFORMS.md#sheepshaver) lists what passed and what's left. On Windows, set
 up the directories as at the top of this file, skip the `vm.mmap_min_addr` steps, use the
 Windows steps under [Basilisk II](#basilisk-ii) for killing processes, and expect a shared
@@ -198,3 +198,14 @@ macman create p9b --backend sheepshaver --rom ppc --system mac-os-9 --memory 256
 | `macman run pn --cdrom a.iso --cdrom b.iso`, with the data discs above | Starts from its own disk, and both discs mount with their files, not as audio CDs. |
 | `macman run pn --cdrom a.iso --cdrom MacOS9.iso` | Starts from the 9.0.4 CD, though it was named second. |
 | `sudo sysctl vm.mmap_min_addr=65536`, or your distribution's value | Puts the host back as it was. |
+
+On macOS, skip the `vm.mmap_min_addr` steps, and these replace the matching steps:
+
+| Step | Expected |
+|---|---|
+| `macman doctor` before installing anything | Names the missing tools and SDL, as warnings until a machine needs them, and says nothing of `vm.mmap_min_addr`. |
+| `macman run p9` | Downloads, builds, and boots to the Finder. |
+| Kill `macman` with `kill -9` while the emulator runs | The emulator carries on. `macman run p9` warns about the earlier run, then refuses, saying the disk is held by a SheepShaver that outlived macman. |
+| Quit that emulator, then `macman run p9` | Boots. |
+| While `pn` runs with `--cdrom MacOS9.iso`: `macman run p9 --cdrom MacOS9.iso` | Refused, because the CD image is in use. |
+| On data discs: make them with `hdiutil makehybrid -iso -joliet -o a.iso DIR` | As on Linux. |

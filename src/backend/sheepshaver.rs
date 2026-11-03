@@ -41,12 +41,24 @@
 //!   disks, so it needn't die with macman, no shared folder can be offered, and
 //!   disks must be under 4G.
 //!
-//! macOS ARM64 has no JIT, and goes through Xcode upstream. It hasn't been
-//! tried, so Basilisk II's success there isn't taken to mean anything here.
+//! macOS ARM64 builds as Linux does, as Basilisk II does there, and not with
+//! upstream's Xcode project. There:
+//!
+//! - There's no JIT, as `configure` only knows how to make one for ELF, so it's
+//!   configured out and `jit` is off.
+//! - A process can't map address 0, as a 64-bit Mach-O program's `__PAGEZERO`
+//!   covers it. `configure` knows the host, as `arm-apple-darwin`, and gives it
+//!   upstream's fixed offset for Mac addresses, `0x400000000000`, so Mac memory
+//!   starts there and `vm.mmap_min_addr` doesn't come into it. RAM starts at
+//!   Mac address `0x10000000` and the ROM at `0x50000000`, so 1024M fits.
+//! - SDL comes from MacPorts or Homebrew, and only SDL: the PowerPC emulator's
+//!   FPU needs no MPFR.
+//! - The emulator locks its disks, and its CD images too, so it needn't die
+//!   with macman, and macman tries those locks first, as for Basilisk II.
 
 use super::macemu::{
-    self, Build, disk_argument, display_check, library_checks, megabytes, run_configure_build,
-    supervise, tool_checks,
+    self, Build, MACOS, disk_argument, display_check, library_checks, megabytes,
+    run_configure_build, supervise, tool_checks,
 };
 use super::source::{self, Source, SourcePin, tool_exists};
 use super::{
@@ -81,13 +93,17 @@ const BUILD_DIRECTORY: &str = if WINDOWS {
 const PREFERENCES: &str = "prefs";
 const HOST: Option<&str> = if WINDOWS {
     Some("x86_64-pc-windows-gnu")
+} else if MACOS {
+    Some("aarch64-apple-darwin")
 } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
     Some("x86_64-unknown-linux-gnu")
 } else {
     None
 };
-const UNSUPPORTED_HOST: &str = "the SheepShaver backend supports only Linux x86-64 and Windows \
-                                x86-64 hosts; see docs/PLATFORMS.md";
+const UNSUPPORTED_HOST: &str = "the SheepShaver backend supports only Linux x86-64, Windows \
+                                x86-64, and macOS ARM64 hosts; see docs/PLATFORMS.md";
+/// Whether low memory is mapped at address 0, which only Linux builds do.
+const LOW_MEMORY_AT_ZERO: bool = cfg!(target_os = "linux");
 /// How a failed start shows that low memory couldn't be mapped
 /// (`STR_LOW_MEM_MMAP_ERR`).
 const LOW_MEMORY_ERROR: &str = "Low Memory";
@@ -95,12 +111,32 @@ const LOW_MEMORY_FIX: &str = "run `sudo sysctl vm.mmap_min_addr=0`, which lets p
                               address 0 until the next reboot; see docs/PLATFORMS.md";
 /// Where `run --cdrom` and `create --disk-size` have been tried. On Windows the
 /// emulator finds CDs its own way, which hasn't been.
-const INSTALLS_FROM_CD: bool = !WINDOWS;
+const INSTALLS_FROM_CD: bool = cfg!(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64"),
+));
+/// Only Linux x86-64 builds have a JIT.
+const JIT: bool = !(WINDOWS || MACOS);
+/// The JIT is configured out where `configure` can't make one, so the build
+/// says so, and asks for nothing it won't do.
+const MACOS_CONFIGURE_OPTIONS: &[&str] = &[
+    "--enable-sdl-video",
+    "--enable-sdl-audio",
+    "--with-gtk=no",
+    "--with-esd=no",
+    "--with-bincue",
+    "--disable-jit",
+];
+/// What a macOS build links with, by `pkg-config` name, and for people.
+const MACOS_LIBRARIES: &[(&str, &str)] = &[("sdl2", "SDL")];
 /// The reference number of the CD driver (`CDROMRefNum`).
 const CDROM_DRIVER: i32 = -62;
 const MMAP_MIN_ADDR: &str = "/proc/sys/vm/mmap_min_addr";
 const INSTALL: &str = "install what SheepShaver builds with (Debian/Ubuntu: apt install \
                        build-essential autoconf automake pkg-config libsdl2-dev)";
+const MACOS_INSTALL: &str = "install what SheepShaver builds with (MacPorts: port install \
+                             autoconf automake pkgconfig libsdl2; Homebrew: brew install \
+                             autoconf automake pkg-config sdl2)";
 const TOOLS: &[&str] = &[
     "gcc",
     "g++",
@@ -193,13 +229,18 @@ impl SheepShaver {
                 let log = File::create(log_path).context("cannot create build log")?;
                 sheepshaver_windows::build(&archive, &sdl, src, &log)
             } else {
+                let command = if MACOS {
+                    macemu::macos_build_command(MACOS_LIBRARIES)
+                } else {
+                    Command::new("bash")
+                };
                 run_configure_build(
-                    Command::new("bash"),
+                    command,
                     &archive,
                     src,
                     log_path,
                     BUILD_DIRECTORY,
-                    macemu::CONFIGURE_OPTIONS,
+                    build_options(),
                 )
             }
         })
@@ -208,6 +249,8 @@ impl SheepShaver {
     fn toolchain_identity(&self) -> Result<String> {
         if WINDOWS {
             macemu_windows::toolchain_identity(&self.sdl, sheepshaver_windows::RECIPE)
+        } else if MACOS {
+            macemu::macos_toolchain_identity(MACOS_LIBRARIES)
         } else {
             macemu::linux_toolchain_identity()
         }
@@ -217,6 +260,8 @@ impl SheepShaver {
 fn build_options() -> &'static [&'static str] {
     if WINDOWS {
         sheepshaver_windows::DEFINES
+    } else if MACOS {
+        MACOS_CONFIGURE_OPTIONS
     } else {
         macemu::CONFIGURE_OPTIONS
     }
@@ -261,12 +306,13 @@ fn settings(machine: &Machine) -> SheepShaverSettings {
 
 /// The contents of the preferences file. The JIT is left on, unlike Basilisk
 /// II's: it's upstream's default here, and the interpreter is slow for the
-/// guests this is for. Windows builds have only the interpreter.
+/// guests this is for. Windows and macOS builds have only the interpreter.
 ///
 /// `extfs` is there to be empty, as for Basilisk II: upstream's default is `/`,
 /// a read-write volume of the whole host. `nocdrom` keeps the guest off the
 /// host's drive, but also leaves out the CD driver, so a run with a CD image
-/// turns it off. The emulator then adds `/dev/cdrom` itself, and that can't be
+/// turns it off. The emulator then adds the host's drive itself, `/dev/cdrom`
+/// on Linux and whatever CD media the host has on macOS, and that can't be
 /// prevented. `bootdriver` is what makes the guest start from the CD, on an Old
 /// World ROM through PRAM, and on a New World one by reordering the drives. It's
 /// set only for a disc that can start a Mac: see [`macemu::starts_from_cd`].
@@ -303,7 +349,7 @@ fn preferences(machine: &Machine, cdroms: &[CdImage]) -> String {
         scale = display.scale,
         nosound = !settings.sound,
         nocdrom = !cdrom,
-        jit = !WINDOWS,
+        jit = JIT,
         // Without these, Windows would offer the host's drives and media.
         host = if WINDOWS {
             "enableextfs false\npollmedia false\n"
@@ -451,6 +497,12 @@ impl EmulatorBackend for SheepShaver {
         {
             bail!("the shared folder {} is missing", folder.display());
         }
+        if MACOS {
+            let disks = request.disks.iter().map(|disk| &disk.path);
+            for path in disks.chain(request.cdroms.iter().map(|cdrom| &cdrom.path)) {
+                macemu::refuse_held_disk(path, LABEL)?;
+            }
+        }
         let file = request.workdir.join(PREFERENCES);
         fs::write(&file, preferences(request.machine, request.cdroms))
             .with_context(|| format!("cannot write {}", file.display()))?;
@@ -465,7 +517,7 @@ impl EmulatorBackend for SheepShaver {
         command.args(arguments).current_dir(request.workdir);
         supervise(command, LABEL, request.verbose).map_err(|error| {
             let message = error.to_string();
-            if message.contains(LOW_MEMORY_ERROR) {
+            if LOW_MEMORY_AT_ZERO && message.contains(LOW_MEMORY_ERROR) {
                 anyhow!("{}; {LOW_MEMORY_FIX}", message.trim_end_matches('.'))
             } else {
                 error
@@ -495,8 +547,14 @@ impl EmulatorBackend for SheepShaver {
             checks.push(self.sdl_source().check());
             return checks;
         }
+        if MACOS {
+            let mut checks = tool_checks(macemu::MACOS_TOOLS, LABEL, MACOS_INSTALL);
+            checks.extend(library_checks(MACOS_LIBRARIES, LABEL, MACOS_INSTALL));
+            checks.push(self.source().check());
+            return checks;
+        }
         let mut checks = tool_checks(TOOLS, LABEL, INSTALL);
-        checks.extend(library_checks(&[("sdl2", "SDL")], LABEL, INSTALL));
+        checks.extend(library_checks(MACOS_LIBRARIES, LABEL, INSTALL));
         checks.push(self.source().check());
         if let Ok(value) = fs::read_to_string(MMAP_MIN_ADDR) {
             checks.push(low_memory_check(&value));
@@ -559,7 +617,7 @@ mod tests {
             "mag_rate 2",
             "nosound false",
             "nocdrom true",
-            if WINDOWS { "jit false" } else { "jit true" },
+            if JIT { "jit true" } else { "jit false" },
             "idlewait true",
             "bootdrive 0",
             "bootdriver 0",

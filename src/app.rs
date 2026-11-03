@@ -29,6 +29,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
 const SYSTEM_DISK: &str = "system.dsk";
+/// How a run holds its CD images. The emulators open them read-only, so runs
+/// may share them, except on macOS, where each emulator takes an exclusive lock
+/// on every image it opens, and one started second would quietly go without.
+const CD_LOCK: LockMode = if cfg!(target_os = "macos") {
+    LockMode::Exclusive
+} else {
+    LockMode::Shared
+};
 
 fn print_table(rows: &[Vec<String>], right_aligned: &[usize]) {
     for line in table(rows, right_aligned) {
@@ -620,7 +628,7 @@ impl App {
         }
         let mut volumes = Vec::new();
         for path in &args.cdroms {
-            drop(disk::lock_image(&self.paths, path, LockMode::Shared)?);
+            drop(disk::lock_image(&self.paths, path, CD_LOCK)?);
             volumes.push(disk::check_cd_image(path)?);
         }
         backend.validate_disks(&machine, saved_disks.len() + args.disks.len())?;
@@ -653,7 +661,7 @@ impl App {
         // Not copied, as these are big, and the emulator opens them read-only.
         let mut cdroms: Vec<CdImage> = Vec::new();
         for (path, volume) in args.cdroms.iter().zip(volumes) {
-            locks.push(disk::lock_image(&self.paths, path, LockMode::Shared)?);
+            locks.push(disk::lock_image(&self.paths, path, CD_LOCK)?);
             cdroms.push(CdImage {
                 path: fs::canonicalize(path)
                     .with_context(|| format!("cannot resolve {}", path.display()))?,

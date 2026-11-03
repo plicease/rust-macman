@@ -46,10 +46,9 @@
 //!   lock first, to refuse with a reason.
 
 use super::macemu::{
-    self, Build, disk_argument, display_check, first_line, library_checks, megabytes,
+    self, Build, MACOS, disk_argument, display_check, library_checks, megabytes,
     run_configure_build, supervise, tool_checks,
 };
-use super::minivmac::macos_toolchain_identity;
 use super::source::{self, Source, SourcePin, tool_exists};
 use super::{CdImage, Check, EmulatorBackend, Executable, LaunchRequest, macemu_windows};
 use crate::disk::{self, Classification, DiskFormat};
@@ -59,7 +58,7 @@ use crate::paths::Paths;
 use crate::registry::{self, Rom};
 use anyhow::{Context, Result, bail};
 use std::ffi::OsString;
-use std::fs::{self, File, TryLockError};
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
@@ -68,10 +67,12 @@ pub const DEFAULT_MEMORY: &str = "32M";
 pub const DEFAULT_DISPLAY: (u32, u32, u32) = (640, 480, 8);
 const LABEL: &str = "Basilisk II";
 const WINDOWS: bool = cfg!(all(windows, target_arch = "x86_64"));
-const MACOS: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
-/// Where `run --cdrom` and `create --disk-size` have been tried. On Windows and
-/// macOS the emulator finds CDs its own way, which hasn't been.
-const INSTALLS_FROM_CD: bool = cfg!(all(target_os = "linux", target_arch = "x86_64"));
+/// Where `run --cdrom` and `create --disk-size` have been tried. On Windows the
+/// emulator finds CDs its own way, which hasn't been.
+const INSTALLS_FROM_CD: bool = cfg!(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64"),
+));
 /// The reference number of the CD driver (`CDROMRefNum`).
 const CDROM_DRIVER: i32 = -62;
 const EXECUTABLE: &str = if WINDOWS {
@@ -105,6 +106,7 @@ const MACOS_CONFIGURE_OPTIONS: &[&str] = &[
     "--enable-sdl-audio",
     "--with-gtk=no",
     "--with-esd=no",
+    "--with-bincue",
     "--disable-jit-compiler",
 ];
 /// What an ARM64 macOS build links with, by `pkg-config` name, and for people.
@@ -207,23 +209,12 @@ fn build_options() -> &'static [&'static str] {
     }
 }
 
-/// What the compiler needs to be told to find the libraries, on macOS.
-fn macos_library_flags(option: &str) -> String {
-    let packages = MACOS_LIBRARIES.iter().map(|(package, _)| *package);
-    let args: Vec<&str> = std::iter::once(option).chain(packages).collect();
-    first_line("pkg-config", &args).unwrap_or_default()
-}
-
-/// On macOS, `gcc` may be a real GCC from a package manager, not Apple's clang.
 fn run_build(archive: &Path, src: &Path, log_path: &Path) -> Result<()> {
-    let mut command = Command::new("bash");
-    if MACOS {
-        command
-            .env("CC", "clang")
-            .env("CXX", "clang++")
-            .env("CPPFLAGS", macos_library_flags("--cflags-only-I"))
-            .env("LDFLAGS", macos_library_flags("--libs-only-L"));
-    }
+    let command = if MACOS {
+        macemu::macos_build_command(MACOS_LIBRARIES)
+    } else {
+        Command::new("bash")
+    };
     run_configure_build(
         command,
         archive,
@@ -236,29 +227,12 @@ fn run_build(archive: &Path, src: &Path, log_path: &Path) -> Result<()> {
 
 fn toolchain_identity(sdl_pin: &SourcePin) -> Result<String> {
     if MACOS {
-        return Ok(format!(
-            "{} {} {}",
-            macos_toolchain_identity()?,
-            macos_library_versions(),
-            macos_library_flags("--libs-only-L"),
-        ));
+        return macemu::macos_toolchain_identity(MACOS_LIBRARIES);
     }
     if WINDOWS {
         return macemu_windows::toolchain_identity(sdl_pin, macemu_windows::RECIPE);
     }
     macemu::linux_toolchain_identity()
-}
-
-/// A build links these dynamically, so it's only good for the ones it saw.
-fn macos_library_versions() -> String {
-    MACOS_LIBRARIES
-        .iter()
-        .map(|(package, name)| {
-            let version = first_line("pkg-config", &["--modversion", package]);
-            format!("{name} {}", version.as_deref().unwrap_or("?"))
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// `main_unix.cpp` caps RAM at 1023M, and rounds down to whole megabytes.
@@ -313,8 +287,9 @@ fn cpu_level(cpu: Cpu) -> u32 {
 ///
 /// A run with a CD image turns `nocdrom` off, which installs the CD driver,
 /// and sets `bootdriver` to it, so the Mac starts from the CD through PRAM, if
-/// one can start it (see [`macemu::starts_from_cd`]). The
-/// emulator then adds `/dev/cdrom` too, which can't be prevented.
+/// one can start it (see [`macemu::starts_from_cd`]). The emulator then adds
+/// the host's drive too, which can't be prevented: `/dev/cdrom` on Linux, and
+/// on macOS whatever CD media the host has.
 fn preferences(machine: &Machine, cdroms: &[CdImage]) -> String {
     let settings = settings(machine);
     let cdrom = !cdroms.is_empty();
@@ -390,20 +365,6 @@ fn arguments(request: &LaunchRequest<'_>, preferences: &Path, cdroms: &[PathBuf]
         arguments.extend(["--extfs".into(), folder.into()]);
     }
     arguments
-}
-
-/// Refuse a disk that an emulator holds, which macman's own locks can't show
-/// once the macman that started it has gone. A file system without locks can't
-/// be held, and the emulator goes on without them there too.
-fn refuse_held_disk(disk: &Path) -> Result<()> {
-    let file = File::open(disk).with_context(|| format!("cannot open {}", disk.display()))?;
-    if let Err(TryLockError::WouldBlock) = file.try_lock() {
-        bail!(
-            "{} is held by a Basilisk II that outlived macman; quit that emulator first",
-            disk.display()
-        );
-    }
-    Ok(())
 }
 
 impl EmulatorBackend for Basilisk2 {
@@ -514,8 +475,9 @@ impl EmulatorBackend for Basilisk2 {
             bail!("the shared folder {} is missing", folder.display());
         }
         if MACOS {
-            for disk in request.disks {
-                refuse_held_disk(&disk.path)?;
+            let disks = request.disks.iter().map(|disk| &disk.path);
+            for path in disks.chain(request.cdroms.iter().map(|cdrom| &cdrom.path)) {
+                macemu::refuse_held_disk(path, LABEL)?;
             }
         }
         let file = request.workdir.join(PREFERENCES);
@@ -572,10 +534,8 @@ impl EmulatorBackend for Basilisk2 {
             "aclocal",
             "pkg-config",
         ];
-        // Mini vMac's checks already cover Apple's tools.
-        const MACOS_TOOLS: &[&str] = &["autoconf", "aclocal", "pkg-config"];
         let (tools, libraries, install) = if MACOS {
-            (MACOS_TOOLS, MACOS_LIBRARIES, MACOS_INSTALL)
+            (macemu::MACOS_TOOLS, MACOS_LIBRARIES, MACOS_INSTALL)
         } else {
             (LINUX_TOOLS, &MACOS_LIBRARIES[..1], LINUX_INSTALL)
         };
