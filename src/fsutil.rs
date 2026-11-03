@@ -55,7 +55,8 @@ pub fn independent_copy(src: &Path, dst: &Path) -> Result<()> {
             perms.set_readonly(false);
             fs::set_permissions(&tmp, perms)?;
         }
-        File::open(&tmp)?.sync_all()?;
+        // Windows flushes a file only through a handle that can write to it.
+        fs::OpenOptions::new().write(true).open(&tmp)?.sync_all()?;
         publish_new(&tmp, dst)
     })();
     if result.is_err() {
