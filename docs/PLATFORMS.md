@@ -106,6 +106,12 @@ with a 68030 setting.
 The macOS smoke test covered Shut Down from inside the guest, killing the emulator, killing
 macman, and rebuilding a damaged build. Homebrew hasn't been tried, only MacPorts.
 
+Installing from a CD has been tried on Linux x86-64 only, and the other hosts refuse it. A
+machine made with `--disk-size 1G`, the Quadra 650 ROM, and 128M started from the Mac OS 8.1
+CD image through `macman run --cdrom`, offered to initialize the disk, and took a basic
+install, with "Update Apple Hard Disk Drivers" turned off. After Shut Down, which ended the
+run normally, it started Mac OS 8.1 from its own disk without the CD. The ISO was unchanged.
+
 The pin is commit `f532be3d3d70` of [kanjitalk755/macemu](https://github.com/kanjitalk755/macemu),
 the maintained fork, and its SHA-256 is that of the archive GitHub generates for it. If
 GitHub changed how it generates archives, downloads would be refused, not trusted.

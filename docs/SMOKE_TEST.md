@@ -141,6 +141,9 @@ On macOS, these replace the matching steps:
 | `macman doctor` before installing anything | Names the missing tools and libraries, including MPFR, as warnings until a machine needs them. |
 | Kill `macman` with `kill -9` while the emulator runs | The emulator carries on. `macman run q7` warns about the earlier run, then refuses, saying the disk is held by a Basilisk II that outlived macman. |
 | Quit that emulator, then `macman run q7` | Boots. |
+| On Linux: `macman create qn --backend basilisk2 --rom quadra --disk-size 1G --memory 128M`, then `macman run qn --cdrom MacOS8_1.iso` | Starts from the CD, and offers to initialize the disk. Install, with "Update Apple Hard Disk Drivers" off under Options, then Shut Down. |
+| On Linux: `macman run qn` | Starts Mac OS 8.1 from its own disk. The ISO's hash is unchanged. |
+| On Windows or macOS: `macman create ... --disk-size 1G`, or `macman run q7 --cdrom MacOS8_1.iso` | Refused, saying it isn't available on this host. |
 
 ## SheepShaver
 

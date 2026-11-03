@@ -152,7 +152,7 @@ pub struct CreateArgs {
     )]
     pub system: Option<String>,
     /// Start with a blank boot disk of this size, such as 1G, to install onto from
-    /// `macman run --cdrom` (SheepShaver only)
+    /// `macman run --cdrom` (SheepShaver, and Basilisk II on Linux)
     #[arg(long, value_name = "SIZE")]
     pub disk_size: Option<String>,
     /// Memory size, such as 4M (default depends on the model)
@@ -197,7 +197,7 @@ pub struct RunArgs {
     #[arg(long, requires = "disks")]
     pub any_format: bool,
     /// Attach a CD image, read-only, for this run only, and start from it (repeatable;
-    /// SheepShaver only)
+    /// SheepShaver, and Basilisk II on Linux)
     #[arg(long = "cdrom", value_name = "FILE")]
     pub cdroms: Vec<PathBuf>,
 }

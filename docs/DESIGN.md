@@ -223,6 +223,7 @@ On Windows it also differs from its Linux self. `src/backend/macemu_windows.rs` 
 - **Host files:** `extfs` is ignored, and `enableextfs` shows whole drives, so it's always off, and a shared folder is refused.
 - **Locks:** `CreateFile` opens disks with no sharing, so Windows protects them itself, and the emulator can outlive macman.
 - **Disks:** `GetFileSize` is read as 32 bits, so disks of 4G or more are refused.
+- **Installing:** `create --disk-size` and `run --cdrom` are refused, here and on macOS, until they're tried there. On Linux they work as for SheepShaver, below.
 
 On macOS ARM64 it builds as on Linux, and differs in these ways:
 

@@ -230,7 +230,7 @@ fn other_backends_refuse_a_blank_disk_and_a_cd() {
     let cd = write_disk(env.path(), "cd.iso");
     let error = env.fails(&["run", "plain", "--cdrom", cd.to_str().unwrap()]);
     assert!(
-        error.contains("--cdrom isn't available on minivmac"),
+        error.contains("--cdrom isn't available for minivmac"),
         "{error}"
     );
 }

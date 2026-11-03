@@ -394,8 +394,8 @@ impl App {
             (None, Some(size)) => {
                 if !backend.installs_from_cd() {
                     bail!(
-                        "--disk-size needs a backend that installs from a CD, which {} doesn't; \
-                         use --system",
+                        "--disk-size needs a backend that installs from a CD, which {} doesn't \
+                         on this host; use --system",
                         backend.name()
                     );
                 }
@@ -611,7 +611,10 @@ impl App {
             }
         }
         if !args.cdroms.is_empty() && !backend.installs_from_cd() {
-            bail!("--cdrom isn't available on {}; try --disk", backend.name());
+            bail!(
+                "--cdrom isn't available for {} on this host; try --disk",
+                backend.name()
+            );
         }
         for path in &args.cdroms {
             drop(disk::lock_image(&self.paths, path, LockMode::Shared)?);

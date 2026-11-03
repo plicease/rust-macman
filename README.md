@@ -270,15 +270,22 @@ volume needs its HFS wrapper, which disks formatted by Mac OS have. `--readonly`
 `--readonly`, the shared folder stays out of exports, and NVRAM lasts one run. If macman
 is killed, it takes the emulator with it.
 
-### Installing from a CD
+## Installing from a CD
 
-A SheepShaver machine can start with a blank disk instead of a system image, and install
-from a CD image of your own:
+A SheepShaver machine, or a Basilisk II one on Linux, can start with a blank disk instead
+of a system image, and install from a CD image of your own:
 
 ```sh
 macman create ss904 --backend sheepshaver --rom newworld --disk-size 1G --memory 256M
 macman run ss904 --cdrom Mac-OS-9.0.4.iso
+
+macman create q81 --backend basilisk2 --rom quadra --disk-size 1G --memory 128M
+macman run q81 --cdrom MacOS8_1.iso
 ```
+
+Basilisk II on Windows and macOS refuses both options for now, as its builds there find
+CDs in other ways, which haven't been tried. `macman run --disk` still attaches a CD image
+there, as a disk.
 
 `--disk-size` takes K, M, or G, from 1M to 2048G, and makes a sparse file of zeros. It
 isn't formatted: the guest offers to initialize it. It's the machine's own disk from then
@@ -291,8 +298,8 @@ to start from the machine's disk. It takes a `.iso` or `.toast` image with an HF
 partitioned or not. A plain ISO 9660 image attaches, but a Mac can't start from it. While
 a CD image is attached, the guest also sees the host's `/dev/cdrom`, if there is one.
 
-If the Mac OS 9 installer stops at "Updating Apple hard disk drivers", start it again with
-that option turned off under Options. The emulator's disk isn't an Apple drive.
+If the installer stops at "Updating Apple hard disk drivers", start it again with that
+option turned off under Options. The emulator's disk isn't an Apple drive.
 
 ## Moving machines between hosts
 
