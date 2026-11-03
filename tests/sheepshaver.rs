@@ -507,7 +507,7 @@ fn an_imported_machine_builds_on_its_first_run_without_the_host_s_folder() {
     let other = tempfile::tempdir().unwrap();
     let paths = Paths::under(other.path());
     let backends = Harness::backends(&paths, &h.pin, &h.archive);
-    let report = archive::import(&paths, &backends, &exported, None).unwrap();
+    let report = archive::import(&paths, &backends, &exported, None, false).unwrap();
     assert_eq!(report.imported(), 1);
     assert!(
         list_dir(&paths.builds()).unwrap().is_empty(),
@@ -522,7 +522,7 @@ fn an_imported_machine_builds_on_its_first_run_without_the_host_s_folder() {
     assert_eq!(list_dir(&paths.builds()).unwrap().len(), 1);
 
     // Coming back changes nothing, though one copy has a folder.
-    let report = archive::import(&h.paths, &h.app.backends, &exported, None).unwrap();
+    let report = archive::import(&h.paths, &h.app.backends, &exported, None, false).unwrap();
     assert_eq!(report.unchanged(), 1);
 }
 

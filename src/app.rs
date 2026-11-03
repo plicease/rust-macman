@@ -1,6 +1,6 @@
 //! Command implementations.
 
-use crate::archive::{self, Outcome};
+use crate::archive::{self, Outcome, RomOutcome};
 use crate::backend::minivmac::{MANIFEST, Manifest};
 use crate::backend::{
     Backends, CdImage, Check, CheckLevel, EmulatorBackend, LaunchRequest, ResolvedDisk,
@@ -23,8 +23,8 @@ use crate::paths::Paths;
 use crate::registry;
 use crate::report::{
     BuildDetails, BuildEntry, BuildList, Current, DiskInfo, DisplayReport, DoctorReport, Format,
-    Layout, MachineConfig, MachineDetails, MachineEntry, MachineList, PartitionReport, RomEntry,
-    RomList, SystemEntry, SystemList, print_json,
+    ImportResult, Layout, MachineConfig, MachineDetails, MachineEntry, MachineList,
+    PartitionReport, RomEntry, RomList, SystemEntry, SystemList, print_json,
 };
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
@@ -94,9 +94,14 @@ impl App {
         let verbose = cli.verbose;
         let json = cli.json;
         if json && let Some(command) = without_json(&cli.command) {
+            let hint = if command == "import" {
+                ", or preview the import with --dry-run"
+            } else {
+                ""
+            };
             bail!(
                 "--json isn't supported by `macman {command}`, which changes things rather than \
-                 reporting them; leave it off"
+                 reporting them; leave it off{hint}"
             );
         }
         match cli.command {
@@ -158,35 +163,65 @@ impl App {
                 let count = archive::export(&self.paths, &names, &output)?;
                 println!("Exported {count} machine(s) to {}", output.display());
             }
-            Command::Import { file, rename } => {
-                return self.import(&file, rename.as_deref());
+            Command::Import {
+                file,
+                rename,
+                dry_run,
+            } => {
+                return self.import(&file, rename.as_deref(), dry_run, json);
             }
             Command::Remove { name, delete_disks } => self.remove(&name, delete_disks)?,
         }
         Ok(0)
     }
 
-    fn import(&self, file: &Path, rename: Option<&str>) -> Result<u8> {
-        let report = archive::import(&self.paths, &self.backends, file, rename)?;
-        for line in report.roms.values() {
-            println!("{line}");
+    fn import(&self, file: &Path, rename: Option<&str>, dry_run: bool, json: bool) -> Result<u8> {
+        let report = archive::import(&self.paths, &self.backends, file, rename, dry_run)?;
+        let code = u8::from(report.unresolved() > 0);
+        if json {
+            print_json(&ImportResult::from(&report))?;
+            return Ok(code);
+        }
+        for (name, outcome) in &report.roms {
+            match outcome {
+                RomOutcome::Imported if dry_run => println!("would import rom {name}"),
+                RomOutcome::Imported => println!("imported rom {name}"),
+                RomOutcome::Recovered if dry_run => println!("would recover rom {name}"),
+                RomOutcome::Recovered => println!("recovered rom {name}"),
+                RomOutcome::Unchanged { local } => println!("unchanged rom {local}"),
+                RomOutcome::Reused { local } if dry_run => {
+                    println!("would reuse rom {name} as {local}");
+                }
+                RomOutcome::Reused { local } => println!("reused rom {name} as {local}"),
+            }
         }
         for result in &report.machines {
             let name = &result.name;
             match &result.outcome {
+                Outcome::Imported if dry_run => println!("would import machine {name}"),
                 Outcome::Imported => println!("imported machine {name}"),
                 Outcome::Unchanged => println!("unchanged machine {name}"),
                 Outcome::Conflict(reason) => println!("conflict machine {name}: {reason}"),
                 Outcome::Failed(reason) => println!("failed machine {name}: {reason}"),
             }
         }
-        println!(
-            "{} imported, {} unchanged, {} unresolved",
-            report.imported(),
-            report.unchanged(),
-            report.unresolved()
-        );
-        Ok(u8::from(report.unresolved() > 0))
+        if dry_run {
+            println!(
+                "dry run: {} would be imported, {} unchanged, {} unresolved; nothing was changed",
+                report.imported(),
+                report.unchanged(),
+                report.unresolved()
+            );
+            println!("(this is how an import would go now; changes before then may change it)");
+        } else {
+            println!(
+                "{} imported, {} unchanged, {} unresolved",
+                report.imported(),
+                report.unchanged(),
+                report.unresolved()
+            );
+        }
+        Ok(code)
     }
 
     fn current(&self) -> Result<String> {
@@ -1309,6 +1344,7 @@ fn without_json(command: &Command) -> Option<&'static str> {
         Command::Run(_) => "run",
         Command::Clone { .. } => "clone",
         Command::Export { .. } => "export",
+        Command::Import { dry_run: true, .. } => return None,
         Command::Import { .. } => "import",
         Command::Remove { .. } => "remove",
     })

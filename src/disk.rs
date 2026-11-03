@@ -8,7 +8,7 @@ use crate::paths::Paths;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -584,16 +584,48 @@ pub enum LockMode {
 }
 
 pub fn lock_image(paths: &Paths, image: &Path, mode: LockMode) -> Result<ImageLock> {
+    take_image_lock(paths, image, mode, true).map(|lock| lock.expect("the lock was created"))
+}
+
+/// [`lock_image`], creating nothing. Every holder of a lock created its file,
+/// so an image without one is free, and `Ok(None)` says so.
+pub fn probe_image_lock(paths: &Paths, image: &Path, mode: LockMode) -> Result<Option<ImageLock>> {
+    take_image_lock(paths, image, mode, false)
+}
+
+fn take_image_lock(
+    paths: &Paths,
+    image: &Path,
+    mode: LockMode,
+    create: bool,
+) -> Result<Option<ImageLock>> {
     let key = file_identity(image)?;
-    fs::create_dir_all(paths.locks()).context("cannot create lock directory")?;
     let lock_path = paths.locks().join(format!("{key}.lock"));
-    let file = OpenOptions::new()
-        .create(true)
+    if create {
+        fs::create_dir_all(paths.locks()).context("cannot create lock directory")?;
+    }
+    let file = match OpenOptions::new()
+        .create(create)
         .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)
-        .with_context(|| format!("cannot open lock {}", lock_path.display()))?;
+    {
+        Ok(file) => file,
+        Err(error) if !create && error.kind() == io::ErrorKind::NotFound => {
+            if held_by_emulator(image) {
+                bail!(
+                    "{} is in use by another macman process or machine; close that emulator \
+                     first, or work on an explicit copy",
+                    image.display()
+                );
+            }
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot open lock {}", lock_path.display()));
+        }
+    };
     let result = match mode {
         LockMode::Exclusive => file.try_lock(),
         LockMode::Shared => file.try_lock_shared(),
@@ -607,9 +639,9 @@ pub fn lock_image(paths: &Paths, image: &Path, mode: LockMode) -> Result<ImageLo
     };
     match result {
         Ok(()) if held_by_emulator(image) => Err(in_use()),
-        Ok(()) => Ok(ImageLock {
+        Ok(()) => Ok(Some(ImageLock {
             _lock: HeldLock::new(file),
-        }),
+        })),
         Err(TryLockError::WouldBlock) => Err(in_use()),
         Err(TryLockError::Error(e)) => {
             Err(e).with_context(|| format!("cannot lock {}", image.display()))

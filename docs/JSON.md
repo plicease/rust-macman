@@ -38,9 +38,9 @@ The message is also printed to stderr, as `error: ...`, as it is without `--json
 ## Commands that refuse `--json`
 
 These change things and report as they go, so they have no single result to give:
-`create`, `run`, `use`, `clone`, `remove`, `export`, `import`, `rom add`, `system add`,
-`system remove`, and `disk extract`. Given `--json`, they do nothing, and fail with an
-error as above.
+`create`, `run`, `use`, `clone`, `remove`, `export`, `import` (except with `--dry-run`),
+`rom add`, `system add`, `system remove`, and `disk extract`. Given `--json`, they do
+nothing, and fail with an error as above.
 
 ## `macman list`
 
@@ -174,3 +174,37 @@ including any shared folder's host path.
 ```
 
 With no current machine, it fails, as without `--json`.
+
+## `macman import FILE --dry-run`
+
+```json
+{
+  "dry_run": true,
+  "roms": [{"name": "plus-v3", "outcome": "unchanged", "local": "plus-v3"}],
+  "machines": [
+    {"name": "plus-a", "outcome": "conflict", "reason": "a different machine is already named \"plus-a\"; import it under another name with --rename"},
+    {"name": "plus-b", "outcome": "imported", "reason": null}
+  ],
+  "imported": 1,
+  "unchanged": 0,
+  "unresolved": 1
+}
+```
+
+This is what an import would do now, not what one did, as `dry_run: true` says. The
+outcomes use an import's own words, and [EXPORT_IMPORT.md](EXPORT_IMPORT.md#--dry-run)
+explains them.
+
+| Field | Type | |
+|---|---|---|
+| `dry_run` | boolean | Always `true` for now |
+| `roms[].name` | string | The ROM's name in the archive |
+| `roms[].outcome` | string | `imported`, `recovered`, `unchanged`, or `reused` |
+| `roms[].local` | string or null | The registered ROM the machines would use; `null` when `imported` |
+| `machines[].name` | string | The name it would have here, which `--rename` sets |
+| `machines[].outcome` | string | `imported`, `unchanged`, `conflict`, or `failed` |
+| `machines[].reason` | string or null | Why, for `conflict` and `failed` |
+| `imported`, `unchanged`, `unresolved` | numbers | Machines counted by outcome; `unresolved` is conflicts and failures |
+
+A ROM that only machines with a conflict or failure need may not appear in `roms`. The
+exit status is 1 when `unresolved` isn't 0.

@@ -355,6 +355,13 @@ archive as an independent copy:
 macman import wombat-6.tar.gz --rename wombat-6-imported
 ```
 
+To see what an import would do first, add `--dry-run`. It checks the whole archive
+and reports each ROM and machine, but changes nothing:
+
+```sh
+macman import classic-macs.tar.gz --dry-run
+```
+
 Apple ROMs and System Software are copyrighted, and archives contain them. Use
 archives to move your own machines between your own computers, and don't publish
 them. See [docs/EXPORT_IMPORT.md](docs/EXPORT_IMPORT.md) for the details.

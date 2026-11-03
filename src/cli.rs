@@ -72,6 +72,9 @@ pub enum Command {
         /// Import an independent copy under this name (one-machine archives only)
         #[arg(long, value_name = "NAME")]
         rename: Option<String>,
+        /// Check the archive and show what an import would do, changing nothing
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Remove a machine; registered ROMs and system images are kept
     Remove {

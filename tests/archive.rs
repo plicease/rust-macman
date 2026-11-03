@@ -149,28 +149,62 @@ impl Host {
     /// Every file in the data directory with its digest, leaving out the lock
     /// bookkeeping that doesn't hold any user data.
     fn snapshot(&self) -> BTreeMap<String, String> {
-        fn walk(root: &Path, dir: &Path, found: &mut BTreeMap<String, String>) {
-            let Ok(entries) = fs::read_dir(dir) else {
-                return;
-            };
-            for entry in entries {
-                let path = entry.unwrap().path();
-                let relative = path.strip_prefix(root).unwrap().display().to_string();
-                let relative = relative.replace('\\', "/");
-                if relative == "import.lock" || relative == "locks" {
-                    continue;
-                }
-                if path.is_dir() {
-                    found.insert(relative, "dir".to_string());
-                    walk(root, &path, found);
-                } else {
-                    found.insert(relative, sha256_file(&path).unwrap());
-                }
-            }
-        }
         let mut found = BTreeMap::new();
-        walk(&self.data(), &self.data(), &mut found);
+        walk(&self.data(), &self.data(), &mut found, true);
         found
+    }
+
+    /// Everything macman keeps, lock files and all, and whether each of its
+    /// directories exists.
+    fn exact_snapshot(&self) -> BTreeMap<String, String> {
+        let mut found = BTreeMap::new();
+        for dir in ["data", "cfg", "cache"] {
+            let dir = self.path().join(dir);
+            if dir.exists() {
+                found.insert(dir.display().to_string(), "dir".to_string());
+            }
+            walk(&dir, &dir, &mut found, false);
+        }
+        found
+    }
+
+    /// `import --dry-run ARGS`, checking that it changed nothing and left
+    /// nothing behind in the temporary directory. Returns the exit status,
+    /// stdout, and stderr.
+    fn preview(&self, args: &[&str]) -> (Option<i32>, String, String) {
+        let tmp = self.path().join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        let before = self.exact_snapshot();
+        let output = self
+            .command(&[&["import", "--dry-run"], args].concat())
+            .env("TMPDIR", &tmp)
+            .env("TMP", &tmp)
+            .env("TEMP", &tmp)
+            .output()
+            .unwrap();
+        assert_eq!(self.exact_snapshot(), before, "{args:?}: {output:?}");
+        assert_eq!(fs::read_dir(&tmp).unwrap().count(), 0, "{args:?}");
+        (output.status.code(), stdout(&output), stderr(&output))
+    }
+}
+
+fn walk(root: &Path, dir: &Path, found: &mut BTreeMap<String, String>, skip_locks: bool) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let relative = relative.replace('\\', "/");
+        if skip_locks && (relative == "import.lock" || relative == "locks") {
+            continue;
+        }
+        if path.is_dir() {
+            found.insert(relative, "dir".to_string());
+            walk(root, &path, found, skip_locks);
+        } else {
+            found.insert(relative, sha256_file(&path).unwrap());
+        }
     }
 }
 
@@ -604,7 +638,8 @@ impl Pinned {
     }
 
     fn import(&self, archive: &Path) -> (usize, usize) {
-        let report = archive::import(&self.paths, &self.app.backends, archive, None).unwrap();
+        let report =
+            archive::import(&self.paths, &self.app.backends, archive, None, false).unwrap();
         (report.imported(), report.unchanged())
     }
 
@@ -665,7 +700,8 @@ fn copies_recording_different_revisions_are_the_same_machine() {
     // One that can't run here isn't the same, though everything else matches.
     let text = fs::read_to_string(&file).unwrap();
     fs::write(&file, text.replace("\"37.03\"", "\"99.0\"")).unwrap();
-    let report = archive::import(&target.paths, &target.app.backends, &archive, None).unwrap();
+    let report =
+        archive::import(&target.paths, &target.app.backends, &archive, None, false).unwrap();
     assert_eq!((report.imported(), report.unchanged()), (0, 0));
 }
 
@@ -1012,6 +1048,9 @@ fn assert_refused(entries: &[(tar::Header, Vec<u8>)], expected: &str) {
     let target = Host::with_two_machines();
     let archive = target.path().join("bad.tar.gz");
     write_entries(&archive, entries);
+    let (code, _, preview) = target.preview(&[archive.to_str().unwrap()]);
+    assert_eq!(code, Some(1), "{preview}");
+    assert!(preview.contains(expected), "wanted {expected:?}: {preview}");
     let before = target.snapshot();
     let output = target.fails(&["import", archive.to_str().unwrap()]);
     assert!(output.contains(expected), "wanted {expected:?}: {output}");
@@ -1215,4 +1254,276 @@ fn refuses_things_that_are_not_archives() {
     let missing = target.path().join("missing.tar.gz");
     target.fails(&["import", missing.to_str().unwrap()]);
     assert!(!target.data().join("machines").exists());
+}
+
+/// What `import` prints, given what `import --dry-run` printed.
+fn as_import(preview: &str) -> String {
+    preview
+        .lines()
+        .filter(|line| !line.starts_with("(this is how an import would go"))
+        .map(|line| {
+            let line = match line.strip_prefix("dry run: ") {
+                Some(summary) => summary
+                    .strip_suffix("; nothing was changed")
+                    .expect("the summary says nothing changed")
+                    .replace(" would be imported", " imported"),
+                None => line
+                    .replacen("would import ", "imported ", 1)
+                    .replacen("would recover ", "recovered ", 1)
+                    .replacen("would reuse ", "reused ", 1),
+            };
+            line + "\n"
+        })
+        .collect()
+}
+
+/// Preview importing with `args`, twice, then import, and check that the
+/// preview foretold the import exactly. Returns the preview.
+fn assert_preview_matches(target: &Host, args: &[&str]) -> String {
+    let (code, preview, errors) = target.preview(args);
+    assert!(
+        preview.is_empty() || preview.contains("; nothing was changed"),
+        "{preview}"
+    );
+    assert_eq!(
+        target.preview(args),
+        (code, preview.clone(), errors.clone())
+    );
+
+    let output = target.run(&[&["import"], args].concat());
+    assert_eq!(output.status.code(), code, "{preview}{errors}: {output:?}");
+    assert_eq!(stdout(&output), as_import(&preview), "{errors}");
+    assert_eq!(stderr(&output), errors);
+    preview
+}
+
+/// `plus-a` and `plus-b` on a Plus ROM, and `ii-a` on a Mac II ROM.
+fn with_three_machines() -> Host {
+    let host = Host::with_two_machines();
+    host.add_ii_rom("ii-rom");
+    host.create("ii-a", "ii", "ii-rom");
+    host
+}
+
+#[test]
+fn a_dry_run_of_a_clean_import_changes_nothing_and_foretells_it() {
+    let source = with_three_machines();
+    let archive = source.export(&["plus-a", "plus-b", "ii-a"], "three.tar.gz");
+    let target = Host::new();
+    let preview = assert_preview_matches(&target, &[&archive]);
+    for line in [
+        "would import rom ii-rom",
+        "would import rom plus-v3",
+        "would import machine ii-a",
+        "would import machine plus-a",
+        "would import machine plus-b",
+        "dry run: 3 would be imported, 0 unchanged, 0 unresolved; nothing was changed",
+    ] {
+        assert!(preview.contains(line), "{line}: {preview}");
+    }
+    assert!(target.machine_dir("plus-b").exists());
+}
+
+#[test]
+fn a_dry_run_reports_unchanged_and_reused_data() {
+    let source = with_three_machines();
+    let archive = source.export(&["plus-a", "plus-b", "ii-a"], "three.tar.gz");
+
+    let target = Host::new();
+    target.ok(&["import", &source.export(&["plus-a"], "one.tar.gz")]);
+    target.add_ii_rom("my-ii");
+    let preview = assert_preview_matches(&target, &[&archive]);
+    assert!(preview.contains("unchanged rom plus-v3"), "{preview}");
+    assert!(
+        preview.contains("would reuse rom ii-rom as my-ii"),
+        "{preview}"
+    );
+    assert!(preview.contains("unchanged machine plus-a"), "{preview}");
+    assert!(preview.contains("would import machine plus-b"), "{preview}");
+    assert!(
+        preview.contains("dry run: 2 would be imported, 1 unchanged, 0 unresolved"),
+        "{preview}"
+    );
+
+    let preview = assert_preview_matches(&target, &[&archive]);
+    assert!(
+        preview.contains("dry run: 0 would be imported, 3 unchanged, 0 unresolved"),
+        "{preview}"
+    );
+}
+
+#[test]
+fn a_dry_run_reports_every_conflict_and_failure() {
+    let source = with_three_machines();
+    let revision = format!("revision = \"{}\"", SourcePin::default().revision);
+    let definition = source
+        .definition("plus-b")
+        .replace(&revision, "revision = \"99.0\"");
+    source.write_definition("plus-b", &definition);
+    let archive = source.export(&["plus-a", "plus-b", "ii-a"], "three.tar.gz");
+
+    // An unrelated plus-a, and an unrelated ROM named ii-rom.
+    let target = Host::new();
+    target.add_plus_rom("plus-v3");
+    target.add_system();
+    target.create("plus-a", "plus", "plus-v3");
+    target.add_large_rom("ii-rom", IIX_ROM_CHECKSUM);
+    let preview = assert_preview_matches(&target, &[&archive]);
+    assert!(preview.contains("conflict machine plus-a"), "{preview}");
+    assert!(preview.contains("--rename"), "{preview}");
+    assert!(preview.contains("failed machine plus-b"), "{preview}");
+    assert!(preview.contains("pinned to Mini vMac 99.0"), "{preview}");
+    assert!(preview.contains("conflict machine ii-a"), "{preview}");
+    assert!(
+        preview.contains("different ROM is already named \"ii-rom\""),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("dry run: 0 would be imported, 0 unchanged, 3 unresolved"),
+        "{preview}"
+    );
+}
+
+#[test]
+fn a_dry_run_reports_diverged_copies() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["plus-a"], "plus.tar.gz");
+    let target = Host::new();
+    target.ok(&["import", &archive]);
+    target.scribble("plus-a", "system.dsk", 7);
+    let preview = assert_preview_matches(&target, &[&archive]);
+    assert!(preview.contains("different disk"), "{preview}");
+}
+
+#[test]
+fn a_dry_run_foresees_recovering_an_interrupted_rom() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["plus-a", "plus-b"], "both.tar.gz");
+    let rom = fs::read(source.data().join("roms/plus-v3.rom")).unwrap();
+    let target = with_interrupted_rom(&rom);
+    let preview = assert_preview_matches(&target, &[&archive]);
+    assert!(preview.contains("would recover rom plus-v3"), "{preview}");
+    assert!(
+        preview.contains("dry run: 2 would be imported"),
+        "{preview}"
+    );
+
+    let target = with_interrupted_rom(b"something else");
+    let preview = assert_preview_matches(&target, &[&archive]);
+    assert!(
+        preview.contains("different ROM is already named"),
+        "{preview}"
+    );
+}
+
+#[test]
+fn a_dry_run_follows_rename() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["plus-a"], "plus.tar.gz");
+    let target = Host::new();
+    target.ok(&["import", &archive]);
+
+    let preview = assert_preview_matches(&target, &[&archive, "--rename", "copy"]);
+    assert!(preview.contains("would import machine copy"), "{preview}");
+    let preview = assert_preview_matches(&target, &[&archive, "--rename", "copy"]);
+    assert!(preview.contains("already exists"), "{preview}");
+
+    let both = source.export(&["plus-a", "plus-b"], "both.tar.gz");
+    let (code, _, errors) = target.preview(&[&both, "--rename", "other"]);
+    assert_eq!(code, Some(1));
+    assert!(errors.contains("one machine"), "{errors}");
+    let (code, _, errors) = target.preview(&[&archive, "--rename", "../escape"]);
+    assert_eq!(code, Some(1), "{errors}");
+}
+
+#[test]
+fn a_dry_run_leaves_abandoned_staging_and_takes_no_new_locks() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["plus-a"], "plus.tar.gz");
+    let target = Host::new();
+    target.ok(&["import", &archive]);
+    // Comparing with the local copy locks its disks; a preview mustn't leave
+    // lock files for that, or anything else.
+    fs::remove_dir_all(target.data().join("locks")).unwrap();
+    let staging = target.data().join("staging/blobs");
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(staging.join("leftover"), "half a ROM").unwrap();
+
+    let (code, preview, _) = target.preview(&[&archive]);
+    assert_eq!(code, Some(0));
+    assert!(preview.contains("unchanged machine plus-a"), "{preview}");
+    assert!(!target.data().join("locks").exists());
+    assert!(staging.join("leftover").exists());
+}
+
+#[test]
+fn a_dry_run_waits_for_no_import_and_respects_disks_in_use() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["plus-a"], "plus.tar.gz");
+    let target = Host::new();
+    target.ok(&["import", &archive]);
+
+    let lock = fs::File::open(target.data().join("import.lock")).unwrap();
+    lock.lock().unwrap();
+    let (code, _, errors) = target.preview(&[&archive]);
+    assert_eq!(code, Some(1));
+    assert!(
+        errors.contains("another macman import is running"),
+        "{errors}"
+    );
+    drop(lock);
+
+    let disk = target.machine_dir("plus-a").join("system.dsk");
+    let held = lock_image(&Paths::under(target.path()), &disk, LockMode::Exclusive).unwrap();
+    let (code, preview, _) = target.preview(&[&archive]);
+    assert_eq!(code, Some(1));
+    assert!(preview.contains("is in use"), "{preview}");
+    drop(held);
+}
+
+#[test]
+fn a_dry_run_reports_json() {
+    let source = Host::with_two_machines();
+    let archive = source.export(&["plus-a", "plus-b"], "both.tar.gz");
+    let target = Host::new();
+    target.add_plus_rom("plus-v3");
+    target.add_system();
+    target.create("plus-a", "plus", "plus-v3");
+    let before = target.exact_snapshot();
+
+    let output = target.run(&["--json", "import", "--dry-run", &archive]);
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(
+        report["roms"],
+        serde_json::json!([{"name": "plus-v3", "outcome": "unchanged", "local": "plus-v3"}])
+    );
+    let machines = report["machines"].as_array().unwrap();
+    assert_eq!(machines[0]["name"], "plus-a");
+    assert_eq!(machines[0]["outcome"], "conflict");
+    assert!(machines[0]["reason"].as_str().unwrap().contains("--rename"));
+    assert_eq!(
+        machines[1],
+        serde_json::json!({"name": "plus-b", "outcome": "imported", "reason": null})
+    );
+    assert_eq!(
+        (
+            &report["imported"],
+            &report["unchanged"],
+            &report["unresolved"]
+        ),
+        (
+            &serde_json::json!(1),
+            &serde_json::json!(0),
+            &serde_json::json!(1)
+        )
+    );
+    assert_eq!(target.exact_snapshot(), before);
+
+    // A real import changes things, so it has no JSON report.
+    let output = target.run(&["--json", "import", &archive]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stdout(&output).contains("--dry-run"), "{output:?}");
+    assert_eq!(target.exact_snapshot(), before);
 }
