@@ -288,7 +288,7 @@ pub fn check_cd_image(path: &Path) -> Result<CdVolume> {
 
 /// Whether the image holds an ISO 9660 volume descriptor. It's 32K in, past what
 /// [`classify`] reads, and all before it may be zeros, which looks blank there.
-fn is_iso9660(path: &Path) -> Result<bool> {
+pub fn is_iso9660(path: &Path) -> Result<bool> {
     const DESCRIPTOR: u64 = 0x8001;
     let mut file = File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
     if file.metadata()?.len() < DESCRIPTOR + 5 {

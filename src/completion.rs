@@ -1,5 +1,5 @@
 //! `macman completions`: shell scripts generated from the clap definition by
-//! `clap_complete`, plus completion of machine, ROM, and system names.
+//! `clap_complete`, plus completion of machine, ROM, system, and media names.
 //!
 //! The names are only known at run time, so the scripts ask for them: the zsh,
 //! bash, and fish scripts run `macman __complete-names KIND` where an argument
@@ -100,6 +100,7 @@ fn zsh(generated: &str) -> String {
         (NameKind::Machines, "_users"),
         (NameKind::Roms, "_hosts"),
         (NameKind::Systems, "_email_addresses"),
+        (NameKind::Media, "_urls"),
     ] {
         script = splice(
             &script,
@@ -288,10 +289,14 @@ mod tests {
         command.build();
         let expected = vec![
             arg(&["system", "remove"], at(0), NameKind::Systems),
+            arg(&["media", "info"], at(0), NameKind::Media),
+            arg(&["media", "remove"], at(0), NameKind::Media),
             arg(&["create"], option("rom"), NameKind::Roms),
             arg(&["create"], option("system"), NameKind::Systems),
+            arg(&["create"], option("media"), NameKind::Media),
             arg(&["use"], at(0), NameKind::Machines),
             arg(&["run"], at(0), NameKind::Machines),
+            arg(&["run"], option("media"), NameKind::Media),
             arg(&["config", "show"], at(0), NameKind::Machines),
             arg(&["config", "edit"], at(0), NameKind::Machines),
             arg(&["clone"], at(0), NameKind::Machines),
@@ -304,6 +309,7 @@ mod tests {
                 NameKind::Machines,
             ),
             arg(&["export"], option("system"), NameKind::Systems),
+            arg(&["export"], option("media"), NameKind::Media),
             arg(&["remove"], at(0), NameKind::Machines),
         ];
         assert_eq!(name_args(&command), expected);
@@ -325,7 +331,7 @@ mod tests {
     #[test]
     fn zsh_keeps_no_marker() {
         let text = String::from_utf8(script(Shell::Zsh)).unwrap();
-        for marker in ["_users", "_hosts", "_email_addresses"] {
+        for marker in ["_users", "_hosts", "_email_addresses", "_urls"] {
             assert!(!text.contains(marker), "{marker}");
         }
     }

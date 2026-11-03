@@ -587,6 +587,77 @@ fn a_blank_machine_installs_from_a_cd_it_does_not_keep() {
 }
 
 #[test]
+fn registered_media_install_a_blank_machine_and_are_never_written() {
+    let h = harness!();
+    let (cd, _) = write_partitioned_disk(h.root.path(), "Mac OS 9.toast");
+    let original = fs::read(&cd).unwrap();
+    h.cmd(&["media", "add", cd.to_str().unwrap(), "--name", "os9"])
+        .unwrap();
+    let floppy = write_disk(h.root.path(), "tools.image");
+    h.cmd(&["media", "add", floppy.to_str().unwrap(), "--name", "tools"])
+        .unwrap();
+    let stored = h.paths.media().join("os9.img");
+    assert_eq!(fs::read(&stored).unwrap(), original, "kept whole");
+
+    h.cmd(&[
+        "create",
+        "new",
+        "--rom",
+        "beige",
+        "--disk-size",
+        "2M",
+        "--media",
+        "os9",
+    ])
+    .unwrap();
+    let saved = fs::read_to_string(h.paths.machine("new").join("machine.toml")).unwrap();
+    assert!(
+        !saved.contains("os9"),
+        "not bundled with the machine: {saved}"
+    );
+    let error = h
+        .cmd(&[
+            "create",
+            "x",
+            "--rom",
+            "beige",
+            "--disk-size",
+            "2M",
+            "--media",
+            "nope",
+        ])
+        .unwrap_err();
+    assert!(error.to_string().contains("no media named"), "{error}");
+    assert!(!h.paths.machine("x").exists());
+
+    assert_eq!(
+        h.cmd(&["run", "new", "--media", "os9", "--media", "tools"])
+            .unwrap(),
+        0
+    );
+    let log = h.log();
+    let run = log.lines().find(|l| l.starts_with("run ")).unwrap();
+    let resolved = fs::canonicalize(&stored).unwrap();
+    assert!(
+        run.contains(&format!("--cdrom {}", resolved.display())),
+        "{run}"
+    );
+    // The floppy goes as a read-only throwaway copy, never the stored file.
+    assert!(run.contains("--disk *"), "{run}");
+    assert!(!run.contains("media/tools.img"), "{run}");
+    assert!(log.contains("nocdrom false"), "{log}");
+    assert_eq!(fs::read(&stored).unwrap(), original);
+    assert_eq!(fs::read(&cd).unwrap(), original);
+
+    // A medium in use can't be removed, and an unknown one isn't run.
+    assert!(h.cmd(&["run", "new", "--media", "nope"]).is_err());
+    h.cmd(&["media", "remove", "os9", "--yes"]).unwrap();
+    let error = h.cmd(&["run", "new", "--media", "os9"]).unwrap_err();
+    assert!(error.to_string().contains("no media named"), "{error}");
+    assert!(cd.exists(), "the source is the user's");
+}
+
+#[test]
 fn a_blank_machine_can_be_cloned_exported_and_imported() {
     let h = harness!();
     h.cmd(&["create", "new", "--rom", "beige", "--disk-size", "2M"])

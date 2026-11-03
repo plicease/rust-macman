@@ -9,6 +9,7 @@ pub mod disk;
 pub mod edit;
 pub mod fsutil;
 pub mod machine;
+pub mod media;
 pub mod model;
 pub mod paths;
 pub mod registry;

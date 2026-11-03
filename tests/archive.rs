@@ -737,7 +737,7 @@ fn export_all_needs_something_and_excludes_names() {
     let archive = empty.archive("all.tar.gz");
     let output = empty.fails(&["export", "--all", "-o", &archive]);
     assert!(
-        output.contains("no machines, ROMs, or system images"),
+        output.contains("no machines, ROMs, system images, or media"),
         "{output}"
     );
     assert!(!Path::new(&archive).exists());
@@ -1224,7 +1224,7 @@ fn refuses_hostile_manifests() {
             "name = \"../escape\"",
             "invalid ROM name",
         ),
-        ("format_version = 1", "format_version = 3", "upgrade macman"),
+        ("format_version = 1", "format_version = 4", "upgrade macman"),
         ("format_version = 1", "format_version = 0", "upgrade macman"),
         ("sha256 = \"", "sha256 = \"../", "invalid digest"),
     ];
@@ -1577,7 +1577,7 @@ fn export_all_takes_every_rom_and_system_image_used_or_not() {
     let archive = source.archive("all.tar.gz");
     let output = source.ok(&["export", "--all", "-o", &archive]);
     assert!(
-        output.contains("Exported 2 machine(s), 2 ROM(s), and 2 system image(s)"),
+        output.contains("Exported 2 machine(s), 2 ROM(s), 2 system image(s), and 0 media"),
         "{output}"
     );
     assert!(
@@ -1633,7 +1633,7 @@ fn export_all_works_without_machines_but_not_with_nothing() {
     let archive = source.archive("all.tar.gz");
     let output = source.ok(&["export", "--all", "-o", &archive]);
     assert!(
-        output.contains("Exported 0 machine(s), 1 ROM(s), and 1 system image(s)"),
+        output.contains("Exported 0 machine(s), 1 ROM(s), 1 system image(s), and 0 media"),
         "{output}"
     );
 
@@ -2105,4 +2105,116 @@ fn the_ephemeral_setting_travels_and_counts_as_configuration() {
     target.write_definition("plus-a", &local);
     let output = target.fails(&["import", &archive]);
     assert!(output.contains("different configuration"), "{output}");
+}
+
+impl Host {
+    /// Register a CD with a partition map as `name`, returning its bytes.
+    fn add_cd(&self, name: &str) -> Vec<u8> {
+        let (cd, _) = common::write_partitioned_disk(self.path(), &format!("{name}.toast"));
+        self.ok(&["media", "add", cd.to_str().unwrap(), "--name", name]);
+        fs::read(cd).unwrap()
+    }
+
+    fn media_bytes(&self, name: &str) -> Vec<u8> {
+        fs::read(self.data().join(format!("media/{name}.img"))).unwrap()
+    }
+}
+
+#[test]
+fn chosen_media_make_an_archive_of_their_own() {
+    let source = Host::new();
+    let os9 = source.add_cd("os9");
+    source.add_cd("unwanted");
+    let floppy = write_disk(source.path(), "disk1.image");
+    source.ok(&[
+        "media",
+        "add",
+        floppy.to_str().unwrap(),
+        "--name",
+        "disk1",
+        "--version",
+        "System 6.0.8",
+    ]);
+    let archive = source.archive("media.tar.gz");
+    let output = source.ok(&[
+        "export", "--media", "os9", "--media", "disk1", "-o", &archive,
+    ]);
+    assert!(
+        output.contains("0 machine(s), 0 ROM(s), 0 system image(s), and 2 media"),
+        "{output}"
+    );
+    let manifest = source.manifest(&archive);
+    assert!(manifest.starts_with("format_version = 3\n"), "{manifest}");
+    assert!(!manifest.contains("unwanted"), "{manifest}");
+    let error = source.fails(&[
+        "export",
+        "--media",
+        "nope",
+        "-o",
+        &source.archive("x.tar.gz"),
+    ]);
+    assert!(error.contains("no media named"), "{error}");
+
+    let target = Host::new();
+    let preview = target.ok(&["import", "--dry-run", &archive]);
+    assert!(preview.contains("would import media os9"), "{preview}");
+    assert!(
+        !target.data().join("media").exists(),
+        "a preview changes nothing"
+    );
+    let output = target.ok(&["import", &archive]);
+    assert!(output.contains("imported media os9"), "{output}");
+    assert!(
+        output.contains("2 imported, 0 unchanged, 0 unresolved"),
+        "{output}"
+    );
+    assert_eq!(target.media_bytes("os9"), os9, "partition map and all");
+    let list = target.ok(&["media", "list"]);
+    assert_eq!(list.lines().count(), 2, "{list}");
+    assert!(!list.contains("unwanted"), "{list}");
+    let metadata = |host: &Host, name: &str| {
+        fs::read_to_string(host.data().join(format!("media/{name}.toml"))).unwrap()
+    };
+    assert_eq!(metadata(&target, "disk1"), metadata(&source, "disk1"));
+    assert!(
+        target
+            .ok(&["media", "info", "disk1"])
+            .contains("Version: System 6.0.8")
+    );
+
+    // Again, it's all there; with other contents under a name, it's a conflict.
+    let again = target.ok(&["import", &archive]);
+    assert!(again.contains("unchanged media os9"), "{again}");
+    let other = Host::new();
+    let (cd, _) = common::write_disk_with_volumes(other.path(), "os9.toast", &[96, 2000]);
+    other.ok(&["media", "add", cd.to_str().unwrap(), "--name", "os9"]);
+    let before = other.media_bytes("os9");
+    let output = other.run(&["import", &archive]);
+    assert_eq!(output.status.code(), Some(1));
+    let text = stdout(&output);
+    assert!(
+        text.contains("conflict media os9: different media"),
+        "{text}"
+    );
+    assert!(text.contains("imported media disk1"), "{text}");
+    assert_eq!(other.media_bytes("os9"), before, "never overwritten");
+}
+
+#[test]
+fn export_all_takes_media_no_machine_uses() {
+    let source = Host::with_two_machines();
+    let cd = source.add_cd("os9");
+    let archive = source.archive("all.tar.gz");
+    let output = source.ok(&["export", "--all", "-o", &archive]);
+    assert!(output.contains("and 1 media"), "{output}");
+    let target = Host::new();
+    let output = target.ok(&["import", &archive]);
+    assert!(output.contains("imported media os9"), "{output}");
+    assert_eq!(target.media_bytes("os9"), cd);
+
+    // Without media, an archive is still one older versions read.
+    let plain = Host::with_two_machines();
+    let archive = plain.archive("plain.tar.gz");
+    plain.ok(&["export", "--all", "-o", &archive]);
+    assert!(plain.manifest(&archive).starts_with("format_version = 2\n"));
 }

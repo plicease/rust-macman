@@ -1,6 +1,7 @@
 //! Command-line interface (design §5).
 
 use crate::machine::{Cpu, Network};
+use crate::media::MediaKind;
 use crate::model::ALL_MODELS;
 use clap::builder::{PossibleValue, TypedValueParser};
 use clap::{Parser, Subcommand, ValueHint};
@@ -14,6 +15,7 @@ use std::path::PathBuf;
 pub(crate) const MACHINE: ValueHint = ValueHint::Username;
 pub(crate) const ROM: ValueHint = ValueHint::Hostname;
 pub(crate) const SYSTEM: ValueHint = ValueHint::EmailAddress;
+pub(crate) const MEDIA: ValueHint = ValueHint::Url;
 
 /// The command completion scripts run for names. It isn't a subcommand,
 /// because every shell's script would then offer it.
@@ -25,10 +27,11 @@ pub enum NameKind {
     Machines,
     Roms,
     Systems,
+    Media,
 }
 
 impl NameKind {
-    pub const ALL: [Self; 3] = [Self::Machines, Self::Roms, Self::Systems];
+    pub const ALL: [Self; 4] = [Self::Machines, Self::Roms, Self::Systems, Self::Media];
 
     /// The kind an argument marked with `hint` takes, if any.
     pub fn of(hint: ValueHint) -> Option<Self> {
@@ -40,6 +43,7 @@ impl NameKind {
             Self::Machines => MACHINE,
             Self::Roms => ROM,
             Self::Systems => SYSTEM,
+            Self::Media => MEDIA,
         }
     }
 
@@ -48,6 +52,7 @@ impl NameKind {
             Self::Machines => "machines",
             Self::Roms => "roms",
             Self::Systems => "systems",
+            Self::Media => "media",
         }
     }
 
@@ -56,6 +61,7 @@ impl NameKind {
             "machines" => Some(Self::Machines),
             "roms" => Some(Self::Roms),
             "systems" => Some(Self::Systems),
+            "media" => Some(Self::Media),
             _ => None,
         }
     }
@@ -130,6 +136,9 @@ pub enum Command {
     /// Manage registered bootable system images
     #[command(subcommand)]
     System(SystemCommand),
+    /// Manage registered installation, boot, and removable media, such as CDs and floppies
+    #[command(subcommand)]
+    Media(MediaCommand),
     /// Inspect disk images and extract volumes from them
     #[command(subcommand)]
     Disk(DiskCommand),
@@ -156,13 +165,13 @@ pub enum Command {
     /// Write machines, ROMs, and system images to an archive for another host
     Export {
         #[arg(
-            required_unless_present_any = ["all", "systems", "all_systems"],
+            required_unless_present_any = ["all", "systems", "all_systems", "media", "all_media"],
             value_name = "MACHINE",
             value_hint = MACHINE
         )]
         names: Vec<String>,
-        /// Export every machine, ROM, and system image, used or not
-        #[arg(long, conflicts_with_all = ["names", "systems", "all_systems"])]
+        /// Export every machine, ROM, system image, and medium, used or not
+        #[arg(long, conflicts_with_all = ["names", "systems", "all_systems", "media", "all_media"])]
         all: bool,
         /// Also export this registered system image (repeatable)
         #[arg(long = "system", value_name = "SYSTEM", value_hint = SYSTEM)]
@@ -170,6 +179,12 @@ pub enum Command {
         /// Also export every registered system image
         #[arg(long, conflicts_with = "systems")]
         all_systems: bool,
+        /// Also export this registered medium (repeatable)
+        #[arg(long = "media", value_name = "MEDIA", value_hint = MEDIA)]
+        media: Vec<String>,
+        /// Also export every registered medium
+        #[arg(long, conflicts_with = "media")]
+        all_media: bool,
         /// Archive to create, such as machines.tar.gz
         #[arg(short, long, value_name = "FILE", value_hint = ValueHint::FilePath)]
         output: PathBuf,
@@ -233,6 +248,41 @@ pub enum SystemCommand {
     /// Delete a registered system image; machines made from it keep their own disks
     Remove {
         #[arg(value_name = "SYSTEM", value_hint = SYSTEM)]
+        name: String,
+        /// Delete it without prompting
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MediaCommand {
+    /// Register a whole CD, floppy, or other image, unchanged, for `run --media`
+    Add {
+        #[arg(value_hint = ValueHint::FilePath)]
+        file: PathBuf,
+        #[arg(long)]
+        name: String,
+        /// How to attach it, if not as macman finds it
+        #[arg(long, value_enum)]
+        kind: Option<MediaKind>,
+        /// What it holds, such as "Mac OS 9.0.4", for display only
+        #[arg(long)]
+        version: Option<String>,
+        /// Register an image whose format macman doesn't recognize
+        #[arg(long)]
+        any_format: bool,
+    },
+    /// List registered media
+    List,
+    /// Show what a registered medium holds, and check it against its digest
+    Info {
+        #[arg(value_name = "MEDIA", value_hint = MEDIA)]
+        name: String,
+    },
+    /// Delete a registered medium; the file it came from is untouched
+    Remove {
+        #[arg(value_name = "MEDIA", value_hint = MEDIA)]
         name: String,
         /// Delete it without prompting
         #[arg(long)]
@@ -317,6 +367,10 @@ pub struct CreateArgs {
     /// Run on a temporary copy of the boot disk by default, discarding the guest's changes
     #[arg(long)]
     pub ephemeral: bool,
+    /// Registered media to install from; checked against the machine, and given in the
+    /// `run` command printed. Nothing about it is saved with the machine (repeatable)
+    #[arg(long = "media", value_name = "MEDIA", value_hint = MEDIA)]
+    pub media: Vec<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -336,6 +390,10 @@ pub struct RunArgs {
     /// SheepShaver, and Basilisk II on Linux)
     #[arg(long = "cdrom", value_name = "FILE", value_hint = ValueHint::FilePath)]
     pub cdroms: Vec<PathBuf>,
+    /// Attach registered media for this run only, a CD as a CD and a floppy as a floppy,
+    /// never written (repeatable, in order)
+    #[arg(long = "media", value_name = "MEDIA", value_hint = MEDIA)]
+    pub media: Vec<String>,
     /// Boot from a writable temporary copy of the boot disk, discarded when the run ends;
     /// other disks keep their changes
     #[arg(short, long, conflicts_with = "no_ephemeral")]

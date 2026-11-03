@@ -6,10 +6,11 @@
 //! Internal types aren't serialized as they are, except a machine's own
 //! definition in [`MachineConfig`], which is its `machine.toml` as JSON.
 
-use crate::archive::{ImportReport, Outcome, RomOutcome, SystemOutcome};
+use crate::archive::{ImportReport, Outcome, RomOutcome, SystemOutcome, SystemResult};
 use crate::backend::{Check, CheckLevel};
 use crate::disk::{DiskFormat, Partition};
 use crate::machine::Machine;
+use crate::media::{Media, MediaFormat, MediaKind};
 use serde::Serialize;
 
 /// Print `report` as one JSON document on stdout.
@@ -164,6 +165,52 @@ pub struct SystemEntry {
     pub format: Option<Format>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct MediaList {
+    pub media: Vec<MediaEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MediaEntry {
+    pub name: String,
+    pub kind: MediaKind,
+    /// Whether `kind` was given when it was registered, rather than found.
+    pub kind_given: bool,
+    pub format: MediaFormat,
+    /// Whether some volume on it has boot blocks.
+    pub bootable: bool,
+    pub size: u64,
+    pub sha256: String,
+    pub version: Option<String>,
+    /// The name of the file it was registered from.
+    pub source: Option<String>,
+}
+
+impl From<Media> for MediaEntry {
+    fn from(media: Media) -> Self {
+        Self {
+            name: media.name,
+            kind: media.kind,
+            kind_given: media.kind_given,
+            format: media.format,
+            bootable: media.bootable,
+            size: media.size,
+            sha256: media.sha256,
+            version: media.version,
+            source: media.source,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct MediaInfo {
+    pub media: MediaEntry,
+    /// Whether the stored image still matches its digest.
+    pub verified: bool,
+    #[serde(flatten)]
+    pub layout: Layout,
+}
+
 /// A volume or image format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -256,6 +303,8 @@ pub struct ImportResult {
     pub dry_run: bool,
     pub roms: Vec<RomImport>,
     pub systems: Vec<SystemImport>,
+    /// As for system images.
+    pub media: Vec<SystemImport>,
     pub machines: Vec<MachineImport>,
     pub imported: usize,
     pub unchanged: usize,
@@ -352,28 +401,8 @@ impl From<&ImportReport> for ImportResult {
                     }
                 })
                 .collect(),
-            systems: report
-                .systems
-                .iter()
-                .map(|system| {
-                    let (outcome, reason) = match &system.outcome {
-                        SystemOutcome::Imported => (SystemStatus::Imported, None),
-                        SystemOutcome::Recovered => (SystemStatus::Recovered, None),
-                        SystemOutcome::Unchanged => (SystemStatus::Unchanged, None),
-                        SystemOutcome::Conflict(reason) => {
-                            (SystemStatus::Conflict, Some(reason.clone()))
-                        }
-                        SystemOutcome::Failed(reason) => {
-                            (SystemStatus::Failed, Some(reason.clone()))
-                        }
-                    };
-                    SystemImport {
-                        name: system.name.clone(),
-                        outcome,
-                        reason,
-                    }
-                })
-                .collect(),
+            systems: report.systems.iter().map(system_import).collect(),
+            media: report.media.iter().map(system_import).collect(),
             machines: report
                 .machines
                 .iter()
@@ -395,6 +424,21 @@ impl From<&ImportReport> for ImportResult {
             unchanged: report.unchanged(),
             unresolved: report.unresolved(),
         }
+    }
+}
+
+fn system_import(system: &SystemResult) -> SystemImport {
+    let (outcome, reason) = match &system.outcome {
+        SystemOutcome::Imported => (SystemStatus::Imported, None),
+        SystemOutcome::Recovered => (SystemStatus::Recovered, None),
+        SystemOutcome::Unchanged => (SystemStatus::Unchanged, None),
+        SystemOutcome::Conflict(reason) => (SystemStatus::Conflict, Some(reason.clone())),
+        SystemOutcome::Failed(reason) => (SystemStatus::Failed, Some(reason.clone())),
+    };
+    SystemImport {
+        name: system.name.clone(),
+        outcome,
+        reason,
     }
 }
 

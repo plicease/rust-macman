@@ -92,6 +92,10 @@ impl Paths {
     pub fn systems(&self) -> PathBuf {
         self.data_dir.join("systems")
     }
+    /// Registered installation, boot, and removable media, kept whole.
+    pub fn media(&self) -> PathBuf {
+        self.data_dir.join("media")
+    }
     pub fn machines(&self) -> PathBuf {
         self.data_dir.join("machines")
     }

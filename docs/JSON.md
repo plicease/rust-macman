@@ -39,8 +39,8 @@ The message is also printed to stderr, as `error: ...`, as it is without `--json
 
 These change things and report as they go, so they have no single result to give:
 `create`, `run`, `use`, `clone`, `remove`, `export`, `import` (except with `--dry-run`),
-`rom add`, `system add`, `system remove`, `disk extract`, and `config edit`, which is
-interactive. Given `--json`, they do nothing, and fail with an error as above.
+`rom add`, `system add`, `system remove`, `media add`, `media remove`, `disk extract`, and
+`config edit`, which is interactive. Given `--json`, they do nothing, and fail with an error as above.
 
 ## `macman list`
 
@@ -142,6 +142,34 @@ will boot on it. Mac OS 8.1, for one, crashes SheepShaver with a New World ROM.
 | `sha256` | string | Of the stored image |
 | `format` | string or null | `mfs` or `hfs` for a raw volume, `disk_copy42` for a Disk Copy 4.2 image; `null` if unknown |
 
+## `macman media list`
+
+```json
+{"media": [{"name": "macos-9.0.4", "kind": "cdrom", "kind_given": false, "format": "partitioned", "bootable": true, "size": 681574400, "sha256": "...", "version": "Mac OS 9.0.4", "source": "Mac OS 9.0.4.toast"}]}
+```
+
+| Field | Type | |
+|---|---|---|
+| `name` | string | |
+| `kind` | string | `cdrom`, `floppy`, or `disk`: how `run --media` attaches it |
+| `kind_given` | boolean | Whether `kind` was given with `media add --kind`, rather than found |
+| `format` | string | `hfs`, `mfs`, `disk_copy42`, `partitioned`, `iso9660`, or `unrecognized` |
+| `bootable` | boolean | Whether some volume on it has boot blocks; it doesn't promise a machine starts from it |
+| `size` | number | |
+| `sha256` | string | Of the stored image, which is the whole file registered |
+| `version` | string or null | As given to `media add --version`; never guessed |
+| `source` | string or null | The name of the file it was registered from |
+
+## `macman media info NAME`
+
+```json
+{"media": {"name": "macos-9.0.4", "kind": "cdrom", "...": "..."}, "verified": true, "layout": "partitioned", "partitions": [{"index": 1, "type": "Apple_partition_map", "...": "..."}]}
+```
+
+`media` is as in `media list`. `verified` says whether the stored image still matches
+its digest, read in full. The layout fields are those of `disk info`, below. With
+`verified` false, this is still what's printed, and the exit code is 1.
+
 ## `macman disk info FILE`
 
 ```json
@@ -188,6 +216,7 @@ With no current machine, it fails, as without `--json`.
   "dry_run": true,
   "roms": [{"name": "plus-v3", "outcome": "unchanged", "local": "plus-v3", "reason": null}],
   "systems": [{"name": "system-6.0.8", "outcome": "imported", "reason": null}],
+  "media": [{"name": "macos-9.0.4", "outcome": "imported", "reason": null}],
   "machines": [
     {"name": "plus-a", "outcome": "conflict", "reason": "a different machine is already named \"plus-a\"; import it under another name with --rename"},
     {"name": "plus-b", "outcome": "imported", "reason": null}
@@ -212,6 +241,7 @@ explains them.
 | `systems[].name` | string | The system image's name, here and in the archive |
 | `systems[].outcome` | string | `imported`, `recovered`, `unchanged`, `conflict`, or `failed` |
 | `systems[].reason` | string or null | Why, for `conflict` and `failed` |
+| `media[]` | | As for `systems[]`, for each medium |
 | `machines[].name` | string | The name it would have here, which `--rename` sets |
 | `machines[].outcome` | string | `imported`, `unchanged`, `conflict`, or `failed` |
 | `machines[].reason` | string or null | Why, for `conflict` and `failed` |

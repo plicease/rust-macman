@@ -768,3 +768,92 @@ fn config_edit_needs_a_terminal_and_writes_no_escapes() {
     assert!(!error.contains("terminal"), "{error}");
     assert_eq!(std::fs::read(&file).unwrap(), before);
 }
+
+#[test]
+fn media_are_registered_whole_listed_checked_and_removed() {
+    let env = Env::new();
+    let (cd, _) = common::write_partitioned_disk(env.path(), "Mac OS 9.0.4.toast");
+    let floppy = write_disk(env.path(), "System 6 Install 1.image");
+    let original = std::fs::read(&cd).unwrap();
+    let out = env.ok(&[
+        "media",
+        "add",
+        cd.to_str().unwrap(),
+        "--name",
+        "macos-9.0.4",
+        "--version",
+        "Mac OS 9.0.4",
+    ]);
+    assert!(out.contains("cdrom, partitioned"), "{out}");
+    env.ok(&["media", "add", floppy.to_str().unwrap(), "--name", "sys6-1"]);
+    let error = env.fails(&["media", "add", floppy.to_str().unwrap(), "--name", "sys6-1"]);
+    assert!(error.contains("already registered"), "{error}");
+    let error = env.fails(&["media", "add", "/no/such.iso", "--name", "x"]);
+    assert!(error.contains("/no/such.iso"), "{error}");
+
+    let list = env.ok(&["media", "list"]);
+    let lines: Vec<_> = list.lines().collect();
+    assert_eq!(lines.len(), 2, "{list}");
+    assert!(lines[0].starts_with("macos-9.0.4  cdrom"), "{list}");
+    assert!(lines[0].ends_with("Mac OS 9.0.4"), "{list}");
+    assert!(
+        lines[1].contains("floppy") && lines[1].contains("HFS volume"),
+        "{list}"
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_str(&env.ok(&["--json", "media", "list"])).unwrap();
+    let first = &json["media"][0];
+    assert_eq!(first["kind"], "cdrom");
+    assert_eq!(first["format"], "partitioned");
+    assert_eq!(first["source"], "Mac OS 9.0.4.toast");
+    assert_eq!(first["size"], original.len());
+
+    let info = env.ok(&["media", "info", "macos-9.0.4"]);
+    for expected in ["Kind: cdrom (as found)", "Apple_HFS", "Verified"] {
+        assert!(info.contains(expected), "{info}");
+    }
+    let json: serde_json::Value =
+        serde_json::from_str(&env.ok(&["--json", "media", "info", "macos-9.0.4"])).unwrap();
+    assert_eq!(json["verified"], true);
+    assert_eq!(json["layout"], "partitioned");
+
+    // The stored copy is read-only; one changed anyway is caught.
+    let stored = env.path().join("data/macman/media/macos-9.0.4.img");
+    assert_eq!(std::fs::read(&stored).unwrap(), original);
+    let mut perms = std::fs::metadata(&stored).unwrap().permissions();
+    assert!(perms.readonly());
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&stored, perms).unwrap();
+    let mut changed = original.clone();
+    changed[600] ^= 1;
+    std::fs::write(&stored, changed).unwrap();
+    let error = env.fails(&["media", "info", "macos-9.0.4"]);
+    assert!(error.contains("doesn't match its digest"), "{error}");
+    let output = env.run(&["--json", "media", "info", "macos-9.0.4"]);
+    assert_eq!(output.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["verified"], false);
+
+    let error = env.fails(&["media", "remove", "macos-9.0.4"]);
+    assert!(error.contains("--yes"), "{error}");
+    assert!(stored.exists());
+    env.ok(&["media", "remove", "macos-9.0.4", "--yes"]);
+    assert!(!stored.exists());
+    assert_eq!(
+        std::fs::read(&cd).unwrap(),
+        original,
+        "the source is untouched"
+    );
+    assert_eq!(env.ok(&["media", "list"]).lines().count(), 1);
+    let error = env.fails(&[
+        "--json",
+        "media",
+        "add",
+        cd.to_str().unwrap(),
+        "--name",
+        "y",
+    ]);
+    assert!(error.contains("--json isn't supported"), "{error}");
+}

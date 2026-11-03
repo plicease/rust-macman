@@ -181,8 +181,8 @@ fn zsh_picks_up_the_script_from_fpath() {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "_macman\n");
 }
 
-/// A data directory holding ROM `plus-v3`, system `sys-608`, and machines
-/// `alpha` and `beta`.
+/// A data directory holding ROM `plus-v3`, system `sys-608`, media
+/// `disk-1`, and machines `alpha` and `beta`.
 fn registered() -> TempDir {
     let root = TempDir::new().unwrap();
     let ok = |args: &[&str]| {
@@ -193,6 +193,7 @@ fn registered() -> TempDir {
     let disk = write_disk(root.path(), "sys.dsk");
     ok(&["rom", "add", rom.to_str().unwrap(), "--name", "plus-v3"]);
     ok(&["system", "add", disk.to_str().unwrap(), "--name", "sys-608"]);
+    ok(&["media", "add", disk.to_str().unwrap(), "--name", "disk-1"]);
     for name in ["beta", "alpha"] {
         ok(&[
             "create", name, "--model", "plus", "--rom", "plus-v3", "--system", "sys-608",
@@ -234,13 +235,14 @@ fn names_are_listed_for_scripts() {
     assert_eq!(names("machines"), "alpha\nbeta\n");
     assert_eq!(names("roms"), "plus-v3\n");
     assert_eq!(names("systems"), "sys-608\n");
+    assert_eq!(names("media"), "disk-1\n");
     assert_eq!(names("other"), "");
 }
 
 #[test]
 fn listing_names_never_fails_or_changes_anything() {
     let root = TempDir::new().unwrap();
-    for kind in ["machines", "roms", "systems"] {
+    for kind in ["machines", "roms", "systems", "media"] {
         let output = macman(root.path(), &["__complete-names", kind]);
         assert!(output.status.success(), "{output:?}");
         assert!(output.stdout.is_empty() && output.stderr.is_empty());
@@ -307,6 +309,12 @@ fn bash_completes_names() {
         complete_line "macman create new --system s"
         complete_line "macman create "
         complete_line "macman use --"
+        complete_line "macman media info "
+        complete_line "macman media remove d"
+        complete_line "macman run alpha --media "
+        complete_line "macman run --media disk-1 --media "
+        complete_line "macman create new --media "
+        complete_line "macman export --media "
     "#;
     let output = in_shell(root.path(), "bash", &[], check, &[&file]);
     let expected = "\
@@ -320,10 +328,30 @@ macman remove -> alpha beta
 macman system remove -> sys-608
 macman create new --rom -> plus-v3
 macman create new --system s-> sys-608
-macman create -> -v -h --backend --model --rom --system --disk-size --memory --display --scale --fullscreen --cpu --no-fpu --no-sound --network --shared-folder --ephemeral --verbose --json --help
+macman create -> -v -h --backend --model --rom --system --disk-size --memory --display --scale --fullscreen --cpu --no-fpu --no-sound --network --shared-folder --ephemeral --media --verbose --json --help
 macman use ---> --verbose --json --help
+macman media info -> disk-1
+macman media remove d-> disk-1
+macman run alpha --media -> disk-1
+macman run --media disk-1 --media -> disk-1
+macman create new --media -> disk-1
+macman export --media -> disk-1
 ";
     assert_eq!(output, expected);
+
+    // A new medium's file is a path, and its name a new one: neither is offered
+    // a registered name.
+    let check = format!(
+        "{}\n{}",
+        check.lines().take(10).collect::<Vec<_>>().join("\n"),
+        r#"
+        complete_line "macman media add d"
+        complete_line "macman media add x.img --name d"
+    "#
+    );
+    let output = in_shell(root.path(), "bash", &[], &check, &[&file]);
+    assert_eq!(output.lines().count(), 2, "{output}");
+    assert!(!output.contains("disk-1"), "{output}");
 }
 
 #[test]
@@ -337,6 +365,7 @@ fn zsh_completes_names() {
         "':name:_macman_names machines'",
         ":ROM:_macman_names roms'",
         ":SYSTEM:_macman_names systems'",
+        ":MEDIA:_macman_names media'",
         "'*::names:_macman_names machines'",
     ] {
         assert!(text.contains(expected), "zsh lacks {expected}");
@@ -354,9 +383,10 @@ fn zsh_completes_names() {
         _macman_names machines
         _macman_names roms
         _macman_names systems
+        _macman_names media
     "#;
     let output = in_shell(root.path(), "zsh", &["-f"], check, &[&file]);
-    assert_eq!(output, "alpha\nbeta\nplus-v3\nsys-608\n");
+    assert_eq!(output, "alpha\nbeta\nplus-v3\nsys-608\ndisk-1\n");
 }
 
 #[test]
@@ -366,6 +396,8 @@ fn fish_completes_names() {
         r#"complete -c macman -n "__fish_macman_using_subcommand use" -f -a "(macman __complete-names machines)""#,
         r#"complete -c macman -n "__fish_macman_using_subcommand create" -l rom -r -f -a "(macman __complete-names roms)""#,
         r#"complete -c macman -n "__fish_macman_using_subcommand system; and __fish_seen_subcommand_from remove" -f -a "(macman __complete-names systems)""#,
+        r#"complete -c macman -n "__fish_macman_using_subcommand media; and __fish_seen_subcommand_from info" -f -a "(macman __complete-names media)""#,
+        r#"complete -c macman -n "__fish_macman_using_subcommand run" -l media -r -f -a "(macman __complete-names media)""#,
     ] {
         assert!(text.contains(expected), "fish lacks {expected}");
     }
