@@ -103,15 +103,15 @@ fn registers_files_under_xdg_paths() {
             .join("data/macman/systems/system-6.0.8.dsk")
             .is_file()
     );
-    assert!(
-        env.ok(&["rom", "list"])
-            .contains("plus-v3  128K  512ke/plus")
-    );
+    let roms = env.ok(&["rom", "list"]);
+    assert!(roms.starts_with("plus-v3  128K  used "), "{roms}");
+    assert!(roms.contains("  512ke/plus"), "{roms}");
     let systems = env.ok(&["system", "list"]);
     assert!(
-        systems.contains("system-6.0.8  6.0.8  800K  raw HFS"),
+        systems.starts_with("system-6.0.8  6.0.8  800K  used "),
         "{systems}"
     );
+    assert!(systems.contains("KiB  raw HFS"), "{systems}");
 }
 
 /// macOS shares this layout with Linux, on purpose: see docs/PLATFORMS.md.
@@ -186,10 +186,12 @@ fn use_current_and_list() {
     assert_eq!(env.ok(&["current"]).trim(), "wombat-6");
 
     let list = env.ok(&["list"]);
+    let line = list.lines().find(|l| l.starts_with("* wombat-6")).unwrap();
     assert!(
-        list.contains("* wombat-6  plus  4M  512x342x1  persistent  system 6.0.8"),
+        line.starts_with("* wombat-6  plus  4M  512x342x1  disk 800 KiB  used "),
         "{list}"
     );
+    assert!(line.ends_with("  persistent  system 6.0.8"), "{list}");
     assert!(list.contains("  wombat-7"), "{list}");
     assert!(env.ok(&["config", "show"]).contains("wombat-6"));
 }
@@ -438,10 +440,9 @@ fn rom_with_trailing_data_works_and_says_so() {
     env.ok(&[
         "create", "m", "--model", "plus", "--rom", "plus-v3", "--system", "sys",
     ]);
-    assert!(
-        env.ok(&["rom", "list"])
-            .contains("plus-v3  128K  512ke/plus")
-    );
+    let roms = env.ok(&["rom", "list"]);
+    assert!(roms.starts_with("plus-v3  128K  used "), "{roms}");
+    assert!(roms.contains("  512ke/plus"), "{roms}");
 }
 
 #[test]
@@ -856,4 +857,118 @@ fn media_are_registered_whole_listed_checked_and_removed() {
         "y",
     ]);
     assert!(error.contains("--json isn't supported"), "{error}");
+}
+
+#[test]
+fn disk_usage_is_allocated_space_listed_smallest_first() {
+    let env = Env::new();
+    env.register();
+    env.create("wombat-6");
+    env.create("roomy");
+    let cd = write_disk(env.path(), "cd.image");
+    env.ok(&["media", "add", cd.to_str().unwrap(), "--name", "tools"]);
+
+    // A sparse 64M extra disk adds what it has allocated, not its length, and
+    // leaves the boot disk's capacity alone.
+    let roomy = env.path().join("data/macman/machines/roomy");
+    let data = std::fs::File::create(roomy.join("data.dsk")).unwrap();
+    data.set_len(64 << 20).unwrap();
+    drop(data);
+    let definition = roomy.join("machine.toml");
+    let mut text = std::fs::read_to_string(&definition).unwrap();
+    text.push_str("\n[[disks]]\npath = \"data.dsk\"\nreadonly = false\nboot = false\n");
+    std::fs::write(&definition, text).unwrap();
+
+    let list: serde_json::Value = serde_json::from_str(&env.ok(&["--json", "list"])).unwrap();
+    let machine = |name: &str| {
+        list["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    let (roomy_json, wombat) = (machine("roomy"), machine("wombat-6"));
+    assert_eq!(roomy_json["system_disk_capacity_bytes"], 800 * 1024);
+    assert_eq!(wombat["system_disk_capacity_bytes"], 800 * 1024);
+    let used = |m: &serde_json::Value| m["host_disk_used_bytes"].as_u64().unwrap();
+    assert!(used(&wombat) > 0);
+    if cfg!(unix) {
+        // Unix file systems here keep holes, so the 64M file adds next to nothing.
+        assert!(
+            used(&roomy_json) < used(&wombat) + (1 << 20),
+            "{roomy_json}"
+        );
+    }
+    assert!(used(&roomy_json) >= used(&wombat));
+
+    let roms: serde_json::Value =
+        serde_json::from_str(&env.ok(&["--json", "rom", "list"])).unwrap();
+    assert!(roms["roms"][0]["host_disk_used_bytes"].as_u64().unwrap() >= 128 * 1024);
+    let systems: serde_json::Value =
+        serde_json::from_str(&env.ok(&["--json", "system", "list"])).unwrap();
+    assert!(systems["systems"][0]["host_disk_used_bytes"].is_u64());
+    let media: serde_json::Value =
+        serde_json::from_str(&env.ok(&["--json", "media", "list"])).unwrap();
+    assert!(media["media"][0]["host_disk_used_bytes"].is_u64());
+
+    // A machine missing its disk is still listed, as unavailable, not as zero.
+    std::fs::remove_file(env.path().join("data/macman/machines/wombat-6/system.dsk")).unwrap();
+    let text = env.ok(&["list"]);
+    let line = text.lines().find(|l| l.contains("wombat-6")).unwrap();
+    let cells: Vec<_> = line
+        .split("  ")
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .collect();
+    assert_eq!(cells[4..6], ["disk -", "used -"], "{text}");
+
+    let du = env.ok(&["du"]);
+    let lines: Vec<_> = du.lines().collect();
+    assert!(
+        lines[0].starts_with("NAME") && lines[0].ends_with("DISK USED"),
+        "{du}"
+    );
+    let names: Vec<_> = lines[1..]
+        .iter()
+        .map(|l| l.split_whitespace().take(2).collect::<Vec<_>>().join(" "))
+        .collect();
+    assert_eq!(names.len(), 5, "{du}");
+    for expected in [
+        "plus-v3 rom",
+        "system-6.0.8 system",
+        "tools media",
+        "roomy machine",
+    ] {
+        assert!(names.contains(&expected.to_string()), "{du}");
+    }
+    assert_eq!(
+        names.last().unwrap(),
+        "wombat-6 machine",
+        "unavailable last: {du}"
+    );
+    assert!(lines.last().unwrap().ends_with(" -"), "{du}");
+    // Every row's value ends in the same column.
+    let width = lines[0].len();
+    assert!(lines.iter().all(|l| l.len() == width), "{du}");
+
+    let json: serde_json::Value = serde_json::from_str(&env.ok(&["--json", "du"])).unwrap();
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 5);
+    let sizes: Vec<_> = entries
+        .iter()
+        .filter_map(|e| e["host_disk_used_bytes"].as_u64())
+        .collect();
+    assert_eq!(sizes.len(), 4);
+    assert!(sizes.windows(2).all(|pair| pair[0] <= pair[1]), "{json}");
+    assert_eq!(entries[4]["name"], "wombat-6");
+    assert_eq!(entries[4]["type"], "machine");
+    assert!(entries[4]["host_disk_used_bytes"].is_null());
+    let order: Vec<_> = entries.iter().map(|e| e["name"].clone()).collect();
+    let text_order: Vec<_> = lines[1..]
+        .iter()
+        .map(|l| serde_json::Value::from(l.split_whitespace().next().unwrap()))
+        .collect();
+    assert_eq!(order, text_order, "the same order as the text");
 }

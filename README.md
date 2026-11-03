@@ -95,9 +95,9 @@ directory, and if macman is killed, the next `run` removes it.
 
 Other commands: `list [--builds]`, `current`, `rom list`, `system list`, `system remove`,
 `media list`, `media info`, `media remove`, `config show`, `config edit`, `clone`, `export`,
-`import`, `remove`, and `doctor`. Add `--verbose` for build and launch logs. Add `--json` to
+`import`, `remove`, `du`, and `doctor`. Add `--verbose` for build and launch logs. Add `--json` to
 `list`, `doctor`, `rom list`, `system list`, `media list`, `media info`, `disk info`,
-`config show`, or `current` for output that scripts can read; [docs/JSON.md](docs/JSON.md) has the fields.
+`config show`, `current`, or `du` for output that scripts can read; [docs/JSON.md](docs/JSON.md) has the fields.
 
 `rom list` shows each ROM's name, size, kind, and the start of its hash, then the
 backends that can start from it, such as `minivmac` or `basilisk2`, or `unknown` for one
@@ -500,6 +500,49 @@ Media names and paths never mix: `--media` takes only registered names, and `--c
 
 Installation CDs and floppies are copyrighted like ROMs and System Software; register
 your own, and don't redistribute them.
+
+## Disk usage
+
+`macman list` shows each machine's boot disk capacity, as `disk`, and what all its disks
+take on the host, as `used`. `rom list`, `system list`, and `media list` show `used` for
+each stored file beside its size, and `macman du` lists everything, largest last, as in
+this example:
+
+```text
+$ macman du
+NAME          TYPE     DISK USED
+plus-v3       rom        128 KiB
+sys6-install  media      800 KiB
+system-6.0.8  system     800 KiB
+wombat-6      machine     41 MiB
+ss904         machine    412 MiB
+```
+
+The two numbers measure different things. A disk's capacity is what the guest sees: the
+file's length, or a Disk Copy image's data, whether or not the host has stored it all.
+Its usage is what the file system has allocated, so a 1 GiB blank disk from `create
+--disk-size` takes almost nothing on the host until the guest writes to it. A machine's
+usage counts every disk in its `machine.toml`, the boot disk and any others, and nothing
+else: not its ROM or the system image it was created from, which `du` lists on their
+own, and not a run's temporary copies, such as an ephemeral boot disk, which go when the
+run ends.
+
+`du` sorts by usage, then by type and name, so its order is the same every time. An entry
+whose usage can't be measured, such as a machine with a missing disk, shows `-`, never
+`0 B`, and comes after the rest; listings carry on past it.
+
+Usage is allocation as the platform reports it, `st_blocks` on Linux and macOS and the
+allocation size on Windows, which may round up to whole blocks or clusters. It can't see
+storage shared between files: a reflinked or deduplicated copy, as Btrfs, XFS, and APFS
+can make, is counted in full for each file that shares it, so totals can overstate what
+removing something would free. Transparent compression may be
+reported either way, depending on the file system. Hard links to one file are counted
+once within a machine. Elsewhere macman makes copies rather than links, so they don't
+arise.
+
+`--json` gives the raw byte counts: `system_disk_capacity_bytes` and
+`host_disk_used_bytes` in `list`, `host_disk_used_bytes` in the registry lists, and
+`du`'s entries in the same order as its text. See [docs/JSON.md](docs/JSON.md).
 
 ## Moving machines between hosts
 

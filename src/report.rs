@@ -49,6 +49,10 @@ pub enum MachineDetails {
         system_version: Option<String>,
         /// Whether a plain `run` uses a temporary copy of the boot disk.
         ephemeral: bool,
+        /// The boot disk's capacity as the guest sees it; null if unknown.
+        system_disk_capacity_bytes: Option<u64>,
+        /// Host storage allocated to the machine's disks; null if unavailable.
+        host_disk_used_bytes: Option<u64>,
     },
     Unreadable {
         error: String,
@@ -148,6 +152,8 @@ pub struct RomEntry {
     pub backend: Option<&'static str>,
     /// Every backend whose ROM check it passes; empty if none.
     pub emulators: Vec<&'static str>,
+    /// Host storage allocated to the stored ROM; null if unavailable.
+    pub host_disk_used_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -163,6 +169,8 @@ pub struct SystemEntry {
     pub sha256: String,
     /// None if the stored image can't be identified.
     pub format: Option<Format>,
+    /// Host storage allocated to the stored image; null if unavailable.
+    pub host_disk_used_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -184,10 +192,12 @@ pub struct MediaEntry {
     pub version: Option<String>,
     /// The name of the file it was registered from.
     pub source: Option<String>,
+    /// Host storage allocated to the stored image; null if unavailable.
+    pub host_disk_used_bytes: Option<u64>,
 }
 
-impl From<Media> for MediaEntry {
-    fn from(media: Media) -> Self {
+impl MediaEntry {
+    pub fn new(media: Media, host_disk_used_bytes: Option<u64>) -> Self {
         Self {
             name: media.name,
             kind: media.kind,
@@ -198,6 +208,42 @@ impl From<Media> for MediaEntry {
             sha256: media.sha256,
             version: media.version,
             source: media.source,
+            host_disk_used_bytes,
+        }
+    }
+}
+
+/// `macman du`: everything registered, smallest first.
+#[derive(Debug, Serialize)]
+pub struct DiskUsage {
+    pub entries: Vec<UsageEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UsageEntry {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: UsageKind,
+    pub host_disk_used_bytes: Option<u64>,
+}
+
+/// Declared in the order `du` breaks ties in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UsageKind {
+    Machine,
+    Rom,
+    System,
+    Media,
+}
+
+impl UsageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Machine => "machine",
+            Self::Rom => "rom",
+            Self::System => "system",
+            Self::Media => "media",
         }
     }
 }

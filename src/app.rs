@@ -24,10 +24,12 @@ use crate::model::{Model, parse_display};
 use crate::paths::Paths;
 use crate::registry::{self, PowerPcRom};
 use crate::report::{
-    BuildDetails, BuildEntry, BuildList, Current, DiskInfo, DisplayReport, DoctorReport, Format,
-    ImportResult, Layout, MachineConfig, MachineDetails, MachineEntry, MachineList, MediaEntry,
-    MediaInfo, MediaList, PartitionReport, RomEntry, RomList, SystemEntry, SystemList, print_json,
+    BuildDetails, BuildEntry, BuildList, Current, DiskInfo, DiskUsage, DisplayReport, DoctorReport,
+    Format, ImportResult, Layout, MachineConfig, MachineDetails, MachineEntry, MachineList,
+    MediaEntry, MediaInfo, MediaList, PartitionReport, RomEntry, RomList, SystemEntry, SystemList,
+    UsageEntry, UsageKind, print_json,
 };
+use crate::usage;
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
 use std::fs;
@@ -258,6 +260,7 @@ impl App {
                 return self.import(&file, rename.as_deref(), dry_run, json);
             }
             Command::Remove { name, delete_disks } => self.remove(&name, delete_disks)?,
+            Command::Du => self.disk_usage(json)?,
             Command::Completions { shell } => return print_completions(shell, json),
         }
         Ok(0)
@@ -381,6 +384,8 @@ impl App {
                     },
                     system_version: m.system.version.clone(),
                     ephemeral: m.ephemeral,
+                    system_disk_capacity_bytes: usage::boot_disk_capacity(&self.paths, &m),
+                    host_disk_used_bytes: usage::machine_used(&self.paths, &m),
                 },
                 Err(e) => MachineDetails::Unreadable {
                     error: format!("{e:#}"),
@@ -407,11 +412,15 @@ impl App {
                     display,
                     system_version,
                     ephemeral,
+                    system_disk_capacity_bytes,
+                    host_disk_used_bytes,
                 } => vec![
                     label,
                     model.unwrap_or(backend),
                     memory,
                     format!("{}x{}x{}", display.width, display.height, display.depth),
+                    format!("disk {}", usage::format_usage(system_disk_capacity_bytes)),
+                    format!("used {}", usage::format_usage(host_disk_used_bytes)),
                     if ephemeral { "ephemeral" } else { "persistent" }.to_string(),
                     format!("system {}", system_version.as_deref().unwrap_or("-")),
                 ],
@@ -498,9 +507,11 @@ impl App {
             .into_iter()
             .filter_map(|(takes, backend)| takes.then_some(backend))
             .collect();
+            let used = usage::allocated(&file);
             rows.push(vec![
                 rom.name.clone(),
                 format!("{}K", rom.size / 1024),
+                format!("used {}", usage::format_usage(used)),
                 if kinds.is_empty() {
                     "unrecognised".to_string()
                 } else {
@@ -520,6 +531,7 @@ impl App {
                 sha256: rom.sha256,
                 backend: emulators.first().copied(),
                 emulators,
+                host_disk_used_bytes: used,
             });
         }
         if json {
@@ -539,6 +551,7 @@ impl App {
                 version: system.version,
                 size: system.size,
                 sha256: system.sha256,
+                host_disk_used_bytes: usage::allocated(&file),
             });
         }
         if json {
@@ -557,6 +570,7 @@ impl App {
                     system.name,
                     system.version.unwrap_or_else(|| "-".to_string()),
                     format!("{}K", system.size / 1024),
+                    format!("used {}", usage::format_usage(system.host_disk_used_bytes)),
                     format.to_string(),
                 ]
             })
@@ -568,7 +582,10 @@ impl App {
     fn list_media(&self, json: bool) -> Result<()> {
         let media: Vec<MediaEntry> = media::list_media(&self.paths)?
             .into_iter()
-            .map(MediaEntry::from)
+            .map(|medium| {
+                let used = usage::allocated(&media::media_file(&self.paths, &medium.name));
+                MediaEntry::new(medium, used)
+            })
             .collect();
         if json {
             return print_json(&MediaList { media });
@@ -580,6 +597,7 @@ impl App {
                     medium.name,
                     medium.kind.as_str().to_string(),
                     format!("{}K", medium.size / 1024),
+                    format!("used {}", usage::format_usage(medium.host_disk_used_bytes)),
                     medium.format.describe().to_string(),
                     if medium.bootable { "boot blocks" } else { "-" }.to_string(),
                     medium.version.unwrap_or_else(|| "-".to_string()),
@@ -587,6 +605,78 @@ impl App {
             })
             .collect();
         print_table(&rows, &[2]);
+        Ok(())
+    }
+
+    /// Everything registered, by what it takes on the host, smallest first:
+    /// measured entries by size, then type and name; unavailable ones last.
+    fn disk_usage(&self, json: bool) -> Result<()> {
+        let mut entries = Vec::new();
+        for name in list_dir(&self.paths.machines())? {
+            let used = Machine::load(&self.paths, &name)
+                .ok()
+                .and_then(|machine| usage::machine_used(&self.paths, &machine));
+            entries.push(UsageEntry {
+                name,
+                kind: UsageKind::Machine,
+                host_disk_used_bytes: used,
+            });
+        }
+        for rom in registry::list_roms(&self.paths)? {
+            let file = self.paths.roms().join(format!("{}.rom", rom.name));
+            entries.push(UsageEntry {
+                host_disk_used_bytes: usage::allocated(&file),
+                name: rom.name,
+                kind: UsageKind::Rom,
+            });
+        }
+        for system in registry::list_systems(&self.paths)? {
+            entries.push(UsageEntry {
+                host_disk_used_bytes: usage::allocated(&registry::system_file(
+                    &self.paths,
+                    &system.name,
+                )),
+                name: system.name,
+                kind: UsageKind::System,
+            });
+        }
+        for medium in media::list_media(&self.paths)? {
+            entries.push(UsageEntry {
+                host_disk_used_bytes: usage::allocated(&media::media_file(
+                    &self.paths,
+                    &medium.name,
+                )),
+                name: medium.name,
+                kind: UsageKind::Media,
+            });
+        }
+        sort_usage(&mut entries);
+        if json {
+            return print_json(&DiskUsage { entries });
+        }
+        let used: Vec<String> = entries
+            .iter()
+            .map(|entry| usage::format_usage(entry.host_disk_used_bytes))
+            .collect();
+        let width = used
+            .iter()
+            .map(|text| text.chars().count())
+            .chain(["DISK USED".len()])
+            .max()
+            .unwrap_or(0);
+        let mut rows = vec![vec![
+            "NAME".to_string(),
+            "TYPE".to_string(),
+            format!("{:>width$}", "DISK USED"),
+        ]];
+        for (entry, used) in entries.into_iter().zip(used) {
+            rows.push(vec![
+                entry.name,
+                entry.kind.as_str().to_string(),
+                format!("{used:>width$}"),
+            ]);
+        }
+        print_table(&rows, &[]);
         Ok(())
     }
 
@@ -603,7 +693,7 @@ impl App {
         };
         if json {
             print_json(&MediaInfo {
-                media: MediaEntry::from(medium),
+                media: MediaEntry::new(medium, usage::allocated(&file)),
                 verified,
                 layout,
             })?;
@@ -635,6 +725,10 @@ impl App {
             println!("Registered from: {source}");
         }
         println!("SHA-256: {}", medium.sha256);
+        println!(
+            "Disk used: {}",
+            usage::format_usage(usage::allocated(&file))
+        );
         if let Layout::Partitioned { partitions } = &layout {
             println!("Partitions:");
             for p in partitions {
@@ -1716,6 +1810,18 @@ pub fn print_completions(shell: clap_complete::Shell, json: bool) -> Result<u8> 
     Ok(0)
 }
 
+/// `du`'s order: measured entries smallest first, ties by type then name, and
+/// unavailable ones after them all, by type then name.
+fn sort_usage(entries: &mut [UsageEntry]) {
+    entries.sort_by(|a, b| {
+        let key = |e: &UsageEntry| (e.host_disk_used_bytes.is_none(), e.host_disk_used_bytes);
+        key(a)
+            .cmp(&key(b))
+            .then(a.kind.cmp(&b.kind))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+}
+
 /// What `disk info` and `media info` show of an image's layout.
 fn layout_of(file: &Path) -> Result<Layout> {
     Ok(match disk::classify(file)? {
@@ -1821,6 +1927,7 @@ fn without_json(command: &Command) -> Option<&'static str> {
         | Command::System(SystemCommand::List)
         | Command::Disk(DiskCommand::Info { .. })
         | Command::Current
+        | Command::Du
         | Command::Media(MediaCommand::List | MediaCommand::Info { .. })
         | Command::Config(ConfigCommand::Show { .. }) => return None,
         Command::Media(MediaCommand::Add { .. }) => "media add",
@@ -1922,6 +2029,29 @@ mod tests {
                 "the same text, with only the status colored"
             );
         }
+    }
+
+    #[test]
+    fn du_puts_the_largest_last_ties_by_type_and_name_and_unknowns_after() {
+        use super::sort_usage;
+        use crate::report::{UsageEntry, UsageKind};
+        let entry = |name: &str, kind, bytes| UsageEntry {
+            name: name.to_string(),
+            kind,
+            host_disk_used_bytes: bytes,
+        };
+        let mut entries = vec![
+            entry("lost", UsageKind::Machine, None),
+            entry("big", UsageKind::Machine, Some(9000)),
+            entry("b", UsageKind::System, Some(100)),
+            entry("a", UsageKind::System, Some(100)),
+            entry("plus", UsageKind::Rom, Some(100)),
+            entry("gone", UsageKind::Rom, None),
+            entry("empty", UsageKind::Media, Some(0)),
+        ];
+        sort_usage(&mut entries);
+        let order: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(order, ["empty", "plus", "a", "b", "big", "lost", "gone"]);
     }
 
     fn rows(rows: &[&[&str]]) -> Vec<Vec<String>> {
