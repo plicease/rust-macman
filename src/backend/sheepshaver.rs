@@ -355,8 +355,9 @@ impl EmulatorBackend for SheepShaver {
             .args(arguments(request, &file))
             .current_dir(request.workdir);
         supervise(command, LABEL, request.verbose).map_err(|error| {
-            if error.to_string().contains(LOW_MEMORY_ERROR) {
-                anyhow!("{error}; {LOW_MEMORY_FIX}")
+            let message = error.to_string();
+            if message.contains(LOW_MEMORY_ERROR) {
+                anyhow!("{}; {LOW_MEMORY_FIX}", message.trim_end_matches('.'))
             } else {
                 error
             }

@@ -456,6 +456,7 @@ fn a_failure_to_map_low_memory_names_the_fix() {
     let error = h.cmd(&["run", "a"]).unwrap_err().to_string();
     assert!(error.contains("Low Memory Globals"), "{error}");
     assert!(error.contains("vm.mmap_min_addr=0"), "{error}");
+    assert!(error.contains("not permitted; run `sudo"), "{error}");
 }
 
 #[test]
