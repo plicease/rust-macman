@@ -102,6 +102,9 @@ impl App {
                 }
             }
             Command::System(SystemCommand::List) => self.list_systems()?,
+            Command::System(SystemCommand::Remove { name, yes }) => {
+                self.remove_system(&name, yes)?
+            }
             Command::Disk(DiskCommand::Info { file }) => self.disk_info(&file)?,
             Command::Disk(DiskCommand::Extract {
                 source,
@@ -484,6 +487,19 @@ impl App {
         Ok(())
     }
 
+    fn remove_system(&self, name: &str, yes: bool) -> Result<()> {
+        validate_name("system", name)?;
+        if !yes && registry::system_exists(&self.paths, name) {
+            confirm(
+                &format!("Delete system image {name:?}? Its machines keep their own disks."),
+                &format!("removing system image {name:?} deletes it; pass --yes to confirm"),
+            )?;
+        }
+        registry::remove_system(&self.paths, name)?;
+        println!("Removed system image {name}");
+        Ok(())
+    }
+
     fn remove(&self, name: &str, delete_disks: bool) -> Result<()> {
         validate_name("machine", name)?;
         let machine = Machine::load(&self.paths, name)?;
@@ -498,7 +514,14 @@ impl App {
             }
         }
         if !delete_disks && !disks.is_empty() {
-            confirm_delete(name, disks.len())?;
+            let disks = disks.len();
+            confirm(
+                &format!("Delete machine {name:?} and its {disks} private disk(s)?"),
+                &format!(
+                    "removing {name:?} deletes its {disks} private disk(s); \
+                     pass --delete-disks to confirm"
+                ),
+            )?;
         }
         fs::remove_dir_all(&dir).with_context(|| format!("cannot remove {}", dir.display()))?;
 
@@ -947,13 +970,12 @@ fn backend_settings(
     Ok((Some(settings), None))
 }
 
-fn confirm_delete(name: &str, disks: usize) -> Result<()> {
+/// Ask `question`, or fail with `unattended` when there's nobody to answer.
+fn confirm(question: &str, unattended: &str) -> Result<()> {
     if !std::io::stdin().is_terminal() {
-        bail!(
-            "removing {name:?} deletes its {disks} private disk(s); pass --delete-disks to confirm"
-        );
+        bail!("{unattended}");
     }
-    print!("Delete machine {name:?} and its {disks} private disk(s)? [y/N] ");
+    print!("{question} [y/N] ");
     std::io::stdout().flush()?;
     let mut answer = String::new();
     std::io::stdin().lock().read_line(&mut answer)?;

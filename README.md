@@ -66,7 +66,7 @@ macman run mac-plus --disk ./build/tico68.dsk --readonly
 With `--readonly`, the emulator gets a read-only throwaway copy, so your file can't
 change. Without it, the emulator writes to the file itself.
 
-Other commands: `list [--builds]`, `current`, `rom list`, `system list`,
+Other commands: `list [--builds]`, `current`, `rom list`, `system list`, `system remove`,
 `config show`, `clone`, `export`, `import`, `remove`, and `doctor`. Add `--verbose` for build and launch
 logs.
 

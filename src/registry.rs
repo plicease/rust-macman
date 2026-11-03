@@ -389,6 +389,36 @@ pub fn load_system(paths: &Paths, name: &str) -> Result<(SystemImage, PathBuf)> 
     Ok((read_toml(&sidecar(&file))?, file))
 }
 
+/// Whether anything at all occupies this system name.
+pub fn system_exists(paths: &Paths, name: &str) -> bool {
+    let file = system_path(paths, name);
+    file.symlink_metadata().is_ok() || sidecar(&file).symlink_metadata().is_ok()
+}
+
+/// Delete a system image, refusing while anything has it open. This takes
+/// either file alone too, so it can finish a removal that was interrupted.
+pub fn remove_system(paths: &Paths, name: &str) -> Result<()> {
+    validate_name("system", name)?;
+    if !system_exists(paths, name) {
+        bail!("no system image named {name:?}; see `macman system list`");
+    }
+    let file = system_path(paths, name);
+    let _lock = file
+        .exists()
+        .then(|| disk::lock_image(paths, &file, LockMode::Exclusive))
+        .transpose()?;
+    // The sidecar goes first, as `system list` fails on one without its image.
+    for path in [sidecar(&file), file] {
+        match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(error).with_context(|| format!("cannot remove {}", path.display()));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Confirm the stored file still matches what was registered.
 pub fn verify(file: &Path, kind: &str, name: &str, sha256: &str) -> Result<()> {
     if sha256_file(file)? != sha256 {
@@ -749,5 +779,38 @@ mod tests {
         let err = add_system(&paths, &source, "s", None, None).unwrap_err();
         assert!(err.to_string().contains("blank"), "{err}");
         assert!(list_systems(&paths).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_system_image_in_use_is_not_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        std::fs::create_dir_all(paths.systems()).unwrap();
+        let file = system_path(&paths, "s");
+        std::fs::write(&file, b"image").unwrap();
+        std::fs::write(sidecar(&file), b"").unwrap();
+
+        let held = disk::lock_image(&paths, &file, LockMode::Shared).unwrap();
+        let err = remove_system(&paths, "s").unwrap_err();
+        assert!(err.to_string().contains("in use"), "{err}");
+        assert!(file.exists() && sidecar(&file).exists());
+        drop(held);
+
+        remove_system(&paths, "s").unwrap();
+        assert!(!system_exists(&paths, "s"));
+    }
+
+    #[test]
+    fn half_of_a_system_image_can_be_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        std::fs::create_dir_all(paths.systems()).unwrap();
+        let file = system_path(&paths, "s");
+
+        for leftover in [file.clone(), sidecar(&file)] {
+            std::fs::write(&leftover, b"").unwrap();
+            remove_system(&paths, "s").unwrap();
+            assert!(!leftover.exists());
+        }
     }
 }

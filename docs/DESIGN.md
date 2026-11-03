@@ -71,6 +71,7 @@ macman run wombat-6 --disk ./build/tico68.dsk --readonly
 macman config show wombat-6
 macman clone wombat-6 wombat-test
 macman remove wombat-test
+macman system remove system-6.0.8
 macman export wombat-6 -o wombat-6.tar.gz
 macman export --all -o machines.tar.gz
 macman import wombat-6.tar.gz

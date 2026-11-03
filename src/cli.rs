@@ -106,6 +106,13 @@ pub enum SystemCommand {
     },
     /// List registered system images
     List,
+    /// Delete a registered system image; machines made from it keep their own disks
+    Remove {
+        name: String,
+        /// Delete it without prompting
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
