@@ -392,12 +392,23 @@ macman export wombat-6 maciix-7 -o classic-macs.tar.gz
 macman import classic-macs.tar.gz
 ```
 
-`macman export --all -o everything.tar.gz` takes every machine.
+Archives of machines leave out registered system images, which a machine doesn't
+need once it's created. Name the ones to take with `--system NAME`, which repeats, or
+take them all with `--all-systems`, with or without machines:
+
+```sh
+macman export wombat-6 --system system-6.0.8 -o wombat.tar.gz
+macman export --all-systems -o systems.tar.gz
+```
+
+`macman export --all -o everything.tar.gz` takes every machine, ROM, and system image,
+whether or not a machine uses it, and works with no machines at all. On the other host,
+`system list` shows the imported images, and `create --system` uses them.
 
 Export refuses a machine whose disks are in use, so close the emulator first. Import
 never replaces anything: importing the same archive again reports `unchanged`, and a
-machine or ROM that differs from what's already there is reported as a conflict and
-left alone, while the rest of the archive still imports. `macman import` exits with
+machine, ROM, or system image that differs from what's already there is reported as a
+conflict and left alone, while the rest of the archive still imports. `macman import` exits with
 status 1 if anything was left unresolved. To keep both, import a single-machine
 archive as an independent copy:
 
@@ -406,7 +417,7 @@ macman import wombat-6.tar.gz --rename wombat-6-imported
 ```
 
 To see what an import would do first, add `--dry-run`. It checks the whole archive
-and reports each ROM and machine, but changes nothing:
+and reports each ROM, system image, and machine, but changes nothing:
 
 ```sh
 macman import classic-macs.tar.gz --dry-run

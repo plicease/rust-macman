@@ -302,6 +302,7 @@ mod tests {
                 },
                 NameKind::Machines,
             ),
+            arg(&["export"], option("system"), NameKind::Systems),
             arg(&["remove"], at(0), NameKind::Machines),
         ];
         assert_eq!(name_args(&command), expected);

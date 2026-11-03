@@ -421,6 +421,89 @@ pub fn load_system(paths: &Paths, name: &str) -> Result<(SystemImage, PathBuf)> 
     Ok((read_toml(&sidecar(&file))?, file))
 }
 
+/// Register `image`, which came from an archive, from the bytes at `blob`. The
+/// image goes in before its metadata, and is removed if the metadata can't be
+/// written, so a stop in between leaves what [`recover_system`] can finish.
+pub fn add_system_blob(paths: &Paths, blob: &Path, image: &SystemImage) -> Result<()> {
+    std::fs::create_dir_all(paths.systems())?;
+    let dest = system_path(paths, &image.name);
+    if sidecar(&dest).symlink_metadata().is_ok() {
+        bail!("{} already exists", sidecar(&dest).display());
+    }
+    atomic_copy_range_checked(blob, 0, image.size, &dest, |copy| {
+        if sha256_file(copy)? != image.sha256 {
+            bail!(
+                "system image {} failed its digest after copying",
+                image.name
+            );
+        }
+        Ok(())
+    })?;
+    if let Err(error) = write_toml_new(&sidecar(&dest), image) {
+        let _ = std::fs::remove_file(&dest);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// How a system name here compares with `image`, from an archive. The local
+/// image is read in full, so a damaged copy doesn't pass for the same one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalSystem {
+    /// Nothing has this name.
+    Absent,
+    /// Registered, with the same contents.
+    Same,
+    /// Only the image, with the same contents and no metadata: a registration
+    /// that stopped in between, which [`recover_system`] can finish.
+    Unfinished,
+    /// Anything else: other contents, other metadata, or metadata alone.
+    Different,
+}
+
+pub fn local_system(paths: &Paths, image: &SystemImage) -> Result<LocalSystem> {
+    let file = system_path(paths, &image.name);
+    let metadata = sidecar(&file);
+    if !system_exists(paths, &image.name) {
+        return Ok(LocalSystem::Absent);
+    }
+    let is_plain_file = file
+        .symlink_metadata()
+        .is_ok_and(|found| found.file_type().is_file());
+    if !is_plain_file {
+        return Ok(LocalSystem::Different);
+    }
+    let same_bytes = sha256_file(&file)? == image.sha256;
+    if metadata.symlink_metadata().is_err() {
+        return Ok(if same_bytes {
+            LocalSystem::Unfinished
+        } else {
+            LocalSystem::Different
+        });
+    }
+    let registered: Option<SystemImage> = read_toml(&metadata).ok();
+    Ok(match registered {
+        Some(local) if same_bytes && local.sha256 == image.sha256 => LocalSystem::Same,
+        _ => LocalSystem::Different,
+    })
+}
+
+/// Finish a registration [`local_system`] found [`LocalSystem::Unfinished`],
+/// with the archive's metadata. Returns false if something else finished first.
+pub fn recover_system(paths: &Paths, image: &SystemImage) -> Result<bool> {
+    let metadata = sidecar(&system_path(paths, &image.name));
+    match write_toml_new(&metadata, image) {
+        Ok(()) => Ok(true),
+        Err(_) if metadata.symlink_metadata().is_ok() => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Where a registered system image is stored.
+pub fn system_file(paths: &Paths, name: &str) -> PathBuf {
+    system_path(paths, name)
+}
+
 /// Whether anything at all occupies this system name.
 pub fn system_exists(paths: &Paths, name: &str) -> bool {
     let file = system_path(paths, name);

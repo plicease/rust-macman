@@ -6,7 +6,7 @@
 //! Internal types aren't serialized as they are, except a machine's own
 //! definition in [`MachineConfig`], which is its `machine.toml` as JSON.
 
-use crate::archive::{ImportReport, Outcome, RomOutcome};
+use crate::archive::{ImportReport, Outcome, RomOutcome, SystemOutcome};
 use crate::backend::{Check, CheckLevel};
 use crate::disk::{DiskFormat, Partition};
 use crate::machine::Machine;
@@ -253,6 +253,7 @@ pub struct Current {
 pub struct ImportResult {
     pub dry_run: bool,
     pub roms: Vec<RomImport>,
+    pub systems: Vec<SystemImport>,
     pub machines: Vec<MachineImport>,
     pub imported: usize,
     pub unchanged: usize,
@@ -266,6 +267,8 @@ pub struct RomImport {
     pub outcome: RomStatus,
     /// The registered ROM the machines use, when it's already here.
     pub local: Option<String>,
+    /// Why, for a conflict or failure.
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -275,6 +278,26 @@ pub enum RomStatus {
     Recovered,
     Unchanged,
     Reused,
+    Conflict,
+    Failed,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SystemImport {
+    pub name: String,
+    pub outcome: SystemStatus,
+    /// Why, for a conflict or failure.
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SystemStatus {
+    Imported,
+    Recovered,
+    Unchanged,
+    Conflict,
+    Failed,
 }
 
 #[derive(Debug, Serialize)]
@@ -303,18 +326,49 @@ impl From<&ImportReport> for ImportResult {
                 .roms
                 .iter()
                 .map(|(name, outcome)| {
-                    let (outcome, local) = match outcome {
-                        RomOutcome::Imported => (RomStatus::Imported, None),
-                        RomOutcome::Recovered => (RomStatus::Recovered, Some(name.clone())),
+                    let (outcome, local, reason) = match outcome {
+                        RomOutcome::Imported => (RomStatus::Imported, None, None),
+                        RomOutcome::Recovered => (RomStatus::Recovered, Some(name.clone()), None),
                         RomOutcome::Unchanged { local } => {
-                            (RomStatus::Unchanged, Some(local.clone()))
+                            (RomStatus::Unchanged, Some(local.clone()), None)
                         }
-                        RomOutcome::Reused { local } => (RomStatus::Reused, Some(local.clone())),
+                        RomOutcome::Reused { local } => {
+                            (RomStatus::Reused, Some(local.clone()), None)
+                        }
+                        RomOutcome::Conflict(reason) => {
+                            (RomStatus::Conflict, None, Some(reason.clone()))
+                        }
+                        RomOutcome::Failed(reason) => {
+                            (RomStatus::Failed, None, Some(reason.clone()))
+                        }
                     };
                     RomImport {
                         name: name.clone(),
                         outcome,
                         local,
+                        reason,
+                    }
+                })
+                .collect(),
+            systems: report
+                .systems
+                .iter()
+                .map(|system| {
+                    let (outcome, reason) = match &system.outcome {
+                        SystemOutcome::Imported => (SystemStatus::Imported, None),
+                        SystemOutcome::Recovered => (SystemStatus::Recovered, None),
+                        SystemOutcome::Unchanged => (SystemStatus::Unchanged, None),
+                        SystemOutcome::Conflict(reason) => {
+                            (SystemStatus::Conflict, Some(reason.clone()))
+                        }
+                        SystemOutcome::Failed(reason) => {
+                            (SystemStatus::Failed, Some(reason.clone()))
+                        }
+                    };
+                    SystemImport {
+                        name: system.name.clone(),
+                        outcome,
+                        reason,
                     }
                 })
                 .collect(),

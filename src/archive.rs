@@ -1,7 +1,7 @@
 //! Portable machine archives: `macman export` and `macman import`.
 //!
 //! An archive is a gzipped tar holding `manifest.toml`, first, followed by
-//! `blobs/<sha256>` for each distinct ROM or disk. Addressing blobs by content
+//! `blobs/<sha256>` for each distinct ROM, system image, or disk. Addressing blobs by content
 //! dedupes them, and leaves exactly two valid forms of entry name. No name,
 //! path, or permission from an archive is ever used to reach the filesystem
 //! without validation. See `docs/EXPORT_IMPORT.md`.
@@ -30,7 +30,12 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-pub const FORMAT_VERSION: u32 = 1;
+/// The newest format this reads, and writes when an archive needs it.
+pub const FORMAT_VERSION: u32 = 2;
+/// What an archive of machines alone is written as, so that older versions of
+/// macman, which read only this, can still import it. Format 2 adds system
+/// images and ROMs registered for their own sake, which those would ignore.
+const MACHINES_ONLY_FORMAT: u32 = 1;
 const MANIFEST: &str = "manifest.toml";
 const BLOB_DIR: &str = "blobs/";
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
@@ -43,6 +48,8 @@ struct Manifest {
     format_version: u32,
     #[serde(default)]
     roms: Vec<ArchivedRom>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    systems: Vec<ArchivedSystem>,
     #[serde(default)]
     machines: Vec<ArchivedMachine>,
 }
@@ -52,6 +59,41 @@ struct ArchivedRom {
     name: String,
     sha256: String,
     size: u64,
+    /// Register it even if no machine that uses it is imported, as `--all`
+    /// does. Otherwise a ROM comes in only with a machine.
+    #[serde(default, skip_serializing_if = "is_false")]
+    register: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// A registered system image, with the metadata `system add` recorded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ArchivedSystem {
+    name: String,
+    sha256: String,
+    size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    extracted_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_sha256: Option<String>,
+}
+
+impl ArchivedSystem {
+    fn image(&self) -> registry::SystemImage {
+        registry::SystemImage {
+            name: self.name.clone(),
+            sha256: self.sha256.clone(),
+            size: self.size,
+            version: self.version.clone(),
+            extracted_from: self.extracted_from.clone(),
+            source_sha256: self.source_sha256.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,15 +124,34 @@ impl<R: Read> Read for HashingReader<R> {
     }
 }
 
-/// Write `names` to a new archive at `output`, returning how many it holds.
-pub fn export(paths: &Paths, names: &[String], output: &Path) -> Result<usize> {
+/// What to put in an archive.
+#[derive(Debug, Default, Clone)]
+pub struct Selection {
+    pub machines: Vec<String>,
+    /// Registered system images, by name.
+    pub systems: Vec<String>,
+    /// Every registered ROM, whether or not a machine here uses it.
+    pub all_roms: bool,
+}
+
+/// How many of each an archive holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Exported {
+    pub machines: usize,
+    pub roms: usize,
+    pub systems: usize,
+}
+
+/// Write `selection` to a new archive at `output`.
+pub fn export(paths: &Paths, selection: &Selection, output: &Path) -> Result<Exported> {
     if output.symlink_metadata().is_ok() {
         bail!("{} already exists", output.display());
     }
-    let names: BTreeSet<_> = names.iter().collect();
+    let names: BTreeSet<_> = selection.machines.iter().collect();
+    let system_names: BTreeSet<_> = selection.systems.iter().collect();
 
-    // Every disk is locked before any is read, so the archive is one coherent
-    // snapshot. The locks are held until the archive is finished.
+    // Every disk and system image is locked before any is read, so the archive
+    // is one coherent snapshot. The locks are held until the archive is finished.
     let mut locks: Vec<ImageLock> = Vec::new();
     let mut machines = Vec::new();
     for name in names {
@@ -103,13 +164,42 @@ pub fn export(paths: &Paths, names: &[String], output: &Path) -> Result<usize> {
         }
         machines.push(machine);
     }
+    let mut systems = Vec::new();
+    for name in system_names {
+        let (image, file) = registry::load_system(paths, name)?;
+        let lock = disk::lock_image(paths, &file, LockMode::Shared)
+            .with_context(|| format!("cannot export system image {name:?}"))?;
+        locks.push(lock);
+        systems.push((image, file));
+    }
 
     let mut manifest = Manifest {
         format_version: FORMAT_VERSION,
         roms: Vec::new(),
+        systems: Vec::new(),
         machines: Vec::new(),
     };
     let mut blobs: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let add_rom = |manifest: &mut Manifest,
+                   blobs: &mut BTreeMap<String, PathBuf>,
+                   name: &str,
+                   register: bool|
+     -> Result<String> {
+        let (rom, rom_path) = registry::load_rom(paths, name)?;
+        registry::verify(&rom_path, "ROM", &rom.name, &rom.sha256)?;
+        // One entry for each distinct ROM, under the first name it's met by.
+        match manifest.roms.iter_mut().find(|r| r.sha256 == rom.sha256) {
+            Some(archived) => archived.register |= register,
+            None => manifest.roms.push(ArchivedRom {
+                name: rom.name.clone(),
+                sha256: rom.sha256.clone(),
+                size: rom.size,
+                register,
+            }),
+        }
+        blobs.insert(rom.sha256.clone(), rom_path);
+        Ok(rom.sha256)
+    };
     for mut machine in machines {
         if machine.id.is_none() {
             machine.id = Some(new_id());
@@ -122,16 +212,12 @@ pub fn export(paths: &Paths, names: &[String], output: &Path) -> Result<usize> {
         if let Some(settings) = &mut machine.sheepshaver {
             settings.shared_folder = None;
         }
-        let (rom, rom_path) = registry::load_rom(paths, &machine.hardware.rom)?;
-        registry::verify(&rom_path, "ROM", &rom.name, &rom.sha256)?;
-        if !manifest.roms.iter().any(|r| r.sha256 == rom.sha256) {
-            manifest.roms.push(ArchivedRom {
-                name: rom.name.clone(),
-                sha256: rom.sha256.clone(),
-                size: rom.size,
-            });
-        }
-        blobs.insert(rom.sha256.clone(), rom_path);
+        let rom_sha256 = add_rom(
+            &mut manifest,
+            &mut blobs,
+            &machine.hardware.rom,
+            selection.all_roms,
+        )?;
 
         let mut contents = Vec::new();
         for (path, disk) in machine.disk_paths(paths)? {
@@ -145,14 +231,36 @@ pub fn export(paths: &Paths, names: &[String], output: &Path) -> Result<usize> {
             blobs.insert(sha256, path);
         }
         manifest.machines.push(ArchivedMachine {
-            rom_sha256: rom.sha256,
+            rom_sha256,
             contents,
             machine,
         });
     }
+    if selection.all_roms {
+        for rom in registry::list_roms(paths)? {
+            add_rom(&mut manifest, &mut blobs, &rom.name, true)?;
+        }
+    }
+    for (image, file) in systems {
+        registry::verify(&file, "system image", &image.name, &image.sha256)?;
+        disk::detect_format(&file)
+            .with_context(|| format!("cannot export system image {:?}", image.name))?;
+        blobs.insert(image.sha256.clone(), file);
+        manifest.systems.push(ArchivedSystem {
+            name: image.name,
+            sha256: image.sha256,
+            size: image.size,
+            version: image.version,
+            extracted_from: image.extracted_from,
+            source_sha256: image.source_sha256,
+        });
+    }
+    if manifest.systems.is_empty() && !manifest.roms.iter().any(|rom| rom.register) {
+        manifest.format_version = MACHINES_ONLY_FORMAT;
+    }
 
     // Don't produce something that a later import is bound to refuse.
-    validate(&manifest).context("cannot export this machine")?;
+    validate(&manifest).context("cannot export these")?;
 
     let temp = temp_sibling(output)?;
     let result = write_archive(&temp, &manifest, &blobs).and_then(|()| publish_new(&temp, output));
@@ -160,7 +268,12 @@ pub fn export(paths: &Paths, names: &[String], output: &Path) -> Result<usize> {
         let _ = fs::remove_file(&temp);
     }
     result.with_context(|| format!("cannot write {}", output.display()))?;
-    Ok(manifest.machines.len())
+    drop(locks);
+    Ok(Exported {
+        machines: manifest.machines.len(),
+        roms: manifest.roms.len(),
+        systems: manifest.systems.len(),
+    })
 }
 
 fn entry_header(path: &str, size: u64) -> Result<tar::Header> {
@@ -237,6 +350,28 @@ pub enum RomOutcome {
     Reused {
         local: String,
     },
+    /// Registered for its own sake, but its name is taken; nothing was changed.
+    Conflict(String),
+    /// Registered for its own sake, but that went wrong.
+    Failed(String),
+}
+
+/// What became of one system image in an import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemOutcome {
+    Imported,
+    /// Its image was registered, but not its metadata, which was finished.
+    Recovered,
+    Unchanged,
+    /// Its name is taken by something else; nothing was changed.
+    Conflict(String),
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemResult {
+    pub name: String,
+    pub outcome: SystemOutcome,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -245,24 +380,49 @@ pub struct ImportReport {
     pub dry_run: bool,
     /// What became of each ROM, by its name in the archive.
     pub roms: BTreeMap<String, RomOutcome>,
+    /// In the archive's order.
+    pub systems: Vec<SystemResult>,
     pub machines: Vec<MachineResult>,
 }
 
 impl ImportReport {
-    fn count(&self, matches: impl Fn(&Outcome) -> bool) -> usize {
-        self.machines.iter().filter(|m| matches(&m.outcome)).count()
+    /// Machines and system images, counted by outcome.
+    fn count(
+        &self,
+        machine: impl Fn(&Outcome) -> bool,
+        system: impl Fn(&SystemOutcome) -> bool,
+    ) -> usize {
+        let machines = self.machines.iter().filter(|m| machine(&m.outcome)).count();
+        let systems = self.systems.iter().filter(|s| system(&s.outcome)).count();
+        machines + systems
     }
 
     pub fn imported(&self) -> usize {
-        self.count(|o| *o == Outcome::Imported)
+        self.count(
+            |o| *o == Outcome::Imported,
+            |o| matches!(o, SystemOutcome::Imported | SystemOutcome::Recovered),
+        )
     }
 
     pub fn unchanged(&self) -> usize {
-        self.count(|o| *o == Outcome::Unchanged)
+        self.count(
+            |o| *o == Outcome::Unchanged,
+            |o| *o == SystemOutcome::Unchanged,
+        )
     }
 
+    /// Conflicts and failures of machines and system images, and of ROMs
+    /// registered for their own sake.
     pub fn unresolved(&self) -> usize {
-        self.count(|o| matches!(o, Outcome::Conflict(_) | Outcome::Failed(_)))
+        let roms = self
+            .roms
+            .values()
+            .filter(|o| matches!(o, RomOutcome::Conflict(_) | RomOutcome::Failed(_)))
+            .count();
+        roms + self.count(
+            |o| matches!(o, Outcome::Conflict(_) | Outcome::Failed(_)),
+            |o| matches!(o, SystemOutcome::Conflict(_) | SystemOutcome::Failed(_)),
+        )
     }
 }
 
@@ -394,7 +554,129 @@ fn decide_all(
         let (name, outcome) = context.run(&mut report.roms);
         report.machines.push(MachineResult { name, outcome });
     }
+    let blobs = staging.join("blobs");
+    for rom in manifest.roms.iter().filter(|rom| rom.register) {
+        // One a machine brought in, or found here, is settled already.
+        if !report.roms.contains_key(&rom.name) {
+            let outcome = register_rom(paths, &blobs, rom, dry_run)
+                .unwrap_or_else(|error| RomOutcome::Failed(format!("{error:#}")));
+            report.roms.insert(rom.name.clone(), outcome);
+        }
+    }
+    for system in &manifest.systems {
+        let outcome = register_system(paths, &blobs, system, dry_run)
+            .unwrap_or_else(|error| SystemOutcome::Failed(format!("{error:#}")));
+        report.systems.push(SystemResult {
+            name: system.name.clone(),
+            outcome,
+        });
+    }
     Ok(report)
+}
+
+/// Bring in a ROM the archive asks to have registered whether or not a machine
+/// uses it, by the same rules as one that comes with a machine.
+fn register_rom(
+    paths: &Paths,
+    blobs: &Path,
+    rom: &ArchivedRom,
+    dry_run: bool,
+) -> Result<RomOutcome> {
+    let blob = blobs.join(&rom.sha256);
+    let incoming = registry::rom_from_blob(&blob, &rom.name, &rom.sha256)?;
+    if let Some(existing) = local_rom(paths, rom)? {
+        return Ok(rom_outcome(&incoming, Some(&existing)));
+    }
+    if registry::rom_exists(paths, &rom.name) {
+        let recovered = if dry_run {
+            registry::can_recover_rom(paths, &incoming)?
+        } else {
+            registry::recover_rom(paths, &incoming)?
+        };
+        return Ok(if recovered {
+            RomOutcome::Recovered
+        } else {
+            RomOutcome::Conflict(format!(
+                "a different ROM is already named {:?}; nothing was changed",
+                rom.name
+            ))
+        });
+    }
+    if dry_run {
+        return Ok(RomOutcome::Imported);
+    }
+    fs::create_dir_all(paths.roms())?;
+    match registry::add_rom_blob(paths, &blob, &incoming) {
+        Ok(()) => Ok(RomOutcome::Imported),
+        Err(_) if registry::rom_exists(paths, &rom.name) => Ok(RomOutcome::Conflict(format!(
+            "ROM {:?} appeared during the import; nothing was changed",
+            rom.name
+        ))),
+        Err(error) => Err(error),
+    }
+}
+
+/// Bring in a system image under its own name. Its name is what `create
+/// --system` uses, so unlike a ROM, it isn't folded into an identical image
+/// that goes by another name.
+fn register_system(
+    paths: &Paths,
+    blobs: &Path,
+    system: &ArchivedSystem,
+    dry_run: bool,
+) -> Result<SystemOutcome> {
+    let image = system.image();
+    let file = registry::system_file(paths, &system.name);
+    // As `system remove` takes an exclusive lock, this keeps it from being
+    // removed while it's compared. A preview makes no lock files.
+    let _lock = if file.exists() {
+        let held = if dry_run {
+            disk::probe_image_lock(paths, &file, LockMode::Shared)
+        } else {
+            disk::lock_image(paths, &file, LockMode::Shared).map(Some)
+        };
+        match held {
+            Ok(lock) => lock,
+            Err(_) => {
+                return Ok(SystemOutcome::Conflict(format!(
+                    "system image {:?} is in use, so it can't be compared; try again when it's \
+                     free",
+                    system.name
+                )));
+            }
+        }
+    } else {
+        None
+    };
+    let taken = || {
+        SystemOutcome::Conflict(format!(
+            "a different system image is already named {:?}; nothing was changed",
+            system.name
+        ))
+    };
+    match registry::local_system(paths, &image)? {
+        registry::LocalSystem::Same => Ok(SystemOutcome::Unchanged),
+        registry::LocalSystem::Different => Ok(taken()),
+        registry::LocalSystem::Unfinished if dry_run => Ok(SystemOutcome::Recovered),
+        registry::LocalSystem::Unfinished => Ok(if registry::recover_system(paths, &image)? {
+            SystemOutcome::Recovered
+        } else {
+            taken()
+        }),
+        registry::LocalSystem::Absent if dry_run => Ok(SystemOutcome::Imported),
+        registry::LocalSystem::Absent => {
+            match registry::add_system_blob(paths, &blobs.join(&system.sha256), &image) {
+                Ok(()) => Ok(SystemOutcome::Imported),
+                Err(_) if registry::system_exists(paths, &system.name) => {
+                    Ok(SystemOutcome::Conflict(format!(
+                        "system image {:?} appeared during the import; nothing was changed",
+                        system.name
+                    )))
+                }
+                Err(error) => Err(error),
+            }
+        }
+    }
 }
 
 fn is_sha256(text: &str) -> bool {
@@ -402,9 +684,10 @@ fn is_sha256(text: &str) -> bool {
 }
 
 /// Read the whole archive into `blobs`, verifying everything. Nothing outside
-/// `blobs` is written, and only under hash-derived names. With `only_roms`,
-/// everything is still verified, but only ROMs are kept.
-fn unpack(archive: &Path, blobs: &Path, only_roms: bool) -> Result<Manifest> {
+/// `blobs` is written, and only under hash-derived names. With `only_registry`,
+/// everything is still verified, but only ROMs and system images are kept, as
+/// deciding needs them; machines' disks are discarded.
+fn unpack(archive: &Path, blobs: &Path, only_registry: bool) -> Result<Manifest> {
     let file = File::open(archive).context("cannot read the archive")?;
     let mut tar = tar::Archive::new(GzDecoder::new(file));
     let mut entries = tar.entries().context("not a macman archive")?;
@@ -415,20 +698,30 @@ fn unpack(archive: &Path, blobs: &Path, only_roms: bool) -> Result<Manifest> {
         .context("not a macman archive")?;
     let manifest = read_manifest(first)?;
     let expected = validate(&manifest)?;
-    let roms: BTreeSet<_> = manifest
+    let registry: BTreeSet<_> = manifest
         .roms
         .iter()
         .map(|rom| rom.sha256.as_str())
+        .chain(manifest.systems.iter().map(|system| system.sha256.as_str()))
         .collect();
 
     let mut seen = BTreeSet::new();
     for entry in entries {
         let entry = entry.context("the archive is damaged")?;
-        let keep = |sha256: &str| !only_roms || roms.contains(sha256);
+        let keep = |sha256: &str| !only_registry || registry.contains(sha256);
         unpack_blob(entry, &expected, &mut seen, blobs, keep)?;
     }
     if let Some(missing) = expected.keys().find(|sha256| !seen.contains(*sha256)) {
         bail!("the archive is incomplete: {missing} is missing");
+    }
+    // Export takes only what `system add` would; anything else is damage.
+    for system in &manifest.systems {
+        disk::detect_format(&blobs.join(&system.sha256)).with_context(|| {
+            format!(
+                "system image {:?} in the archive is not a usable volume",
+                system.name
+            )
+        })?;
     }
     Ok(manifest)
 }
@@ -463,10 +756,10 @@ fn read_manifest<R: Read>(entry: tar::Entry<'_, R>) -> Result<Manifest> {
         format_version: u32,
     }
     let version: Version = toml::from_str(&text).context("the manifest is invalid")?;
-    if version.format_version != FORMAT_VERSION {
+    if !(MACHINES_ONLY_FORMAT..=FORMAT_VERSION).contains(&version.format_version) {
         bail!(
-            "this archive uses format {}, but this macman reads format {FORMAT_VERSION}; upgrade \
-             macman",
+            "this archive uses format {}, but this macman reads formats \
+             {MACHINES_ONLY_FORMAT} to {FORMAT_VERSION}; upgrade macman",
             version.format_version
         );
     }
@@ -514,6 +807,36 @@ fn validate(manifest: &Manifest) -> Result<BTreeMap<String, u64>> {
         expect(&rom.sha256, rom.size)?;
         if !rom_names.insert(rom.name.as_str()) || !rom_digests.insert(rom.sha256.as_str()) {
             bail!("the manifest lists ROM {:?} twice", rom.name);
+        }
+    }
+
+    let mut system_names = BTreeSet::new();
+    for system in &manifest.systems {
+        validate_name("system", &system.name)?;
+        expect(&system.sha256, system.size)?;
+        if !system_names.insert(system.name.as_str()) {
+            bail!("the manifest lists system image {:?} twice", system.name);
+        }
+        if system
+            .source_sha256
+            .as_deref()
+            .is_some_and(|sha256| !is_sha256(sha256))
+        {
+            bail!(
+                "the manifest has an invalid digest for system image {:?}",
+                system.name
+            );
+        }
+        // They're printed by `system list`, so nothing in them may steer a terminal.
+        let printable = [&system.version, &system.extracted_from]
+            .into_iter()
+            .flatten()
+            .all(|text| !text.chars().any(char::is_control));
+        if !printable {
+            bail!(
+                "the manifest has unprintable details for system image {:?}",
+                system.name
+            );
         }
     }
 
@@ -742,7 +1065,7 @@ impl Importing<'_> {
         let blob = self.blob(&rom.sha256);
         let incoming = registry::rom_from_blob(&blob, &rom.name, &rom.sha256)?;
         backend.check_rom(machine, &incoming, &blob)?;
-        let mut existing = self.local_rom(rom)?;
+        let mut existing = local_rom(self.paths, rom)?;
         if existing.is_none()
             && self.dry_run
             && matches!(
@@ -787,23 +1110,6 @@ impl Importing<'_> {
             )),
             Err(error) => Err(error),
         }
-    }
-
-    /// The registered ROM with these contents, preferring one of the same name.
-    fn local_rom(&self, rom: &ArchivedRom) -> Result<Option<registry::Rom>> {
-        let matching = registry::list_roms(self.paths)?
-            .into_iter()
-            .filter(|local| {
-                local.sha256 == rom.sha256 && registry::rom_file_exists(self.paths, &local.name)
-            });
-        let Some(local) =
-            matching.reduce(|best, local| if local.name == rom.name { local } else { best })
-        else {
-            return Ok(None);
-        };
-        let (_, file) = registry::load_rom(self.paths, &local.name)?;
-        registry::verify(&file, "ROM", &local.name, &local.sha256)?;
-        Ok(Some(local))
     }
 
     /// Build the machine in staging, then bring it in along with any new ROM,
@@ -912,6 +1218,21 @@ impl Importing<'_> {
         }
         Ok(Outcome::Unchanged)
     }
+}
+
+/// The registered ROM with these contents, preferring one of the same name.
+fn local_rom(paths: &Paths, rom: &ArchivedRom) -> Result<Option<registry::Rom>> {
+    let matching = registry::list_roms(paths)?.into_iter().filter(|local| {
+        local.sha256 == rom.sha256 && registry::rom_file_exists(paths, &local.name)
+    });
+    let Some(local) =
+        matching.reduce(|best, local| if local.name == rom.name { local } else { best })
+    else {
+        return Ok(None);
+    };
+    let (_, file) = registry::load_rom(paths, &local.name)?;
+    registry::verify(&file, "ROM", &local.name, &local.sha256)?;
+    Ok(Some(local))
 }
 
 /// What becomes of the ROM `incoming` when a machine is imported, given the
