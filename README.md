@@ -126,7 +126,8 @@ Mac first, or use Control Mode: hold Ctrl and press Q, then Y.
 `macman config edit [MACHINE]` opens an editor in the terminal for a machine's settings,
 grouped as Machine, Hardware, Display, and, for Basilisk II and SheepShaver, Emulator. It
 offers only what the machine's backend has: Mini vMac has no CPU, sound, network, or shared
-folder settings, and a Mac Plus is offered at most 4M of memory and a 1-bit display. Each
+folder settings, a Mac Plus is offered at most 4M of memory and a 1-bit display, and
+Basilisk II on Windows, which can't share a folder, shows that setting read-only. Each
 list of choices marks with `✗` those that won't work with the rest of the machine, and
 says why when one is highlighted, such as a ROM another backend needs. The checks are the
 ones `create` and `run` make, so anything the editor saves, `run` accepts.

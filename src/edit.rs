@@ -380,14 +380,35 @@ impl<'a> Editor<'a> {
                     typed: false,
                 },
             ));
-            fields.push(self.field(
-                FieldId::SharedFolder,
-                "Emulator",
-                "Shared folder",
-                "A host folder the guest sees as a volume. Leave it empty for none. It isn't \
-                 exported, as it belongs to this host.",
-                Kind::Path,
-            ));
+            // Where the backend takes no shared folder at all, as Basilisk II
+            // on Windows, say so rather than offer one. Any folder will do to
+            // ask, and the machine's own always exists. One already set stays
+            // editable, so it can be cleared.
+            let probe = self.paths.machine(&self.draft.name);
+            let refused = shared_folder(&self.draft)
+                .is_none()
+                .then(|| self.problem_with(FieldId::SharedFolder, &probe.to_string_lossy()))
+                .flatten();
+            let help = "A host folder the guest sees as a volume. Leave it empty for none. It \
+                        isn't exported, as it belongs to this host.";
+            fields.push(match refused {
+                Some(reason) => Field {
+                    id: None,
+                    group: "Emulator",
+                    label: "Shared folder",
+                    value: String::new(),
+                    help,
+                    kind: Kind::Fixed(reason),
+                    changed: false,
+                },
+                None => self.field(
+                    FieldId::SharedFolder,
+                    "Emulator",
+                    "Shared folder",
+                    help,
+                    Kind::Path,
+                ),
+            });
         }
         fields
     }
@@ -901,14 +922,24 @@ pub(crate) mod tests {
         assert_eq!(allowed(&editor, FieldId::Depth), vec!["8", "16", "32"]);
         assert!(allowed(&editor, FieldId::Memory).contains(&"512M".to_string()));
         let ids: Vec<_> = editor.fields().iter().filter_map(|f| f.id).collect();
-        for present in [
-            FieldId::Cpu,
-            FieldId::Fpu,
-            FieldId::Sound,
-            FieldId::Network,
-            FieldId::SharedFolder,
-        ] {
+        for present in [FieldId::Cpu, FieldId::Fpu, FieldId::Sound, FieldId::Network] {
             assert!(ids.contains(&present), "{present:?}");
+        }
+        // Basilisk II on Windows shows the guest only whole drives, and the
+        // editor says so rather than offer a folder.
+        let shared = editor
+            .fields()
+            .into_iter()
+            .find(|f| f.label == "Shared folder")
+            .unwrap();
+        if cfg!(windows) {
+            assert_eq!(shared.id, None);
+            let Kind::Fixed(reason) = shared.kind else {
+                panic!("{:?}", shared.kind)
+            };
+            assert!(reason.contains("whole drives"), "{reason}");
+        } else {
+            assert_eq!(shared.id, Some(FieldId::SharedFolder));
         }
 
         // A 68040 has its FPU built in, so it can't be turned off.
@@ -920,9 +951,8 @@ pub(crate) mod tests {
         assert!(editor.set(FieldId::SharedFolder, "/no/such/dir").is_err());
         let shared = root.path().join("shared");
         fs::create_dir(&shared).unwrap();
-        editor
-            .set(FieldId::SharedFolder, shared.to_str().unwrap())
-            .unwrap();
+        let result = editor.set(FieldId::SharedFolder, shared.to_str().unwrap());
+        assert_eq!(result.is_ok(), !cfg!(windows), "{result:?}");
         editor.save().unwrap();
 
         let saved = Machine::load(&paths, "quadra").unwrap();
