@@ -413,7 +413,9 @@ fn each_rom_lists_every_emulator_whose_check_it_passes() {
     };
     let cells = |name: &str| {
         let mut cells = line(name);
-        cells.remove(3); // the hash
+        cells.remove(4); // the hash
+        let used = cells.remove(2);
+        assert!(used.starts_with("used ") && used.ends_with('B'), "{used}");
         cells
     };
     assert_eq!(
@@ -453,6 +455,6 @@ fn without_the_flag_nothing_changes() {
     env.register();
     let output = env.run(&["rom", "list"]);
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(text.starts_with("plus-v3  128K  512ke/plus"), "{text}");
+    assert!(text.starts_with("plus-v3  128K  used "), "{text}");
     assert!(serde_json::from_str::<Value>(&text).is_err());
 }

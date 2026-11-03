@@ -55,7 +55,9 @@ These change things and report as they go, so they have no single result to give
       "memory": "4M",
       "display": {"width": 512, "height": 342, "depth": 1, "scale": 2, "fullscreen": false},
       "system_version": "6.0.8",
-      "ephemeral": false
+      "ephemeral": false,
+      "system_disk_capacity_bytes": 819200,
+      "host_disk_used_bytes": 823296
     }
   ]
 }
@@ -71,6 +73,8 @@ These change things and report as they go, so they have no single result to give
 | `display` | object | `width`, `height`, `depth`, and `scale` are numbers; `fullscreen` is a boolean |
 | `system_version` | string or null | The system version, for display only |
 | `ephemeral` | boolean | Whether a plain `run` boots a temporary copy of the boot disk; the machine's setting, not that of a run under way |
+| `system_disk_capacity_bytes` | number or null | The boot disk's capacity as the guest sees it: a Disk Copy image's data, otherwise the file's length, sparse or not; `null` if it's missing or there's none |
+| `host_disk_used_bytes` | number or null | Host storage allocated to all the machine's disks; `null` if any is missing or can't be measured. See [Disk usage](../README.md#disk-usage) |
 
 A machine whose definition can't be read has only `name`, `current`, and `error`, a string.
 
@@ -113,7 +117,7 @@ Checks come in the order the text output has them.
 ## `macman rom list`
 
 ```json
-{"roms": [{"name": "plus-v3", "size": 131072, "sha256": "dd908e...", "models": ["512ke", "plus"], "backend": "minivmac", "emulators": ["minivmac"]}]}
+{"roms": [{"name": "plus-v3", "size": 131072, "sha256": "dd908e...", "models": ["512ke", "plus"], "backend": "minivmac", "emulators": ["minivmac"], "host_disk_used_bytes": 131072}]}
 ```
 
 | Field | Type | |
@@ -124,6 +128,7 @@ Checks come in the order the text output has them.
 | `models` | array of strings | Mini vMac models it's a genuine ROM for; empty for any other ROM |
 | `backend` | string or null | The first of `emulators`, or `null` if it's empty |
 | `emulators` | array of strings | Each backend whose ROM check it passes: `minivmac`, `basilisk2`, or `sheepshaver`, in that order; empty if unrecognized |
+| `host_disk_used_bytes` | number or null | Host storage allocated to the stored ROM; `null` if it can't be measured |
 
 A backend listed in `emulators` can start from the ROM; that doesn't mean every guest
 will boot on it. Mac OS 8.1, for one, crashes SheepShaver with a New World ROM.
@@ -131,7 +136,7 @@ will boot on it. Mac OS 8.1, for one, crashes SheepShaver with a New World ROM.
 ## `macman system list`
 
 ```json
-{"systems": [{"name": "system-6.0.8", "version": "6.0.8", "size": 819200, "sha256": "...", "format": "hfs"}]}
+{"systems": [{"name": "system-6.0.8", "version": "6.0.8", "size": 819200, "sha256": "...", "format": "hfs", "host_disk_used_bytes": 823296}]}
 ```
 
 | Field | Type | |
@@ -141,11 +146,12 @@ will boot on it. Mac OS 8.1, for one, crashes SheepShaver with a New World ROM.
 | `size` | number | |
 | `sha256` | string | Of the stored image |
 | `format` | string or null | `mfs` or `hfs` for a raw volume, `disk_copy42` for a Disk Copy 4.2 image; `null` if unknown |
+| `host_disk_used_bytes` | number or null | Host storage allocated to the stored image; `null` if it can't be measured |
 
 ## `macman media list`
 
 ```json
-{"media": [{"name": "macos-9.0.4", "kind": "cdrom", "kind_given": false, "format": "partitioned", "bootable": true, "size": 681574400, "sha256": "...", "version": "Mac OS 9.0.4", "source": "Mac OS 9.0.4.toast"}]}
+{"media": [{"name": "macos-9.0.4", "kind": "cdrom", "kind_given": false, "format": "partitioned", "bootable": true, "size": 681574400, "sha256": "...", "version": "Mac OS 9.0.4", "source": "Mac OS 9.0.4.toast", "host_disk_used_bytes": 681574400}]}
 ```
 
 | Field | Type | |
@@ -159,6 +165,7 @@ will boot on it. Mac OS 8.1, for one, crashes SheepShaver with a New World ROM.
 | `sha256` | string | Of the stored image, which is the whole file registered |
 | `version` | string or null | As given to `media add --version`; never guessed |
 | `source` | string or null | The name of the file it was registered from |
+| `host_disk_used_bytes` | number or null | Host storage allocated to the stored image; `null` if it can't be measured |
 
 ## `macman media info NAME`
 
@@ -169,6 +176,21 @@ will boot on it. Mac OS 8.1, for one, crashes SheepShaver with a New World ROM.
 `media` is as in `media list`. `verified` says whether the stored image still matches
 its digest, read in full. The layout fields are those of `disk info`, below. With
 `verified` false, this is still what's printed, and the exit code is 1.
+
+## `macman du`
+
+```json
+{"entries": [{"name": "plus-v3", "type": "rom", "host_disk_used_bytes": 131072}, {"name": "ss904", "type": "machine", "host_disk_used_bytes": 432013312}]}
+```
+
+| Field | Type | |
+|---|---|---|
+| `name` | string | |
+| `type` | string | `machine`, `rom`, `system`, or `media` |
+| `host_disk_used_bytes` | number or null | As in `list`, `rom list`, `system list`, and `media list`; `null` if unavailable |
+
+The entries are in the same order as the text: smallest first, with ties broken by type,
+in the order above, then name, and the unavailable ones last.
 
 ## `macman disk info FILE`
 

@@ -15,6 +15,7 @@ pub mod paths;
 pub mod registry;
 pub mod report;
 pub mod tui;
+pub mod usage;
 
 use anyhow::Result;
 use backend::Backends;

@@ -208,6 +208,8 @@ pub enum Command {
         #[arg(long)]
         delete_disks: bool,
     },
+    /// Show the host disk space each machine, ROM, system image, and medium takes, largest last
+    Du,
     /// Print a shell completion script, such as for `macman completions zsh > ~/.zfunc/_macman`
     Completions {
         /// The shell to complete for
