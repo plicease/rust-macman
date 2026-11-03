@@ -312,6 +312,7 @@ impl App {
                         fullscreen: m.display.fullscreen,
                     },
                     system_version: m.system.version.clone(),
+                    ephemeral: m.ephemeral,
                 },
                 Err(e) => MachineDetails::Unreadable {
                     error: format!("{e:#}"),
@@ -337,11 +338,13 @@ impl App {
                     memory,
                     display,
                     system_version,
+                    ephemeral,
                 } => vec![
                     label,
                     model.unwrap_or(backend),
                     memory,
                     format!("{}x{}x{}", display.width, display.height, display.depth),
+                    if ephemeral { "ephemeral" } else { "persistent" }.to_string(),
                     format!("system {}", system_version.as_deref().unwrap_or("-")),
                 ],
                 MachineDetails::Unreadable { error } => {
@@ -657,6 +660,7 @@ impl App {
             schema_version: SCHEMA_VERSION,
             name: args.name.clone(),
             id: Some(new_id()),
+            ephemeral: args.ephemeral,
             emulator: EmulatorConfig {
                 backend: backend.name().to_string(),
                 revision: backend.revision().to_string(),
@@ -820,13 +824,19 @@ impl App {
         backend.check_rom(&machine, &rom, &rom_path)?;
 
         let saved_disks = machine.disk_paths(&self.paths)?;
+        let ephemeral = args.ephemeral(machine.ephemeral);
+        if ephemeral && !saved_disks.iter().any(|(_, saved)| saved.boot) {
+            bail!("machine {name:?} has no boot disk, so it can't run on a temporary copy of one");
+        }
+        // The guest may write to a temporary boot disk, whatever the saved one is.
+        let writable = |saved: &Disk| !saved.readonly || (ephemeral && saved.boot);
         for (path, saved) in &saved_disks {
             if !path.exists() {
                 bail!("machine {name:?} is missing its disk {}", path.display());
             }
             // On Windows, a running emulator shuts out even readers.
             drop(disk::lock_image(&self.paths, path, LockMode::Shared)?);
-            backend.check_disk(path, !saved.readonly)?;
+            backend.check_disk(path, writable(saved))?;
             if saved.boot
                 && args.cdroms.is_empty()
                 && disk::classify(path)? == Classification::Blank
@@ -837,7 +847,7 @@ impl App {
                 );
             }
             if saved_disk_format(backend, path)? == Some(disk::DiskFormat::DiskCopy42)
-                && !saved.readonly
+                && writable(saved)
             {
                 disk::warn_disk_copy_read_only(path);
             }
@@ -862,7 +872,7 @@ impl App {
             volumes.push(disk::check_cd_image(path)?);
         }
         backend.validate_disks(&machine, saved_disks.len() + args.disks.len())?;
-        self.offer_boot_disk_repair(&machine)?;
+        let repair_copy = self.offer_boot_disk_repair(&machine, ephemeral)?;
 
         if verbose && backend.revision() != machine.emulator.revision {
             println!(
@@ -882,7 +892,23 @@ impl App {
         let session = Session::start(&self.paths, &name)?;
         let mut locks: Vec<ImageLock> = Vec::new();
         let mut disks: Vec<ResolvedDisk> = Vec::new();
+        let mut temporary = None;
         for (path, disk) in &saved_disks {
+            if ephemeral && disk.boot {
+                // Held for the whole run, so the saved disk can't change, or be
+                // run on, underneath the copy; other ephemeral runs may share it.
+                locks.push(disk::lock_image(&self.paths, path, LockMode::Shared)?);
+                let copy = session.ephemeral_copy(path, disks.len())?;
+                if repair_copy {
+                    disk::mark_unmounted(&copy)?;
+                }
+                temporary = Some(copy.clone());
+                disks.push(ResolvedDisk {
+                    path: copy,
+                    writable: true,
+                });
+                continue;
+            }
             disks.push(self.attach(&session, &mut locks, path, !disk.readonly, disks.len())?);
         }
         for path in &args.disks {
@@ -905,17 +931,40 @@ impl App {
                 args.disks.len()
             );
         }
+        // What the guest writes to these is kept: everything writable but the copy.
+        let kept: Vec<PathBuf> = disks
+            .iter()
+            .filter(|disk| disk.writable && Some(&disk.path) != temporary.as_ref())
+            .map(|disk| disk.path.clone())
+            .collect();
+        if temporary.is_some() {
+            println!(
+                "Booting from a temporary copy of the boot disk; the guest's changes to it are \
+                 discarded when the run ends"
+            );
+            if !kept.is_empty() {
+                eprintln!(
+                    "note: only the boot disk is temporary; changes to the {} other writable \
+                     disk(s) are kept",
+                    kept.len()
+                );
+            }
+        }
         let mut record = SessionRecord {
             machine: name.clone(),
             pid: std::process::id(),
             outcome: None,
-            writable_disks: disks
-                .iter()
-                .filter(|disk| disk.writable)
-                .map(|disk| disk.path.clone())
-                .collect(),
+            writable_disks: kept,
         };
         session.record(&record)?;
+        // A run that ends badly keeps its session for `doctor`, but a temporary
+        // disk has nothing worth keeping. One an emulator still holds stays
+        // until the next run clears the session.
+        let discard = || {
+            if let Some(copy) = &temporary {
+                let _ = fs::remove_file(copy);
+            }
+        };
 
         let launched = backend.launch(&LaunchRequest {
             machine: &machine,
@@ -930,6 +979,7 @@ impl App {
             Ok(status) => status,
             Err(error) => {
                 record.outcome = Some("the emulator failed to start".to_string());
+                discard();
                 session.abandon(&record);
                 return Err(error);
             }
@@ -937,8 +987,16 @@ impl App {
         match abnormal_outcome(status) {
             None => session.finish()?,
             Some(outcome) => {
-                eprintln!("warning: {outcome}; disks were left in place");
+                if temporary.is_some() {
+                    eprintln!(
+                        "warning: {outcome}; the temporary boot disk was discarded, and other \
+                         disks were left in place"
+                    );
+                } else {
+                    eprintln!("warning: {outcome}; disks were left in place");
+                }
                 record.outcome = Some(outcome);
+                discard();
                 session.abandon(&record);
             }
         }
@@ -948,7 +1006,7 @@ impl App {
     /// The boot disk of `machine`, if a guest stopped without unmounting it and that can
     /// keep the machine from starting. A read-only disk is left out, as guests only see
     /// a copy of it.
-    fn unclean_boot_disk(&self, machine: &Machine) -> Result<Option<PathBuf>> {
+    fn unclean_boot_disk(&self, machine: &Machine, ephemeral: bool) -> Result<Option<PathBuf>> {
         if !self
             .backends
             .get(&machine.emulator.backend)?
@@ -957,18 +1015,23 @@ impl App {
             return Ok(None);
         }
         for (path, disk) in machine.disk_paths(&self.paths)? {
-            if disk.boot && !disk.readonly && disk::left_mounted(&path)? {
+            // A temporary copy is writable, even of a read-only disk.
+            if disk.boot && (!disk.readonly || ephemeral) && disk::left_mounted(&path)? {
                 return Ok(Some(path));
             }
         }
         Ok(None)
     }
 
-    /// Ask before anything is built or started, so the answer is about this run.
-    fn offer_boot_disk_repair(&self, machine: &Machine) -> Result<()> {
-        let Some(path) = self.unclean_boot_disk(machine)? else {
-            return Ok(());
+    /// Ask before anything is built or started, so the answer is about this run. For an
+    /// ephemeral run, only the copy may be repaired, so this returns whether to.
+    fn offer_boot_disk_repair(&self, machine: &Machine, ephemeral: bool) -> Result<bool> {
+        let Some(path) = self.unclean_boot_disk(machine, ephemeral)? else {
+            return Ok(false);
         };
+        if ephemeral {
+            return Ok(self.offer_copy_repair(&machine.name));
+        }
         let _lock = disk::lock_image(&self.paths, &path, LockMode::Exclusive)?;
         let name = &machine.name;
         let problem = format!(
@@ -977,7 +1040,7 @@ impl App {
         );
         if !std::io::stdin().is_terminal() {
             eprintln!("warning: {problem}; run macman from a terminal to repair it");
-            return Ok(());
+            return Ok(false);
         }
         print!(
             "{problem}. This doesn't check or repair the disk. Set the HFS cleanly-unmounted \
@@ -990,7 +1053,29 @@ impl App {
             disk::mark_unmounted(&path)?;
             println!("Set the flag, without checking the disk; run Disk First Aid in the guest");
         }
-        Ok(())
+        Ok(false)
+    }
+
+    /// [`Self::offer_boot_disk_repair`] for an ephemeral run, which leaves the saved disk
+    /// as it is, and can only offer to set the flag on this run's copy.
+    fn offer_copy_repair(&self, name: &str) -> bool {
+        let problem = format!(
+            "the boot disk of {name} wasn't shut down cleanly, so it may stop at a flashing \
+             question mark"
+        );
+        if !std::io::stdin().is_terminal() {
+            eprintln!("warning: {problem}; run macman from a terminal to repair this run's copy");
+            return false;
+        }
+        print!(
+            "{problem}. Set the HFS cleanly-unmounted flag on this run's temporary copy, \
+             leaving the saved disk as it is? [y/N] "
+        );
+        let mut answer = String::new();
+        let answered = std::io::stdout()
+            .flush()
+            .and_then(|()| std::io::stdin().lock().read_line(&mut answer));
+        answered.is_ok() && accepts_repair(&answer)
     }
 
     /// Lock one disk and produce the form the emulator should see. Read-only
@@ -1022,14 +1107,26 @@ impl App {
 
     fn sweep_stale_sessions(&self) -> Result<()> {
         for stale in disk::stale_sessions(&self.paths)? {
-            eprintln!(
-                "warning: a previous run of {} (pid {}) ended abnormally: {}; its disks were \
-                 kept but may need checking:",
-                stale.record.machine,
-                stale.record.pid,
-                stale.record.describe()
-            );
-            for path in &stale.record.writable_disks {
+            let record = &stale.record;
+            if record.writable_disks.is_empty() {
+                // Such as an ephemeral run, whose temporary disk goes with the session.
+                eprintln!(
+                    "warning: a previous run of {} (pid {}) ended abnormally: {}; it kept no \
+                     changes to any saved disk",
+                    record.machine,
+                    record.pid,
+                    record.describe()
+                );
+            } else {
+                eprintln!(
+                    "warning: a previous run of {} (pid {}) ended abnormally: {}; its disks \
+                     were kept but may need checking:",
+                    record.machine,
+                    record.pid,
+                    record.describe()
+                );
+            }
+            for path in &record.writable_disks {
                 eprintln!("  {}", without_verbatim_prefix(path).display());
             }
             // An emulator that outlived macman keeps its running files from
@@ -1179,7 +1276,10 @@ impl App {
     fn check_boot_disk(&self, name: &str) -> Result<Option<Check>> {
         let machine = Machine::load(&self.paths, name)?;
         // A machine in use has its volume mounted, as it should.
-        let unclean = self.unclean_boot_disk(&machine).ok().flatten();
+        let unclean = self
+            .unclean_boot_disk(&machine, machine.ephemeral)
+            .ok()
+            .flatten();
         let Some(path) = unclean else {
             return Ok(None);
         };

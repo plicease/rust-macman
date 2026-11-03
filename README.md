@@ -68,6 +68,31 @@ macman run mac-plus --disk ./build/tico68.dsk --readonly
 With `--readonly`, the emulator gets a read-only throwaway copy, so your file can't
 change. Without it, the emulator writes to the file itself.
 
+To try something out and then forget it, run on an ephemeral boot disk:
+
+```sh
+macman run mac-plus --ephemeral    # or -e
+```
+
+The machine boots from a temporary, writable copy of its boot disk, so the guest can
+install software, change settings, and restart as usual within the run, and every
+change to that disk is discarded when the run ends, however it ends. The next run starts
+from the saved disk again. This is an ephemeral system disk, not a snapshot of the whole
+machine: other disks the machine has, and `--disk` files, keep their changes as always,
+and macman says so. `--readonly` still applies to `--disk` files only.
+
+To make that the default for a machine, create it with `--ephemeral`, or set
+`ephemeral = true` in its `machine.toml`. A plain `run` then uses a temporary copy, and
+`run --no-ephemeral` uses the saved disk for that run. `macman list` shows each
+machine as `persistent` or `ephemeral`, and clone, export, and import keep the setting.
+
+While an ephemeral run is going, its saved boot disk is locked for reading: other
+ephemeral runs of the machine may start, each from its own copy, but a persistent run,
+`remove`, or anything else that would change the disk waits until it ends. The copy is a
+reflink where the file system supports one (Btrfs, XFS, or APFS), so it's quick and
+takes no room at first; elsewhere it's a full copy. It lives in the run's session
+directory, and if macman is killed, the next `run` removes it.
+
 Other commands: `list [--builds]`, `current`, `rom list`, `system list`, `system remove`,
 `config show`, `clone`, `export`, `import`, `remove`, and `doctor`. Add `--verbose` for build and launch
 logs. Add `--json` to `list`, `doctor`, `rom list`, `system list`, `disk info`, `config show`, or

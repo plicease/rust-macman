@@ -2,7 +2,8 @@
 //! session records used to spot abnormal exits.
 
 use crate::fsutil::{
-    HeldLock, atomic_copy, atomic_copy_range_checked, list_dir, read_toml, sha256_bytes, write_toml,
+    HeldLock, atomic_copy, atomic_copy_range_checked, independent_copy, list_dir, read_toml,
+    sha256_bytes, write_toml,
 };
 use crate::paths::Paths;
 use anyhow::{Context, Result, anyhow, bail};
@@ -768,6 +769,20 @@ impl Session {
         let mut perms = fs::metadata(&copy)?.permissions();
         perms.set_readonly(true);
         fs::set_permissions(&copy, perms)?;
+        Ok(copy)
+    }
+
+    /// Copy the boot disk `source` into this session for an ephemeral run.
+    /// Unlike [`Session::throwaway_copy`], the copy is writable, as the guest
+    /// may write to it all it likes; it goes with the session. The caller
+    /// holds a lock on `source` for the copy, and as long as it needs.
+    pub fn ephemeral_copy(&self, source: &Path, index: usize) -> Result<PathBuf> {
+        let name = source
+            .file_name()
+            .context("disk path has no file name")?
+            .to_string_lossy();
+        let copy = self.dir.join(format!("{index}-ephemeral-{name}"));
+        independent_copy(source, &copy)?;
         Ok(copy)
     }
 

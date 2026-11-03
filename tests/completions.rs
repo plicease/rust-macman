@@ -320,7 +320,7 @@ macman remove -> alpha beta
 macman system remove -> sys-608
 macman create new --rom -> plus-v3
 macman create new --system s-> sys-608
-macman create -> -v -h --backend --model --rom --system --disk-size --memory --display --scale --fullscreen --cpu --no-fpu --no-sound --network --shared-folder --verbose --json --help
+macman create -> -v -h --backend --model --rom --system --disk-size --memory --display --scale --fullscreen --cpu --no-fpu --no-sound --network --shared-folder --ephemeral --verbose --json --help
 macman use ---> --verbose --json --help
 ";
     assert_eq!(output, expected);

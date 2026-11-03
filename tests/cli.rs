@@ -187,7 +187,7 @@ fn use_current_and_list() {
 
     let list = env.ok(&["list"]);
     assert!(
-        list.contains("* wombat-6  plus  4M  512x342x1  system 6.0.8"),
+        list.contains("* wombat-6  plus  4M  512x342x1  persistent  system 6.0.8"),
         "{list}"
     );
     assert!(list.contains("  wombat-7"), "{list}");
@@ -699,4 +699,46 @@ fn windows_uses_its_native_folders_without_home() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(local.join("macman/roms/plus-v3.rom").is_file());
     assert!(!roaming.join("macman/roms").exists());
+}
+
+#[test]
+fn the_ephemeral_setting_shows_and_lasts_through_a_clone() {
+    let env = Env::new();
+    env.register();
+    env.create("wombat-6");
+    env.ok(&[
+        "create",
+        "scratch",
+        "--model",
+        "plus",
+        "--rom",
+        "plus-v3",
+        "--system",
+        "system-6.0.8",
+        "--ephemeral",
+    ]);
+    env.ok(&["clone", "scratch", "scratch-2"]);
+
+    let list = env.ok(&["list"]);
+    for (name, mode) in [
+        ("scratch ", "ephemeral"),
+        ("scratch-2", "ephemeral"),
+        ("wombat-6", "persistent"),
+    ] {
+        let line = list.lines().find(|line| line.contains(name)).unwrap();
+        assert!(line.contains(&format!("  {mode}  ")), "{line}");
+    }
+    assert!(
+        env.ok(&["config", "show", "scratch-2"])
+            .contains("ephemeral = true\n")
+    );
+    assert!(
+        env.ok(&["config", "show", "wombat-6"])
+            .contains("ephemeral = false\n")
+    );
+    let help = env.ok(&["run", "--help"]);
+    assert!(
+        help.contains("-e, --ephemeral") && help.contains("--no-ephemeral"),
+        "{help}"
+    );
 }

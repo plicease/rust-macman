@@ -986,6 +986,9 @@ fn unpack_blob<R: Read>(
 #[derive(Debug, PartialEq)]
 struct Fingerprint<'a> {
     backend: &'a str,
+    /// Whether a plain run discards the boot disk's changes, which is how the
+    /// owner meant the machine to be used.
+    ephemeral: bool,
     revision: Option<String>,
     model: Option<Model>,
     memory: &'a str,
@@ -1003,6 +1006,7 @@ impl<'a> Fingerprint<'a> {
         let emulator = &machine.emulator;
         Self {
             backend: &emulator.backend,
+            ephemeral: machine.ephemeral,
             revision: backends
                 .get(&emulator.backend)
                 .and_then(|backend| backend.resolve_revision(&emulator.revision))

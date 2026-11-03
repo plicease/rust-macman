@@ -1033,3 +1033,249 @@ fn linux_sigbus_counts_as_a_host_crash() {
     assert_reported(&h, "crashed on the host (signal 7)");
     assert_recovers(&h, &mock);
 }
+
+// Ephemeral runs: a temporary, writable copy of the boot disk.
+
+impl Harness {
+    fn set_ephemeral(&self, machine: &str, ephemeral: bool) {
+        let mut definition = Machine::load(&self.paths, machine).unwrap();
+        definition.ephemeral = ephemeral;
+        definition.save_to(&self.paths.machine(machine)).unwrap();
+    }
+
+    /// Where the last launch's boot disk was.
+    fn last_boot_disk(mock: &Mock) -> ResolvedDisk {
+        mock.0.borrow().launches.last().unwrap().disks[0].clone()
+    }
+}
+
+/// While the emulator runs: the boot disk is a writable copy in the session,
+/// it holds what the saved disk does, and what the guest writes stays there.
+fn scribble_on_the_copy(original: PathBuf) -> DuringLaunch {
+    Box::new(move |launch: &Launch| {
+        let disk = &launch.disks[0];
+        assert!(disk.writable);
+        assert!(
+            disk.path.starts_with(&launch.workdir),
+            "{}",
+            disk.path.display()
+        );
+        assert!(!fs::metadata(&disk.path).unwrap().permissions().readonly());
+        assert_eq!(fs::read(&disk.path).unwrap(), fs::read(&original).unwrap());
+        let mut bytes = fs::read(&disk.path).unwrap();
+        bytes[4096] = 0xEE;
+        fs::write(&disk.path, &bytes).unwrap();
+        assert_eq!(
+            fs::read(&disk.path).unwrap()[4096],
+            0xEE,
+            "seen within the run"
+        );
+    })
+}
+
+#[test]
+fn an_ephemeral_run_writes_to_a_copy_and_leaves_the_boot_disk_alone() {
+    let (h, mock) = Harness::mock();
+    let original = h.system_disk("plus-a");
+    let before = sha256_file(&original).unwrap();
+    for flag in ["--ephemeral", "-e"] {
+        mock.0.borrow_mut().during = Some(scribble_on_the_copy(original.clone()));
+        assert_eq!(h.cmd(&["run", "plus-a", flag]).unwrap(), 0);
+        // Each run starts again from the saved disk, which never changed.
+        assert_eq!(sha256_file(&original).unwrap(), before, "{flag}");
+        let copy = Harness::last_boot_disk(&mock).path;
+        assert!(!copy.exists(), "the copy goes with the run");
+        assert_eq!(session_count(&h.paths), 0);
+    }
+    assert!(lock_image(&h.paths, &original, LockMode::Exclusive).is_ok());
+    assert!(!Machine::load(&h.paths, "plus-a").unwrap().ephemeral);
+}
+
+#[test]
+fn a_machine_set_to_be_ephemeral_is_unless_told_otherwise() {
+    let (h, mock) = Harness::mock();
+    let original = fs::canonicalize(h.system_disk("plus-a")).unwrap();
+    h.set_ephemeral("plus-a", true);
+    h.cmd(&["run", "plus-a"]).unwrap();
+    assert_ne!(Harness::last_boot_disk(&mock).path, original);
+    h.cmd(&["run", "plus-a", "--no-ephemeral"]).unwrap();
+    assert_eq!(Harness::last_boot_disk(&mock).path, original);
+
+    h.set_ephemeral("plus-a", false);
+    h.cmd(&["run", "plus-a"]).unwrap();
+    assert_eq!(Harness::last_boot_disk(&mock).path, original);
+
+    // Definitions from before the setting existed are persistent.
+    let file = h.paths.machine("plus-a").join("machine.toml");
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(text.contains("ephemeral = false\n"), "{text}");
+    fs::write(&file, text.replace("ephemeral = false\n", "")).unwrap();
+    h.cmd(&["run", "plus-a"]).unwrap();
+    assert_eq!(Harness::last_boot_disk(&mock).path, original);
+
+    let both = Cli::try_parse_from(["macman", "run", "plus-a", "-e", "--no-ephemeral"]);
+    assert!(both.is_err());
+
+    h.cmd(&[
+        "create",
+        "plus-e",
+        "--model",
+        "plus",
+        "--rom",
+        "plus",
+        "--system",
+        "sys",
+        "--ephemeral",
+    ])
+    .unwrap();
+    assert!(Machine::load(&h.paths, "plus-e").unwrap().ephemeral);
+}
+
+#[test]
+fn only_the_boot_disk_is_ephemeral() {
+    let (h, mock) = Harness::mock();
+    let data = write_disk(h.dir(), "data.dsk");
+    let reference = write_disk(h.dir(), "reference.dsk");
+    let reference_before = sha256_file(&reference).unwrap();
+    let data_path = fs::canonicalize(&data).unwrap();
+    mock.0.borrow_mut().during = Some(Box::new(move |launch: &Launch| {
+        assert!(launch.disks[0].path.starts_with(&launch.workdir));
+        assert_eq!(
+            launch.disks[1].path, data_path,
+            "an extra disk is the real file"
+        );
+        assert!(launch.disks[1].writable);
+        let mut bytes = fs::read(&launch.disks[1].path).unwrap();
+        bytes[4096] = 0x42;
+        fs::write(&launch.disks[1].path, bytes).unwrap();
+    }));
+    h.cmd(&["run", "plus-a", "-e", "--disk", data.to_str().unwrap()])
+        .unwrap();
+    assert_eq!(fs::read(&data).unwrap()[4096], 0x42, "kept, as always");
+
+    // --readonly still applies to --disk files alone.
+    h.cmd(&[
+        "run",
+        "plus-a",
+        "-e",
+        "--disk",
+        reference.to_str().unwrap(),
+        "--readonly",
+    ])
+    .unwrap();
+    let disks = mock.0.borrow().launches.last().unwrap().disks.clone();
+    assert!(disks[0].writable, "the boot disk's copy is writable");
+    assert!(!disks[1].writable);
+    assert_eq!(sha256_file(&reference).unwrap(), reference_before);
+}
+
+#[test]
+fn a_read_only_boot_disk_becomes_a_writable_copy() {
+    let (h, mock) = Harness::mock();
+    let mut definition = Machine::load(&h.paths, "plus-a").unwrap();
+    definition.disks[0].readonly = true;
+    definition.save_to(&h.paths.machine("plus-a")).unwrap();
+    h.cmd(&["run", "plus-a", "-e"]).unwrap();
+    let disk = Harness::last_boot_disk(&mock);
+    assert!(disk.writable);
+    h.cmd(&["run", "plus-a"]).unwrap();
+    assert!(!Harness::last_boot_disk(&mock).writable);
+}
+
+#[test]
+fn a_machine_without_a_boot_disk_cannot_be_ephemeral() {
+    let (h, mock) = Harness::mock();
+    let mut definition = Machine::load(&h.paths, "plus-a").unwrap();
+    definition.disks[0].boot = false;
+    definition.save_to(&h.paths.machine("plus-a")).unwrap();
+    let error = h.cmd(&["run", "plus-a", "-e"]).unwrap_err().to_string();
+    assert!(error.contains("no boot disk"), "{error}");
+    assert_eq!(mock.0.borrow().launches.len(), 0);
+    assert_eq!(session_count(&h.paths), 0);
+}
+
+#[test]
+fn a_failed_or_abnormal_ephemeral_run_discards_its_copy_at_once() {
+    let (h, mock) = Harness::mock();
+    let original = h.system_disk("plus-a");
+    let before = sha256_file(&original).unwrap();
+
+    mock.0.borrow_mut().fail_launch = true;
+    assert!(h.cmd(&["run", "plus-a", "-e"]).is_err());
+    let stale = macman::disk::stale_sessions(&h.paths).unwrap();
+    assert_eq!(stale.len(), 1);
+    assert!(stale[0].record.describe().contains("failed to start"));
+    assert!(
+        stale[0].record.writable_disks.is_empty(),
+        "nothing kept to check"
+    );
+    let left: Vec<_> = macman::fsutil::list_dir(&stale[0].dir).unwrap();
+    assert!(
+        !left.iter().any(|name| name.contains("ephemeral")),
+        "{left:?}"
+    );
+    mock.0.borrow_mut().fail_launch = false;
+
+    mock.0.borrow_mut().exit = 3;
+    mock.0.borrow_mut().during = Some(scribble_on_the_copy(original.clone()));
+    assert_eq!(h.cmd(&["run", "plus-a", "-e"]).unwrap(), 3);
+    assert!(!Harness::last_boot_disk(&mock).path.exists());
+    assert_eq!(sha256_file(&original).unwrap(), before);
+
+    // The next run clears both sessions.
+    mock.0.borrow_mut().exit = 0;
+    h.cmd(&["run", "plus-a"]).unwrap();
+    assert_eq!(session_count(&h.paths), 0);
+    assert_eq!(sha256_file(&original).unwrap(), before);
+}
+
+#[test]
+fn a_copy_left_by_a_killed_macman_is_reclaimed_by_the_next_run() {
+    let (h, mock) = Harness::mock();
+    let session = macman::disk::Session::start(&h.paths, "plus-a").unwrap();
+    let copy = session.ephemeral_copy(&h.system_disk("plus-a"), 0).unwrap();
+    session
+        .record(&macman::disk::SessionRecord {
+            machine: "plus-a".into(),
+            pid: 1,
+            outcome: None,
+            writable_disks: vec![],
+        })
+        .unwrap();
+    drop(session);
+    assert!(copy.exists());
+
+    h.cmd(&["run", "plus-a"]).unwrap();
+    assert!(!copy.exists());
+    assert_eq!(session_count(&h.paths), 0);
+    assert_eq!(mock.0.borrow().launches.len(), 1);
+}
+
+#[test]
+fn ephemeral_runs_share_the_boot_disk_but_a_persistent_run_waits() {
+    let (h, mock) = Harness::mock();
+    let paths = h.paths.clone();
+    let nested = Mock::default();
+    let inner = nested.clone();
+    mock.0.borrow_mut().during = Some(Box::new(move |_: &Launch| {
+        let other = App::new(paths.clone(), Backends::new(vec![Box::new(inner.clone())]));
+        let cmd = |args: &[&str]| {
+            let argv = std::iter::once("macman").chain(args.iter().copied());
+            other.execute(Cli::parse_from(argv))
+        };
+        // Its own copy, from the same saved disk.
+        assert_eq!(cmd(&["run", "plus-a", "-e"]).unwrap(), 0);
+        let error = cmd(&["run", "plus-a"]).unwrap_err();
+        assert!(error.to_string().contains("in use"), "{error}");
+        // Nor can the disk be rewritten under it.
+        let error = cmd(&["remove", "plus-a", "--delete-disks"]).unwrap_err();
+        assert!(error.to_string().contains("in use"), "{error}");
+        assert_eq!(macman::disk::stale_sessions(&paths).unwrap().len(), 0);
+    }));
+    h.cmd(&["run", "plus-a", "-e"]).unwrap();
+    assert_eq!(nested.0.borrow().launches.len(), 1);
+    assert_ne!(
+        nested.0.borrow().launches[0].disks[0].path,
+        Harness::last_boot_disk(&mock).path
+    );
+}

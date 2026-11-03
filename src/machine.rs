@@ -19,6 +19,10 @@ pub struct Machine {
     /// from before this existed get one when first exported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Run on a temporary copy of the boot disk unless told otherwise. A
+    /// definition from before this existed is persistent.
+    #[serde(default)]
+    pub ephemeral: bool,
     pub emulator: EmulatorConfig,
     pub hardware: Hardware,
     pub display: Display,

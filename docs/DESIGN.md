@@ -128,6 +128,7 @@ Example `machine.toml`:
 schema_version = 1
 name = "wombat-6"
 id = "6f1c1f6e-7a3d-4c55-9d0e-3a0f2f6f0a11"  # stable across export and import
+ephemeral = false  # true: a plain `run` boots a temporary copy of the boot disk
 
 [emulator]
 backend = "minivmac"
@@ -280,7 +281,7 @@ Keep generic model and disk metadata separate from backend extensions. Avoid pre
 - Acquire per-image advisory locks before launching and hold them for the process lifetime.
 - Refuse simultaneous writable attachment of the same underlying file (including aliases/symlinks, where detectable).
 - Record clean startup/shutdown state; report stale locks and abnormal exits without deleting disks.
-- Prefer copy-on-create and explicit copies for experimentation.
+- Prefer copy-on-create and explicit copies for experimentation. `run --ephemeral` boots a writable copy of the boot disk in the session directory, never a hard link, and holds a shared lock on the saved disk for the run; the copy goes with the session, and a sweep of stale sessions reclaims it after a crash.
 - Do not advertise an attachment as read-only unless the backend or an isolated copy *actually prevents writes*. If Mini vMac cannot enforce read-only attachment, use a throwaway copy and discard changes, with explicit CLI messaging.
 - Never delete registered source templates during machine removal; prompt or require an explicit destructive flag to delete private machine disks.
 

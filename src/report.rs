@@ -46,6 +46,8 @@ pub enum MachineDetails {
         memory: String,
         display: DisplayReport,
         system_version: Option<String>,
+        /// Whether a plain `run` uses a temporary copy of the boot disk.
+        ephemeral: bool,
     },
     Unreadable {
         error: String,
