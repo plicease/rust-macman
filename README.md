@@ -219,10 +219,11 @@ PowerPC Mac OS, generally Mac OS 7.5.2 through 9.0.4, depending on the ROM and t
 It imitates no particular Power Mac, and macman makes no claim for Mac OS 9.1 or later,
 Mac OS X, or G4 and G5 machines.
 
-**This backend is a preview.** It has built and booted Mac OS 8.1 on an Old World ROM on
-Linux x86-64, but nothing newer has been tried, and neither have sound, networking, or
-shared folders. Treat it as a preview until [the smoke test](docs/SMOKE_TEST.md#sheepshaver)
-has passed; see [docs/PLATFORMS.md](docs/PLATFORMS.md#sheepshaver).
+**This backend is a preview.** On Linux x86-64 it has booted Mac OS 8.1 on an Old World ROM,
+and installed and booted Mac OS 9.0.4 on a New World ROM, and `slirp` networking, a shared
+folder, and read-only disks work. Sound on a real device hasn't been tried. Treat it as a
+preview until [the smoke test](docs/SMOKE_TEST.md#sheepshaver) has passed; see
+[docs/PLATFORMS.md](docs/PLATFORMS.md#sheepshaver).
 
 It's offered only on Linux x86-64, and compiles with the same packages as Basilisk II:
 
