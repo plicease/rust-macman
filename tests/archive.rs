@@ -1847,14 +1847,18 @@ fn a_rom_registered_for_its_own_sake_follows_the_rom_rules() {
     let archive = source.archive("all.tar.gz");
     source.ok(&["export", "--all", "-o", &archive]);
 
+    // Its name is a registration of its own, so an identical ROM under
+    // another name doesn't stand in for it.
     let target = Host::new();
     target.add_ii_rom("my-ii");
     let output = target.ok(&["import", &archive]);
+    assert!(output.contains("imported rom unused-rom"), "{output}");
+    assert!(target.data().join("roms/unused-rom.rom").exists());
     assert!(
-        output.contains("reused rom unused-rom as my-ii"),
-        "{output}"
+        target
+            .ok(&["import", &archive])
+            .contains("unchanged rom unused-rom")
     );
-    assert!(!target.data().join("roms/unused-rom.rom").exists());
 
     let target = Host::new();
     target.add_large_rom("unused-rom", IIX_ROM_CHECKSUM);
@@ -1992,4 +1996,90 @@ fn a_dry_run_foretells_system_images_and_reports_them_in_json() {
         ])
     );
     assert_eq!(report["unresolved"], 1);
+}
+
+#[test]
+fn export_all_keeps_every_name_of_a_rom_registered_twice() {
+    let source = Host::with_two_machines();
+    source.add_plus_rom("plus");
+    let archive = source.archive("all.tar.gz");
+    source.ok(&["export", "--all", "-o", &archive]);
+    // Two entries, one blob.
+    let rom = digest(source.data().join("roms/plus.rom"));
+    assert_eq!(rom, digest(source.data().join("roms/plus-v3.rom")));
+    let manifest = source.manifest(&archive);
+    assert_eq!(manifest.matches("[[roms]]").count(), 2, "{manifest}");
+    let blobs = read_entries(&archive)
+        .into_iter()
+        .filter(|(name, _)| *name == format!("blobs/{rom}"))
+        .count();
+    assert_eq!(blobs, 1);
+
+    let target = Host::new();
+    let output = target.ok(&["import", &archive]);
+    assert!(output.contains("imported rom plus\n"), "{output}");
+    assert!(output.contains("imported rom plus-v3"), "{output}");
+    let list = target.ok(&["rom", "list"]);
+    let digests: Vec<_> = ["plus", "plus-v3"]
+        .iter()
+        .map(|name| {
+            let line = list
+                .lines()
+                .find(|line| line.starts_with(&format!("{name} ")))
+                .unwrap_or_else(|| panic!("{name}: {list}"));
+            line.split_whitespace().nth(3).unwrap().to_string()
+        })
+        .collect();
+    assert_eq!(digests[0], digests[1], "{list}");
+    assert_eq!(target.ok(&["rom", "list"]), source.ok(&["rom", "list"]));
+    // The machines keep the name they used.
+    assert!(target.definition("plus-a").contains("rom = \"plus-v3\""));
+
+    let before = target.snapshot();
+    let output = target.ok(&["import", &archive]);
+    assert!(output.contains("unchanged rom plus\n"), "{output}");
+    assert_eq!(target.snapshot(), before);
+}
+
+#[test]
+fn a_machine_still_reuses_an_identical_rom_but_all_keeps_its_name() {
+    let source = Host::with_two_machines();
+    let archive = source.archive("all.tar.gz");
+    source.ok(&["export", "--all", "-o", &archive]);
+
+    let target = Host::new();
+    target.add_plus_rom("my-plus");
+    let preview = assert_preview_matches(&target, &[&archive]);
+    assert!(preview.contains("would import rom plus-v3"), "{preview}");
+    // The machines were decided first, and use the ROM that was already here.
+    assert!(target.definition("plus-a").contains("rom = \"my-plus\""));
+    assert!(target.data().join("roms/plus-v3.rom").exists());
+}
+
+#[test]
+fn a_machine_export_lists_identical_roms_once_as_format_1_did() {
+    let source = Host::with_two_machines();
+    source.add_plus_rom("plus");
+    let definition = source
+        .definition("plus-b")
+        .replace("rom = \"plus-v3\"", "rom = \"plus\"");
+    source.write_definition("plus-b", &definition);
+    let archive = source.export(&["plus-a", "plus-b"], "both.tar.gz");
+    let manifest = source.manifest(&archive);
+    assert!(manifest.starts_with("format_version = 1\n"), "{manifest}");
+    assert_eq!(manifest.matches("[[roms]]").count(), 1, "{manifest}");
+    Host::new().ok(&["import", &archive]);
+}
+
+#[test]
+fn only_roms_registered_for_their_own_sake_may_share_contents() {
+    let (_source, archive) = honest();
+    let edit = |text: String| {
+        let start = text.find("[[roms]]").unwrap();
+        let end = start + text[start..].find("\n\n").unwrap() + 1;
+        let block = text[start..end].to_string();
+        let copy = block.replace("name = \"plus-v3\"", "name = \"other\"");
+        text.replacen(&block, &format!("{block}\n{copy}"), 1)
+    };
+    assert_refused(&with_manifest(&archive, edit), "lists ROM \"other\" twice");
 }

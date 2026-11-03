@@ -187,9 +187,21 @@ pub fn export(paths: &Paths, selection: &Selection, output: &Path) -> Result<Exp
      -> Result<String> {
         let (rom, rom_path) = registry::load_rom(paths, name)?;
         registry::verify(&rom_path, "ROM", &rom.name, &rom.sha256)?;
-        // One entry for each distinct ROM, under the first name it's met by.
-        match manifest.roms.iter_mut().find(|r| r.sha256 == rom.sha256) {
-            Some(archived) => archived.register |= register,
+        // A ROM registered for its own sake keeps its name, so each registered
+        // name gets an entry, though identical ones share a blob. One that only
+        // comes with machines has one entry for its contents, as in format 1.
+        let found = manifest
+            .roms
+            .iter()
+            .position(|r| r.name == rom.name)
+            .or_else(|| {
+                manifest
+                    .roms
+                    .iter()
+                    .position(|r| !register && !r.register && r.sha256 == rom.sha256)
+            });
+        match found {
+            Some(index) => manifest.roms[index].register |= register,
             None => manifest.roms.push(ArchivedRom {
                 name: rom.name.clone(),
                 sha256: rom.sha256.clone(),
@@ -556,8 +568,14 @@ fn decide_all(
     }
     let blobs = staging.join("blobs");
     for rom in manifest.roms.iter().filter(|rom| rom.register) {
-        // One a machine brought in, or found here, is settled already.
-        if !report.roms.contains_key(&rom.name) {
+        // Settled if a machine brought it in under its name, or found it here so;
+        // not if a machine reused an identical ROM under another name.
+        let settled = match report.roms.get(&rom.name) {
+            Some(RomOutcome::Imported | RomOutcome::Recovered) => true,
+            Some(RomOutcome::Unchanged { local }) => *local == rom.name,
+            _ => false,
+        };
+        if !settled {
             let outcome = register_rom(paths, &blobs, rom, dry_run)
                 .unwrap_or_else(|error| RomOutcome::Failed(format!("{error:#}")));
             report.roms.insert(rom.name.clone(), outcome);
@@ -575,7 +593,8 @@ fn decide_all(
 }
 
 /// Bring in a ROM the archive asks to have registered whether or not a machine
-/// uses it, by the same rules as one that comes with a machine.
+/// uses it. It's a registration in its own right, so like a system image, it
+/// keeps its name: it isn't folded into an identical ROM under another name.
 fn register_rom(
     paths: &Paths,
     blobs: &Path,
@@ -584,10 +603,15 @@ fn register_rom(
 ) -> Result<RomOutcome> {
     let blob = blobs.join(&rom.sha256);
     let incoming = registry::rom_from_blob(&blob, &rom.name, &rom.sha256)?;
-    if let Some(existing) = local_rom(paths, rom)? {
-        return Ok(rom_outcome(&incoming, Some(&existing)));
-    }
     if registry::rom_exists(paths, &rom.name) {
+        let same = registry::load_rom(paths, &rom.name).is_ok_and(|(local, file)| {
+            local.sha256 == rom.sha256 && sha256_file(&file).is_ok_and(|sha| sha == rom.sha256)
+        });
+        if same {
+            return Ok(RomOutcome::Unchanged {
+                local: rom.name.clone(),
+            });
+        }
         let recovered = if dry_run {
             registry::can_recover_rom(paths, &incoming)?
         } else {
@@ -805,7 +829,10 @@ fn validate(manifest: &Manifest) -> Result<BTreeMap<String, u64>> {
     for rom in &manifest.roms {
         validate_name("ROM", &rom.name)?;
         expect(&rom.sha256, rom.size)?;
-        if !rom_names.insert(rom.name.as_str()) || !rom_digests.insert(rom.sha256.as_str()) {
+        // Names registered for their own sake may share contents; otherwise a
+        // ROM is listed once, as a machine finds its ROM by digest.
+        let new_digest = rom_digests.insert(rom.sha256.as_str());
+        if !rom_names.insert(rom.name.as_str()) || (!new_digest && !rom.register) {
             bail!("the manifest lists ROM {:?} twice", rom.name);
         }
     }
@@ -1033,7 +1060,14 @@ impl Importing<'_> {
             .manifest
             .roms
             .iter()
-            .find(|rom| rom.sha256 == self.entry.rom_sha256)
+            .filter(|rom| rom.sha256 == self.entry.rom_sha256)
+            .reduce(|best, rom| {
+                if rom.name == machine.hardware.rom {
+                    rom
+                } else {
+                    best
+                }
+            })
         else {
             bail!("the ROM is not in the archive");
         };

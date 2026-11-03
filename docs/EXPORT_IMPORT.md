@@ -65,8 +65,10 @@ so no system image comes with it. Those are chosen separately:
 | `export --all` | All | All, used or not | All |
 
 `--all` works with no machines, and is refused only when there's nothing at all to
-export. It can't be combined with names, `--system`, or `--all-systems`. A ROM
-registered twice under different names has one entry, under the first name met.
+export. It can't be combined with names, `--system`, or `--all-systems`. With `--all`,
+every registered name has its own entry, so a ROM registered twice under different
+names arrives under both, sharing one blob. Without it, a machine's ROM has one entry
+for its contents, as in format 1.
 
 Archives leave out builds, source and build caches, logs, locks, and session data. Disk paths are
 relative to the machine, so nothing in an archive depends on where macman stores files
@@ -90,10 +92,13 @@ ROMs are matched by SHA-256, so a ROM that's already registered is reused under 
 local name, and the imported machine's definition refers to that name. A ROM with a
 name in use but different contents is a conflict. It isn't renamed automatically.
 
-A ROM marked `register`, as all are with `--all`, is registered even if no machine
-that uses it is imported, by the same rules: reused, recovered, or a conflict reported
-as `conflict rom NAME`, which leaves the import unresolved. Without `register`, a ROM
-comes in only with a machine, as it always has.
+A ROM marked `register`, as all are with `--all`, is registered under its own name,
+even if no machine that uses it is imported. Like a system image, it's matched by name:
+`unchanged` if this name has these contents, `recovered` as below, `imported` if the
+name is free, even when an identical ROM is registered under another name, and
+otherwise `conflict rom NAME`, which leaves the import unresolved. Machines are decided
+first, and still reuse an identical ROM that's already here, as described above.
+Without `register`, a ROM comes in only with a machine, as it always has.
 
 If registering a ROM stopped after the ROM file but before its metadata, the next
 import finishes the job and reports `recovered rom`. It does that only for a plain file
