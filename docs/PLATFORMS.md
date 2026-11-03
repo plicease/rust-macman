@@ -127,7 +127,7 @@ what this backend is for.
 | Host | Status |
 |---|---|
 | Linux x86-64 | Candidate: **boots Mac OS 8.1, and installs and boots 9.0.4**, smoke test unfinished |
-| Windows x86-64 | No: refused |
+| Windows x86-64 | Candidate: **builds and boots Mac OS 9.0.4**, interpreted, smoke test unfinished |
 | macOS ARM64 | No: refused |
 
 On Linux x86-64 macman offers the backend, so that it can be tested. It's been built from
@@ -183,10 +183,39 @@ The ISOs were unchanged after every run. The same 9.0.4 CD also started on the O
 ROM, as did the Mac OS 8.1 CD, and the Old World ROM offered to initialize a blank disk
 too. Nothing was installed with it.
 
-Windows and macOS are refused, whatever Basilisk II does there. Upstream's Windows build
-is 32-bit, and macman's 64-bit recipe is for Basilisk II, whose memory and JIT
-arrangements differ. On macOS ARM64 there's no JIT, and upstream goes through Xcode. Either
-would need a recipe of its own, and real tests.
+### Windows x86-64
+
+On Windows x86-64 macman offers it too, with a recipe of its own in
+`src/backend/sheepshaver_windows.rs`, built like Basilisk II's with MinGW-w64 and the
+pinned SDL 2 package, and no MSYS2, Autotools, or Perl. Upstream's `configure.ac` turns the
+JIT off for 64-bit Windows, as its code generator reads only 32-bit objects, so the
+PowerPC code is interpreted. Mac memory is one reserved block (`MEM_BULK`), so nothing
+needs mapping at address 0. It's been built and run on one host, Windows 11 with
+Strawberry Perl's MinGW-w64 GCC 13.2, in about 15 seconds. These have been seen to work
+there:
+
+- A build from an empty cache under a Unicode path, and a second machine reusing it.
+- Mac OS 9.0.4 from a New World `Mac OS ROM`, which reached the Finder within 45 seconds
+  at 800x600, interpreted. Run by macman at 640x480 with 2x scale, from a disk a killed run
+  had left, it reached Disk First Aid's alert, which waits for a click. Waiting there, the
+  emulator used about one core.
+- A second run of a running machine, and a clone of it, are refused.
+- Killing the emulator is reported as an abnormal exit. Killing macman leaves the emulator
+  running with its disk held, so another run is refused until it stops.
+- A ROM the emulator refuses prints `ERROR: Invalid ROM file size.`, with exit code 0.
+
+On Windows a shared folder is refused, and disks must be under 4G, as for Basilisk II,
+whose disk and file code it shares. With Mac OS 9.0.4, Shut Down from inside the guest,
+`slirp` networking, full screen, and sound work there. Sound needs "Built-in" chosen as the
+output in the guest's Sound control panel; until it is, the alert sound only flashes the
+menu bar. `run --cdrom` and `create --disk-size` are refused there, as for Basilisk II,
+since the emulator finds CDs its own way on Windows, which hasn't been tried. Mac OS 8.x
+hasn't been tried there either.
+
+### Other hosts, and guests
+
+macOS ARM64 is refused, whatever Basilisk II does there: there's no JIT, and upstream goes
+through Xcode. It would need a recipe of its own, and real tests.
 
 | Guest | ROM | Status |
 |---|---|---|
@@ -196,6 +225,7 @@ would need a recipe of its own, and real tests.
 | Mac OS 9.0.4 | New World `Mac OS ROM` (labelled 8.6) | Installed from the CD, then boots from its own disk |
 | Mac OS 9.0.4 CD | Old World 4M dump (TNT nanokernel) | Starts from the CD. Not installed |
 | No system, a blank disk | Either of those ROMs | Stays up. New World reaches the question-mark disk |
+| Mac OS 9.0.4, on Windows | New World `Mac OS ROM` | Boots to the Finder, 64M at 800x600 |
 | Mac OS 7.5.2 to 8.0, 8.5 to 9.0 | One that suits the guest | Untested |
 | Mac OS 9.1, 9.2.x, Mac OS X | Any | Not claimed. The emulator decodes such ROMs, but macman makes no promise |
 

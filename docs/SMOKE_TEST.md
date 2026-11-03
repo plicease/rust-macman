@@ -148,10 +148,14 @@ On macOS, these replace the matching steps:
 
 ## SheepShaver
 
-Run this on Linux x86-64, the only candidate host. It has been run in part, with Mac OS
-8.1, and [PLATFORMS.md](PLATFORMS.md#sheepshaver) lists what passed and what's left. Update
-it with what you find, and expect to adjust the backend. It needs a PowerPC ROM and a system image of your own, and it uses separate
-directories, so it doesn't touch your machines.
+Run this on Linux x86-64 or Windows x86-64, the candidate hosts. It has been run in part,
+with Mac OS 8.1 and 9.0.4 on Linux and 9.0.4 on Windows, and
+[PLATFORMS.md](PLATFORMS.md#sheepshaver) lists what passed and what's left. On Windows, set
+up the directories as at the top of this file, skip the `vm.mmap_min_addr` steps, use the
+Windows steps under [Basilisk II](#basilisk-ii) for killing processes, and expect a shared
+folder, `--disk-size`, and `--cdrom` to be refused. Update it with what you find, and
+expect to adjust the backend. It needs a PowerPC ROM and a system image of your own, and it
+uses separate directories, so it doesn't touch your machines.
 
 ```sh
 root="$(mktemp -d)/smoke Zoë"

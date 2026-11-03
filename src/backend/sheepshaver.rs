@@ -31,17 +31,28 @@
 //! Linux builds take no disk locks, so it dies with macman. A Disk Copy image is
 //! written without updating its checksum. `extfs` defaults to `/`.
 //!
-//! Only Linux x86-64 is offered. Upstream's Windows build is 32-bit, and macman's
-//! 64-bit recipe is Basilisk II's, while macOS ARM64 has no JIT, and goes through
-//! Xcode upstream. Neither has been tried, so Basilisk II's success there isn't
-//! taken to mean anything here.
+//! Windows x86-64 is offered too, built by [`sheepshaver_windows`]. There:
+//!
+//! - There's no JIT, so the PowerPC code is interpreted, and `jit` is off.
+//! - Mac addresses are offsets into one block of host memory, so nothing is
+//!   mapped at address 0, and `vm.mmap_min_addr` doesn't come into it.
+//! - Disks, paths, and host files are as for Basilisk II on Windows, from the
+//!   same code: see [`macemu_windows`]. The emulator denies sharing on its
+//!   disks, so it needn't die with macman, no shared folder can be offered, and
+//!   disks must be under 4G.
+//!
+//! macOS ARM64 has no JIT, and goes through Xcode upstream. It hasn't been
+//! tried, so Basilisk II's success there isn't taken to mean anything here.
 
 use super::macemu::{
     self, Build, disk_argument, display_check, library_checks, megabytes, run_configure_build,
     supervise, tool_checks,
 };
-use super::source::{self, Source, SourcePin};
-use super::{CdImage, Check, EmulatorBackend, Executable, LaunchRequest};
+use super::source::{self, Source, SourcePin, tool_exists};
+use super::{
+    CdImage, Check, EmulatorBackend, Executable, LaunchRequest, macemu_windows,
+    sheepshaver_windows,
+};
 use crate::disk::{self, Classification, DiskFormat};
 use crate::fsutil::sha256_bytes;
 use crate::machine::{Display, Machine, Network, SheepShaverSettings};
@@ -49,7 +60,7 @@ use crate::paths::Paths;
 use crate::registry::{self, Rom};
 use anyhow::{Context, Result, anyhow, bail};
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
@@ -57,21 +68,35 @@ pub const BACKEND_NAME: &str = "sheepshaver";
 pub const DEFAULT_MEMORY: &str = "64M";
 pub const DEFAULT_DISPLAY: (u32, u32, u32) = (640, 480, 32);
 const LABEL: &str = "SheepShaver";
-const EXECUTABLE: &str = "SheepShaver";
-const BUILD_DIRECTORY: &str = "SheepShaver/src/Unix";
+const WINDOWS: bool = cfg!(all(windows, target_arch = "x86_64"));
+const EXECUTABLE: &str = if WINDOWS {
+    sheepshaver_windows::EXECUTABLE
+} else {
+    "SheepShaver"
+};
+const BUILD_DIRECTORY: &str = if WINDOWS {
+    sheepshaver_windows::BUILD_DIRECTORY
+} else {
+    "SheepShaver/src/Unix"
+};
 const PREFERENCES: &str = "prefs";
-const HOST: Option<&str> = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+const HOST: Option<&str> = if WINDOWS {
+    Some("x86_64-pc-windows-gnu")
+} else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
     Some("x86_64-unknown-linux-gnu")
 } else {
     None
 };
-const UNSUPPORTED_HOST: &str =
-    "the SheepShaver backend supports only Linux x86-64 hosts; see docs/PLATFORMS.md";
+const UNSUPPORTED_HOST: &str = "the SheepShaver backend supports only Linux x86-64 and Windows \
+                                x86-64 hosts; see docs/PLATFORMS.md";
 /// How a failed start shows that low memory couldn't be mapped
 /// (`STR_LOW_MEM_MMAP_ERR`).
 const LOW_MEMORY_ERROR: &str = "Low Memory";
 const LOW_MEMORY_FIX: &str = "run `sudo sysctl vm.mmap_min_addr=0`, which lets programs map \
                               address 0 until the next reboot; see docs/PLATFORMS.md";
+/// Where `run --cdrom` and `create --disk-size` have been tried. On Windows the
+/// emulator finds CDs its own way, which hasn't been.
+const INSTALLS_FROM_CD: bool = !WINDOWS;
 /// The reference number of the CD driver (`CDROMRefNum`).
 const CDROM_DRIVER: i32 = -62;
 const MMAP_MIN_ADDR: &str = "/proc/sys/vm/mmap_min_addr";
@@ -93,6 +118,10 @@ pub struct SheepShaver {
     pin: SourcePin,
     /// Optional local copy of the pinned archive.
     source_archive: Option<PathBuf>,
+    /// The SDL package, on Windows.
+    sdl: SourcePin,
+    /// Optional local copy of that.
+    sdl_archive: Option<PathBuf>,
 }
 
 impl SheepShaver {
@@ -101,6 +130,16 @@ impl SheepShaver {
             paths,
             pin,
             source_archive,
+            sdl: macemu_windows::sdl_pin(),
+            sdl_archive: None,
+        }
+    }
+
+    pub fn with_sdl(self, sdl: SourcePin, sdl_archive: Option<PathBuf>) -> Self {
+        Self {
+            sdl,
+            sdl_archive,
+            ..self
         }
     }
 
@@ -114,13 +153,23 @@ impl SheepShaver {
         }
     }
 
+    fn sdl_source(&self) -> Source<'_> {
+        Source {
+            paths: &self.paths,
+            pin: &self.sdl,
+            local: self.sdl_archive.as_deref(),
+            label: "SDL",
+            config_table: "sdl",
+        }
+    }
+
     fn build_key(&self, toolchain: &str) -> String {
         sha256_bytes(
             format!(
                 "{BACKEND_NAME}\n{}\n{}\n{toolchain}\n{}\n",
                 self.pin.revision,
                 self.pin.sha256,
-                macemu::CONFIGURE_OPTIONS.join(" ")
+                build_options().join(" ")
             )
             .as_bytes(),
         )
@@ -135,20 +184,42 @@ impl SheepShaver {
             revision: &self.pin.revision,
             host: HOST.context(UNSUPPORTED_HOST)?,
             toolchain,
-            options: macemu::CONFIGURE_OPTIONS,
+            options: build_options(),
             directory: BUILD_DIRECTORY,
             executable: EXECUTABLE,
         };
         build.run(key, verbose, |src, log_path| {
-            run_configure_build(
-                Command::new("bash"),
-                &archive,
-                src,
-                log_path,
-                BUILD_DIRECTORY,
-                macemu::CONFIGURE_OPTIONS,
-            )
+            if WINDOWS {
+                let sdl = self.sdl_source().fetch()?;
+                let log = File::create(log_path).context("cannot create build log")?;
+                sheepshaver_windows::build(&archive, &sdl, src, &log)
+            } else {
+                run_configure_build(
+                    Command::new("bash"),
+                    &archive,
+                    src,
+                    log_path,
+                    BUILD_DIRECTORY,
+                    macemu::CONFIGURE_OPTIONS,
+                )
+            }
         })
+    }
+
+    fn toolchain_identity(&self) -> Result<String> {
+        if WINDOWS {
+            macemu_windows::toolchain_identity(&self.sdl, sheepshaver_windows::RECIPE)
+        } else {
+            macemu::linux_toolchain_identity()
+        }
+    }
+}
+
+fn build_options() -> &'static [&'static str] {
+    if WINDOWS {
+        sheepshaver_windows::DEFINES
+    } else {
+        macemu::CONFIGURE_OPTIONS
     }
 }
 
@@ -190,8 +261,8 @@ fn settings(machine: &Machine) -> SheepShaverSettings {
 }
 
 /// The contents of the preferences file. The JIT is left on, unlike Basilisk
-/// II's: it's upstream's default here, and the interpreter is far too slow for
-/// the guests this is for.
+/// II's: it's upstream's default here, and the interpreter is slow for the
+/// guests this is for. Windows builds have only the interpreter.
 ///
 /// `extfs` is there to be empty, as for Basilisk II: upstream's default is `/`,
 /// a read-write volume of the whole host. `nocdrom` keeps the guest off the
@@ -220,11 +291,12 @@ fn preferences(machine: &Machine, cdroms: &[CdImage]) -> String {
          mag_rate {scale}\n\
          nosound {nosound}\n\
          nocdrom {nocdrom}\n\
-         jit true\n\
+         jit {jit}\n\
          idlewait true\n\
          bootdrive 0\n\
          bootdriver {bootdriver}\n\
-         extfs \n",
+         extfs \n\
+         {host}",
         name = machine.name,
         ramsize = u64::from(megabytes) * 1024 * 1024,
         width = display.width,
@@ -232,6 +304,13 @@ fn preferences(machine: &Machine, cdroms: &[CdImage]) -> String {
         scale = display.scale,
         nosound = !settings.sound,
         nocdrom = !cdrom,
+        jit = !WINDOWS,
+        // Without these, Windows would offer the host's drives and media.
+        host = if WINDOWS {
+            "enableextfs false\npollmedia false\n"
+        } else {
+            ""
+        },
     );
     if settings.network == Network::Slirp {
         text.push_str("ether slirp\n");
@@ -301,7 +380,11 @@ impl EmulatorBackend for SheepShaver {
             );
         }
         validate_memory(&machine.hardware.memory)?;
-        validate_display(&machine.display)
+        validate_display(&machine.display)?;
+        if WINDOWS && settings(machine).shared_folder.is_some() {
+            macemu_windows::refuse_shared_folder(LABEL)?;
+        }
+        Ok(())
     }
 
     /// The emulator keeps its drives in a list, with no limit to refuse.
@@ -328,6 +411,9 @@ impl EmulatorBackend for SheepShaver {
     }
 
     fn check_disk(&self, path: &Path, writable: bool) -> Result<()> {
+        if WINDOWS {
+            macemu_windows::check_disk_size(path, LABEL)?;
+        }
         if writable && disk::classify(path)? == Classification::Supported(DiskFormat::DiskCopy42) {
             bail!(
                 "{} is a Disk Copy 4.2 image, and SheepShaver would change it without updating \
@@ -343,7 +429,7 @@ impl EmulatorBackend for SheepShaver {
     }
 
     fn installs_from_cd(&self) -> bool {
-        true
+        INSTALLS_FROM_CD
     }
 
     fn mounts_partitioned_disks(&self) -> bool {
@@ -353,7 +439,7 @@ impl EmulatorBackend for SheepShaver {
     fn prepare(&self, machine: &Machine, verbose: bool) -> Result<Executable> {
         self.check_host()?;
         self.validate(machine)?;
-        let toolchain = macemu::linux_toolchain_identity()?;
+        let toolchain = self.toolchain_identity()?;
         let key = self.build_key(&toolchain);
         source::cached_or_built(&self.paths, key, LABEL, |key| {
             self.build(key, &toolchain, verbose)
@@ -370,11 +456,14 @@ impl EmulatorBackend for SheepShaver {
         fs::write(&file, preferences(request.machine, request.cdroms))
             .with_context(|| format!("cannot write {}", file.display()))?;
 
-        let cdroms = macemu::cd_paths(request.workdir, request.cdroms)?;
+        let arguments = if WINDOWS {
+            macemu_windows::arguments(request, PREFERENCES, LABEL)?
+        } else {
+            let cdroms = macemu::cd_paths(request.workdir, request.cdroms)?;
+            arguments(request, &file, &cdroms)
+        };
         let mut command = Command::new(&request.executable.path);
-        command
-            .args(arguments(request, &file, &cdroms))
-            .current_dir(request.workdir);
+        command.args(arguments).current_dir(request.workdir);
         supervise(command, LABEL, request.verbose).map_err(|error| {
             let message = error.to_string();
             if message.contains(LOW_MEMORY_ERROR) {
@@ -391,6 +480,21 @@ impl EmulatorBackend for SheepShaver {
                 "SheepShaver isn't available on this host",
                 UNSUPPORTED_HOST,
             )];
+        }
+        if WINDOWS {
+            // Mini vMac's checks already cover the rest of MinGW.
+            let mut checks = vec![if tool_exists("g++") {
+                Check::ok("g++ found, for SheepShaver")
+            } else {
+                Check::fail(
+                    "g++ not found, which SheepShaver needs",
+                    "install MinGW-w64, then open a new terminal: \
+                     winget install BrechtSanders.WinLibs.POSIX.UCRT",
+                )
+            }];
+            checks.push(self.source().check());
+            checks.push(self.sdl_source().check());
+            return checks;
         }
         let mut checks = tool_checks(TOOLS, LABEL, INSTALL);
         checks.extend(library_checks(&[("sdl2", "SDL")], LABEL, INSTALL));
@@ -448,23 +552,33 @@ mod tests {
 
     #[test]
     fn translates_a_machine_to_preferences() {
-        assert_eq!(
-            lines(&preferences(&machine(), &[])),
-            [
-                "nogui true",
-                "title beige",
-                "ramsize 134217728",
-                "screen win/800/600",
-                "mag_rate 2",
-                "nosound false",
-                "nocdrom true",
-                "jit true",
-                "idlewait true",
-                "bootdrive 0",
-                "bootdriver 0",
-                "extfs ",
-            ]
-        );
+        let mut expected = vec![
+            "nogui true",
+            "title beige",
+            "ramsize 134217728",
+            "screen win/800/600",
+            "mag_rate 2",
+            "nosound false",
+            "nocdrom true",
+            if WINDOWS { "jit false" } else { "jit true" },
+            "idlewait true",
+            "bootdrive 0",
+            "bootdriver 0",
+            "extfs ",
+        ];
+        if WINDOWS {
+            expected.extend(["enableextfs false", "pollmedia false"]);
+        }
+        assert_eq!(lines(&preferences(&machine(), &[])), expected);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_shared_folder_is_refused_where_only_whole_drives_can_be_shared() {
+        let mut m = machine();
+        m.sheepshaver.as_mut().unwrap().shared_folder = Some("C:\\shared".into());
+        let error = backend().validate(&m).unwrap_err().to_string();
+        assert!(error.contains("whole drives"), "{error}");
     }
 
     /// An unknown keyword would only be a warning in the emulator's output.

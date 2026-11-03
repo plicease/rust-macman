@@ -221,17 +221,25 @@ Mac OS X, or G4 and G5 machines.
 
 **This backend is a preview.** On Linux x86-64 it has booted Mac OS 8.1 on an Old World ROM,
 and installed and booted Mac OS 9.0.4 on a New World ROM, and `slirp` networking, a shared
-folder, read-only disks, and sound on a real device work. Treat it as a preview until
+folder, read-only disks, and sound on a real device work. On Windows x86-64 it has booted
+Mac OS 9.0.4, with `slirp`, full screen, and sound working. Treat it as a preview until
 [the smoke test](docs/SMOKE_TEST.md#sheepshaver) has passed; see
 [docs/PLATFORMS.md](docs/PLATFORMS.md#sheepshaver).
 
-It's offered only on Linux x86-64, and compiles with the same packages as Basilisk II:
+It's offered on Linux x86-64 and Windows x86-64. On Linux it compiles with the same
+packages as Basilisk II:
 
 ```sh
 apt install build-essential autoconf automake pkg-config libsdl2-dev
 ```
 
-It builds to upstream's defaults, where Mac addresses are host addresses, so it needs to
+On Windows it needs what Basilisk II does there, and builds without a JIT, so it's slower.
+A shared folder and installing from a CD aren't available, disks must be under 4G, and if
+macman is killed the emulator keeps running, with Windows keeping others off its disks. For
+sound, choose "Built-in" as the output in the guest's Sound control panel; see
+[docs/PLATFORMS.md](docs/PLATFORMS.md#sheepshaver).
+
+On Linux it builds to upstream's defaults, where Mac addresses are host addresses, so it needs to
 map memory at address 0, which most distributions forbid. `macman doctor` says when that
 applies. Allowing it weakens a protection against kernel bugs, for every program, until
 the next reboot:
@@ -268,13 +276,13 @@ panel. A window bigger than the desktop is cut down to it.
 `macman run --disk` attaches CD images and partitioned disks, as for Basilisk II. An HFS+
 volume needs its HFS wrapper, which disks formatted by Mac OS have. `--readonly`, locks,
 `doctor`, `list --builds`, and `export` work as they do there, Disk Copy images need
-`--readonly`, the shared folder stays out of exports, and NVRAM lasts one run. If macman
-is killed, it takes the emulator with it.
+`--readonly`, the shared folder stays out of exports, and NVRAM lasts one run. On Linux,
+if macman is killed, it takes the emulator with it.
 
 ## Installing from a CD
 
-A SheepShaver machine, or a Basilisk II one on Linux, can start with a blank disk instead
-of a system image, and install from a CD image of your own:
+On Linux, a SheepShaver or Basilisk II machine can start with a blank disk instead of a
+system image, and install from a CD image of your own:
 
 ```sh
 macman create ss904 --backend sheepshaver --rom newworld --disk-size 1G --memory 256M
@@ -284,8 +292,8 @@ macman create q81 --backend basilisk2 --rom quadra --disk-size 1G --memory 128M
 macman run q81 --cdrom MacOS8_1.iso
 ```
 
-Basilisk II on Windows and macOS refuses both options for now, as its builds there find
-CDs in other ways, which haven't been tried. `macman run --disk` still attaches a CD image
+Both emulators on Windows, and Basilisk II on macOS, refuse both options for now, as their
+builds there find CDs in other ways, which haven't been tried. `macman run --disk` still attaches a CD image
 there, as a disk.
 
 `--disk-size` takes K, M, or G, from 1M to 2048G, and makes a sparse file of zeros. It

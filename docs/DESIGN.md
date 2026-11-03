@@ -240,9 +240,16 @@ Read from the pinned macemu source, tested with a stand-in for the emulator, and
 - **Limits:** 16M to 1024M of RAM, and at least 640x480. Depth must be 32, as it starts at the desktop's depth, and has no setting.
 - **Addressing:** upstream's default, real addressing, which needs `vm.mmap_min_addr` to be 0. `doctor` and failed starts say so, and the requirement has been confirmed on a real run.
 - **JIT:** on, unlike Basilisk II, as the interpreter is too slow for its guests.
-- **Hosts:** only Linux x86-64 is offered. Basilisk II's other hosts don't carry over.
-- **Installing:** `create --disk-size` makes a sparse, unformatted boot disk in place of a system image's copy. `run --cdrom` passes images with `--cdrom`, not as disks, and turns `nocdrom` off and sets `bootdriver` to the CD driver's -62 for that run, so the Mac starts from the CD. The emulator opens them read-only, so they're locked shared and not copied. Turning `nocdrom` off also makes the emulator add `/dev/cdrom`. A blank or partitioned boot disk is fine for this backend, as the guest formats its own.
+- **Hosts:** Linux x86-64 and Windows x86-64. macOS, where Basilisk II runs, doesn't carry over.
+- **Installing:** on Linux only, as on Windows the emulator finds CDs its own way, which hasn't been tried. `create --disk-size` makes a sparse, unformatted boot disk in place of a system image's copy. `run --cdrom` passes images with `--cdrom`, not as disks, and turns `nocdrom` off and sets `bootdriver` to the CD driver's -62 for that run, so the Mac starts from the CD. The emulator opens them read-only, so they're locked shared and not copied. Turning `nocdrom` off also makes the emulator add `/dev/cdrom`. A blank or partitioned boot disk is fine for this backend, as the guest formats its own.
 - **ISO 9660 discs:** the emulator reads a CD image's table of contents with a drive `ioctl`, which fails on a file and leaves the guest seeing one audio track. HFS is found by reading blocks, so HFS discs are passed as they are. An image with only ISO 9660 is linked into the session beside a cue sheet of one `MODE1/2048` track, which the emulator reads with `--with-bincue`, so ISO 9660 File Access sees a data disc. Both emulators share this.
+
+On Windows, `src/backend/sheepshaver_windows.rs` builds it as Basilisk II is built there, with these differences:
+
+- **Build:** the tree has no `config.h`, so macman writes all of it. `MEM_BULK` keeps Mac memory in one reserved block, so there's no need for address 0. There's no JIT, as `configure.ac` turns it off on x86-64.
+- **Links:** much of the tree is symbolic links into Basilisk II's. macman unpacks the archive itself and copies what each link names, as Windows won't make links without privileges.
+- **Generated code:** `genexec.pl` lists the instruction handlers to instantiate. macman does the same in Rust, so Perl isn't needed, and refuses a decoder with templates, which the script would expand.
+- **Launch:** preferences, ROM, disks, and limits are as for Basilisk II on Windows, from shared code in `src/backend/macemu_windows.rs`.
 
 ### Shared code
 

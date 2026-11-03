@@ -49,11 +49,11 @@ use super::macemu::{
     self, Build, disk_argument, display_check, first_line, library_checks, megabytes,
     run_configure_build, supervise, tool_checks,
 };
-use super::minivmac::{gcc_target, is_mingw_x64, macos_toolchain_identity};
+use super::minivmac::macos_toolchain_identity;
 use super::source::{self, Source, SourcePin, tool_exists};
 use super::{CdImage, Check, EmulatorBackend, Executable, LaunchRequest, macemu_windows};
 use crate::disk::{self, Classification, DiskFormat};
-use crate::fsutil::{atomic_copy, sha256_bytes, without_verbatim_prefix};
+use crate::fsutil::sha256_bytes;
 use crate::machine::{Basilisk2Settings, Cpu, Display, Machine, Network};
 use crate::paths::Paths;
 use crate::registry::{self, Rom};
@@ -85,11 +85,6 @@ const BUILD_DIRECTORY: &str = if WINDOWS {
     "BasiliskII/src/Unix"
 };
 const PREFERENCES: &str = "prefs";
-/// The session's copy of the ROM, on Windows.
-const ROM_COPY: &str = "rom";
-/// Windows reads a disk's size as 32 bits (`Sys_open`).
-const WINDOWS_MAX_DISK: u64 = 1 << 32;
-const WINDOWS_MAX_PATH: usize = 260;
 /// `modelid` is the Gestalt ID less 6. Mac OS 8 needs a 68040 model, and the
 /// Quadra 900 is upstream's; older systems expect the IIci that's its default.
 const MODEL_ID_IICI: u32 = 5;
@@ -249,17 +244,7 @@ fn toolchain_identity(sdl_pin: &SourcePin) -> Result<String> {
         ));
     }
     if WINDOWS {
-        let hint = "install a C++ compiler (run `macman doctor`)";
-        let compiler = first_line("g++", &["--version"]).context(hint)?;
-        let target = gcc_target()?;
-        if !is_mingw_x64(&target) {
-            bail!("gcc targets {target}, not 64-bit Windows; run `macman doctor`");
-        }
-        let recipe = macemu_windows::RECIPE;
-        return Ok(format!(
-            "{target} {compiler} SDL {} {recipe}",
-            sdl_pin.sha256
-        ));
+        return macemu_windows::toolchain_identity(sdl_pin, macemu_windows::RECIPE);
     }
     macemu::linux_toolchain_identity()
 }
@@ -407,41 +392,6 @@ fn arguments(request: &LaunchRequest<'_>, preferences: &Path, cdroms: &[PathBuf]
     arguments
 }
 
-/// What Basilisk II can open on Windows, or why it can't. A session's own disk
-/// goes by its name there, which keeps it short.
-fn windows_disk_path(disk: &Path, workdir: &Path) -> Result<PathBuf> {
-    let path = match disk.strip_prefix(workdir) {
-        Ok(name) => name.to_path_buf(),
-        Err(_) => without_verbatim_prefix(disk),
-    };
-    // Bytes, in UTF-8, not characters: that's what its buffers hold.
-    if path.to_string_lossy().len() >= WINDOWS_MAX_PATH {
-        bail!(
-            "{} is too long for Basilisk II, which handles paths under {WINDOWS_MAX_PATH} bytes; \
-             move it to a shorter path",
-            disk.display()
-        );
-    }
-    Ok(path)
-}
-
-/// The arguments on Windows: see the module comment for why they're different.
-fn windows_arguments(request: &LaunchRequest<'_>) -> Result<Vec<OsString>> {
-    atomic_copy(request.rom, &request.workdir.join(ROM_COPY))?;
-    let mut arguments: Vec<OsString> = vec![
-        "--config".into(),
-        PREFERENCES.into(),
-        "--rom".into(),
-        ROM_COPY.into(),
-    ];
-    for disk in request.disks {
-        let mut value = OsString::from(if disk.writable { "" } else { "*" });
-        value.push(windows_disk_path(&disk.path, request.workdir)?);
-        arguments.extend(["--disk".into(), value]);
-    }
-    Ok(arguments)
-}
-
 /// Refuse a disk that an emulator holds, which macman's own locks can't show
 /// once the macman that started it has gone. A file system without locks can't
 /// be held, and the emulator goes on without them there too.
@@ -492,10 +442,7 @@ impl EmulatorBackend for Basilisk2 {
             bail!("a 68040 always has an FPU; pick --cpu 68030 to leave it out");
         }
         if WINDOWS && settings.shared_folder.is_some() {
-            bail!(
-                "shared folders aren't available with Basilisk II on Windows, where it can only \
-                 show the guest whole drives"
-            );
+            macemu_windows::refuse_shared_folder(LABEL)?;
         }
         Ok(())
     }
@@ -525,11 +472,8 @@ impl EmulatorBackend for Basilisk2 {
     }
 
     fn check_disk(&self, path: &Path, writable: bool) -> Result<()> {
-        if WINDOWS && fs::metadata(path)?.len() >= WINDOWS_MAX_DISK {
-            bail!(
-                "{} is too big for Basilisk II on Windows, which handles disks under 4G",
-                path.display()
-            );
+        if WINDOWS {
+            macemu_windows::check_disk_size(path, LABEL)?;
         }
         if writable && disk::classify(path)? == Classification::Supported(DiskFormat::DiskCopy42) {
             bail!(
@@ -579,7 +523,7 @@ impl EmulatorBackend for Basilisk2 {
             .with_context(|| format!("cannot write {}", file.display()))?;
 
         let arguments = if WINDOWS {
-            windows_arguments(request)?
+            macemu_windows::arguments(request, PREFERENCES, LABEL)?
         } else {
             let cdroms = macemu::cd_paths(request.workdir, request.cdroms)?;
             arguments(request, &file, &cdroms)
@@ -889,52 +833,12 @@ mod tests {
     }
 
     #[test]
-    fn a_windows_session_disk_goes_by_its_ascii_name() {
-        let session = Path::new("session");
-        assert_eq!(
-            windows_disk_path(&session.join("1-app.dsk"), session).unwrap(),
-            Path::new("1-app.dsk")
-        );
-    }
-
-    /// Longer ones would be cut short and open the wrong file, or none. This
-    /// counts bytes, so 90 characters of Japanese are just over the limit.
-    #[test]
-    fn a_windows_path_must_fit_the_emulator_s_buffers_in_bytes() {
-        let session = Path::new("session");
-        let fits = PathBuf::from(format!("{}.dsk", "x".repeat(WINDOWS_MAX_PATH - 5)));
-        assert_eq!(windows_disk_path(&fits, session).unwrap(), fits);
-        for name in [
-            format!("{}.dsk", "x".repeat(WINDOWS_MAX_PATH - 4)),
-            format!("{}.dsk", "日".repeat(WINDOWS_MAX_PATH / 3)),
-        ] {
-            let error = windows_disk_path(Path::new(&name), session)
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("too long"), "{error}");
-        }
-    }
-
-    #[test]
     #[cfg(windows)]
     fn a_shared_folder_is_refused_where_only_whole_drives_can_be_shared() {
         let mut m = machine();
         m.basilisk2.as_mut().unwrap().shared_folder = Some("C:\\shared".into());
         let error = backend().validate(&m).unwrap_err().to_string();
         assert!(error.contains("whole drives"), "{error}");
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn windows_refuses_a_disk_whose_size_it_would_misread() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("big.dsk");
-        File::create(&path)
-            .unwrap()
-            .set_len(WINDOWS_MAX_DISK)
-            .unwrap();
-        let error = backend().check_disk(&path, true).unwrap_err().to_string();
-        assert!(error.contains("under 4G"), "{error}");
     }
 
     #[test]

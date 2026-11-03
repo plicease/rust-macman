@@ -36,12 +36,15 @@ pub fn default_backends(paths: &Paths) -> Result<Backends> {
                 macemu::pin(),
                 config.basilisk2.source_archive,
             )
+            .with_sdl(macemu_windows::sdl_pin(), config.sdl.source_archive.clone()),
+        ),
+        Box::new(
+            SheepShaver::new(
+                paths.clone(),
+                macemu::pin(),
+                config.sheepshaver.source_archive,
+            )
             .with_sdl(macemu_windows::sdl_pin(), config.sdl.source_archive),
         ),
-        Box::new(SheepShaver::new(
-            paths.clone(),
-            macemu::pin(),
-            config.sheepshaver.source_archive,
-        )),
     ]))
 }

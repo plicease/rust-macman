@@ -5,6 +5,7 @@ pub mod macemu;
 pub mod macemu_windows;
 pub mod minivmac;
 pub mod sheepshaver;
+pub mod sheepshaver_windows;
 pub mod source;
 
 use crate::disk::CdVolume;
