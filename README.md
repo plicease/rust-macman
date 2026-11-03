@@ -70,7 +70,8 @@ change. Without it, the emulator writes to the file itself.
 
 Other commands: `list [--builds]`, `current`, `rom list`, `system list`, `system remove`,
 `config show`, `clone`, `export`, `import`, `remove`, and `doctor`. Add `--verbose` for build and launch
-logs.
+logs. Add `--json` to `list`, `doctor`, `rom list`, `system list`, `disk info`, `config show`, or
+`current` for output that scripts can read; [docs/JSON.md](docs/JSON.md) has the fields.
 
 On Linux and macOS, files live under the XDG directories: `~/.config/macman`,
 `~/.local/share/macman`, and `~/.cache/macman`. macman doesn't use `~/Library`. On Windows, configuration is in

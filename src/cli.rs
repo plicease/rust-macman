@@ -15,6 +15,10 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
+    /// Print the result as JSON, for commands that report data (see docs/JSON.md)
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
