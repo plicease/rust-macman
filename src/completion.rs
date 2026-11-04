@@ -24,7 +24,7 @@ pub fn script(shell: Shell) -> Vec<u8> {
     match shell {
         Shell::Zsh => zsh(&generated),
         Shell::Bash => bash(&generated, &command, &args),
-        Shell::Fish => fish(&generated, &args),
+        Shell::Fish => fish(&generated, &command, &args),
         _ => generated,
     }
     .into_bytes()
@@ -145,11 +145,7 @@ fn bash(generated: &str, command: &clap::Command, args: &[NameArg]) -> String {
         .filter(|sub| sub.has_subcommands())
         .map(|sub| sub.get_name())
         .collect();
-    // Options anywhere that take their value as the next word.
-    let mut takes_value = Vec::new();
-    collect_value_options(command, &mut takes_value);
-    takes_value.sort();
-    takes_value.dedup();
+    let takes_value = value_options(command);
 
     let mut options = String::new();
     let mut positionals = String::new();
@@ -242,6 +238,15 @@ if [[ "${{BASH_VERSINFO[0]}}" -eq 4"#,
     )
 }
 
+/// Options anywhere in `command` that take their value as the next word.
+fn value_options(command: &clap::Command) -> Vec<String> {
+    let mut found = Vec::new();
+    collect_value_options(command, &mut found);
+    found.sort();
+    found.dedup();
+    found
+}
+
 fn collect_value_options(command: &clap::Command, found: &mut Vec<String>) {
     for arg in command.get_opts() {
         if arg.get_action().takes_values() {
@@ -271,12 +276,55 @@ const FISH_CONFIG_SET_WORDS: &str = r#"function __fish_macman_config_set_words
 end
 "#;
 
+/// Whether the word being completed is positional argument INDEX, counting
+/// from 0, of the subcommand DEPTH words deep, or any after it with a third
+/// argument, `+`. As bash's wrapper does, it skips options, and the values of
+/// those that take the next word, and is false where the word is such a value.
+fn fish_at_positional(value_options: &[String]) -> String {
+    format!(
+        r#"function __fish_macman_at_positional
+    set -l depth $argv[1]
+    set -l index $argv[2]
+    set -l path 0
+    set -l positional 0
+    set -l value_next 0
+    for word in (commandline -opc)[2..-1]
+        if test $value_next = 1
+            set value_next 0
+            continue
+        end
+        switch $word
+            case {values}
+                set value_next 1
+            case '-*'
+            case '*'
+                if test $path -lt $depth
+                    set path (math $path + 1)
+                else
+                    set positional (math $positional + 1)
+                end
+        end
+    end
+    test $value_next = 0; or return 1
+    if test "$argv[3]" = +
+        test $positional -ge $index
+    else
+        test $positional -eq $index
+    end
+end
+"#,
+        values = value_options.join(" "),
+    )
+}
+
 /// Fish's generated script has no marks to replace, so this adds completions
-/// for each name argument. A positional one is offered at every position.
-fn fish(generated: &str, args: &[NameArg]) -> String {
+/// for each name argument. A positional one is offered only at its own
+/// position, worked out as bash's wrapper does.
+fn fish(generated: &str, command: &clap::Command, args: &[NameArg]) -> String {
     let mut script = generated.to_string();
     script += "\n# Machine, ROM, and system names, which only macman knows.\n";
     script += FISH_CONFIG_SET_WORDS;
+    script += &fish_at_positional(&value_options(command));
     for arg in args {
         let condition = match arg.path.as_slice() {
             [command] => format!("__fish_macman_using_subcommand {command}"),
@@ -298,8 +346,12 @@ fn fish(generated: &str, args: &[NameArg]) -> String {
             Place::Option { long } => {
                 format!("complete -c macman -n \"{condition}\" -l {long} -r -f -a \"{names}\"\n")
             }
-            Place::Positional { .. } => {
-                format!("complete -c macman -n \"{condition}\" -f -a \"{names}\"\n")
+            Place::Positional { index, repeats } => {
+                let depth = arg.path.len();
+                let more = if *repeats { " +" } else { "" };
+                format!(
+                    "complete -c macman -n \"{condition}; and __fish_macman_at_positional {depth} {index}{more}\" -f -a \"{names}\"\n"
+                )
             }
         };
     }

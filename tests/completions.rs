@@ -400,26 +400,104 @@ fn zsh_completes_names() {
 fn fish_completes_names() {
     let text = script("fish");
     for expected in [
-        r#"complete -c macman -n "__fish_macman_using_subcommand use" -f -a "(macman __complete-names machines)""#,
+        r#"complete -c macman -n "__fish_macman_using_subcommand use; and __fish_macman_at_positional 1 0" -f -a "(macman __complete-names machines)""#,
         r#"complete -c macman -n "__fish_macman_using_subcommand create" -l rom -r -f -a "(macman __complete-names roms)""#,
-        r#"complete -c macman -n "__fish_macman_using_subcommand system; and __fish_seen_subcommand_from remove" -f -a "(macman __complete-names systems)""#,
-        r#"complete -c macman -n "__fish_macman_using_subcommand media; and __fish_seen_subcommand_from info" -f -a "(macman __complete-names media)""#,
+        r#"complete -c macman -n "__fish_macman_using_subcommand system; and __fish_seen_subcommand_from remove; and __fish_macman_at_positional 2 0" -f -a "(macman __complete-names systems)""#,
+        r#"complete -c macman -n "__fish_macman_using_subcommand media; and __fish_seen_subcommand_from info; and __fish_macman_at_positional 2 0" -f -a "(macman __complete-names media)""#,
         r#"complete -c macman -n "__fish_macman_using_subcommand run" -l media -r -f -a "(macman __complete-names media)""#,
         r#"complete -c macman -n "__fish_macman_using_subcommand export" -l rom -r -f -a "(macman __complete-names roms)""#,
     ] {
         assert!(text.contains(expected), "fish lacks {expected}");
     }
-    if have("fish") {
-        let root = registered();
-        let file = root.path().join("macman.fish");
-        std::fs::write(&file, &text).unwrap();
-        let check = r#"source $argv[1]; complete -C "macman use ""#;
-        let output = in_shell(root.path(), "fish", &[], check, &[&file]);
-        assert!(
-            output.contains("alpha") && output.contains("beta"),
-            "{output}"
-        );
+    // A positional name is offered only at its own position.
+    for expected in [
+        r#"complete -c macman -n "__fish_macman_using_subcommand clone; and __fish_macman_at_positional 1 0" -f -a "(macman __complete-names machines)""#,
+        r#"complete -c macman -n "__fish_macman_using_subcommand export; and __fish_macman_at_positional 1 0 +" -f -a "(macman __complete-names machines)""#,
+        r#"complete -c macman -n "__fish_macman_using_subcommand config; and __fish_seen_subcommand_from set; and __fish_macman_at_positional 2 0 +" -f -a "(macman __complete-names config-set (__fish_macman_config_set_words))""#,
+    ] {
+        assert!(text.contains(expected), "fish lacks {expected}");
     }
+    for line in text
+        .lines()
+        .filter(|line| line.contains("__complete-names"))
+    {
+        if line.starts_with("complete ") && !line.contains(" -l ") {
+            assert!(line.contains("__fish_macman_at_positional"), "{line}");
+        }
+    }
+    if !have("fish") {
+        eprintln!("skipping: fish isn't installed");
+        return;
+    }
+    let root = registered();
+    let file = root.path().join("macman.fish");
+    std::fs::write(&file, &text).unwrap();
+    // Complete each command line, run from an empty directory so no file is
+    // offered, keeping only the registered names among what's offered.
+    let check = r#"
+        source $argv[-1]
+        cd (mktemp -d)
+        function complete_line
+            set -l names (complete -C $argv[1] | string replace -r '\t.*' '' | string match -r '^(?:alpha|beta|plus-v3|sys-608|disk-1)$')
+            echo "$argv[1]-> $names"
+        end
+        complete_line "macman use "
+        complete_line "macman run a"
+        complete_line "macman -v run --disk extra.img "
+        complete_line "macman run --disk "
+        complete_line "macman run alpha "
+        complete_line "macman clone "
+        complete_line "macman clone alpha "
+        complete_line "macman export "
+        complete_line "macman export alpha "
+        complete_line "macman export alpha beta "
+        complete_line "macman export --rom plus-v3 alpha "
+        complete_line "macman config show "
+        complete_line "macman checkpoint delete "
+        complete_line "macman checkpoint delete alpha "
+        complete_line "macman remove "
+        complete_line "macman system remove "
+        complete_line "macman create "
+        complete_line "macman create new --rom "
+        complete_line "macman create new --system s"
+        complete_line "macman use --"
+        complete_line "macman media info "
+        complete_line "macman media add d"
+        complete_line "macman media add x.img --name d"
+        complete_line "macman run alpha --media "
+        complete_line "macman export --all-machines --rom p"
+        complete_line "macman config set "
+    "#;
+    let output = in_shell(root.path(), "fish", &["--no-config"], check, &[&file]);
+    let expected = "\
+macman use -> alpha beta
+macman run a-> alpha
+macman -v run --disk extra.img -> alpha beta
+macman run --disk -> 
+macman run alpha -> 
+macman clone -> alpha beta
+macman clone alpha -> 
+macman export -> alpha beta
+macman export alpha -> alpha beta
+macman export alpha beta -> alpha beta
+macman export --rom plus-v3 alpha -> alpha beta
+macman config show -> alpha beta
+macman checkpoint delete -> alpha beta
+macman checkpoint delete alpha -> 
+macman remove -> alpha beta
+macman system remove -> sys-608
+macman create -> 
+macman create new --rom -> plus-v3
+macman create new --system s-> sys-608
+macman use ---> 
+macman media info -> disk-1
+macman media add d-> 
+macman media add x.img --name d-> 
+macman run alpha --media -> disk-1
+macman export --all-machines --rom p-> plus-v3
+macman config set -> alpha beta
+";
+    assert_eq!(output, expected);
 }
 
 #[test]
@@ -480,7 +558,7 @@ fn every_shell_completes_config_set_by_position() {
     );
     let fish = script("fish");
     assert!(
-        fish.contains(r#"complete -c macman -n "__fish_macman_using_subcommand config; and __fish_seen_subcommand_from set" -f -a "(macman __complete-names config-set (__fish_macman_config_set_words))""#),
+        fish.contains(r#"complete -c macman -n "__fish_macman_using_subcommand config; and __fish_seen_subcommand_from set; and __fish_macman_at_positional 2 0 +" -f -a "(macman __complete-names config-set (__fish_macman_config_set_words))""#),
         "fish"
     );
     assert!(
@@ -558,23 +636,24 @@ macman config set ephemeral true --machine alpha display.d-> display.depth
     if have("fish") {
         let file = root.path().join("macman.fish");
         std::fs::write(&file, &fish).unwrap();
-        let check = r#"source $argv[1]
+        let check = r#"source $argv[-1]
             complete -C "macman config set alpha display.depth "
-            echo --
+            echo ==
             complete -C "macman config set alpha "
-            echo --
+            echo ==
             complete -C "macman -v config set alpha ephemeral "
-            echo --
+            echo ==
             complete -C "macman config set --machine alpha display.depth ""#;
         let output = in_shell(root.path(), "fish", &[], check, &[&file]);
-        let parts: Vec<_> = output.split("--\n").collect();
+        let parts: Vec<_> = output.split("==\n").collect();
         assert_eq!(parts[0].trim(), "1", "{output}");
         assert!(
             parts[1].contains("hardware.memory") && !parts[1].contains("alpha"),
             "{output}"
         );
+        // Fish sorts what it offers.
         let values: Vec<_> = parts[2].lines().collect();
-        assert_eq!(values, ["true", "false"], "{output}");
+        assert_eq!(values, ["false", "true"], "{output}");
         assert_eq!(parts[3].trim(), "1", "{output}");
     }
 }
@@ -588,11 +667,11 @@ fn aliases_complete_as_machines_and_alone_for_unalias() {
     assert!(zsh.contains(":alias:_macman_names aliases'"), "zsh unalias");
     let fish = script("fish");
     assert!(
-        fish.contains(r#"complete -c macman -n "__fish_macman_using_subcommand unalias" -f -a "(macman __complete-names aliases)""#),
+        fish.contains(r#"complete -c macman -n "__fish_macman_using_subcommand unalias; and __fish_macman_at_positional 1 0" -f -a "(macman __complete-names aliases)""#),
         "fish unalias"
     );
     assert!(
-        fish.contains(r#"complete -c macman -n "__fish_macman_using_subcommand alias" -f -a "(macman __complete-names machines)""#),
+        fish.contains(r#"complete -c macman -n "__fish_macman_using_subcommand alias; and __fish_macman_at_positional 1 0" -f -a "(macman __complete-names machines)""#),
         "fish alias"
     );
 
