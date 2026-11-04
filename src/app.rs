@@ -450,6 +450,7 @@ impl App {
             | Command::Media(_)
             | Command::Disk(_)
             | Command::Create(_)
+            | Command::Wizard { .. }
             | Command::Current
             | Command::Unalias { .. }
             | Command::Import { .. }

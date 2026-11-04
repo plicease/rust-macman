@@ -480,6 +480,7 @@ impl<'a> Wizard<'a> {
         if self.app.paths.machine(name).exists() {
             anyhow::bail!("machine {name:?} already exists; pick another name");
         }
+        crate::aliases::check_new_name(&self.app.paths, name)?;
         self.name = name.to_string();
         self.name_typed = true;
         Ok(())
@@ -713,7 +714,9 @@ impl<'a> Wizard<'a> {
         };
         let mut candidate = name.clone();
         let mut number = 2;
-        while self.app.paths.machine(&candidate).exists() {
+        while self.app.paths.machine(&candidate).exists()
+            || crate::aliases::check_new_name(&self.app.paths, &candidate).is_err()
+        {
             candidate = format!("{name}-{number}");
             number += 1;
         }
@@ -1718,6 +1721,25 @@ mod tests {
         let created = wizard.created.clone().unwrap();
         assert_eq!(created.registered.as_deref(), Some("os9-cd"));
         assert_eq!(created.install, Some(Install::Media("os9-cd".into())));
+    }
+
+    #[test]
+    fn names_taken_by_aliases_are_neither_suggested_nor_accepted() {
+        let root = tempfile::tempdir().unwrap();
+        let app = app(root.path());
+        add_rom(&app.paths, "quadra", clean_rom);
+        add_rom(&app.paths, "tnt", powerpc_rom);
+        let image = hfs_image(root.path(), "hd.img", "Mac OS 8.1 HD", 4 << 20, true);
+        let mut wizard = Wizard::new(&app, Some(&image), None);
+        press(&mut wizard, "nnnnn");
+        press(&mut wizard, "c");
+        assert_eq!(wizard.step, Step::Done, "{:?}", wizard.message);
+        crate::aliases::add(&app.paths, "mac-os-8.1", "mac-os-8.1-2").unwrap();
+
+        let mut wizard = Wizard::new(&app, Some(&image), None);
+        press(&mut wizard, "nnn");
+        assert_eq!(wizard.name, "mac-os-8.1-3");
+        assert!(wizard.set_name("mac-os-8.1-2").is_err());
     }
 
     #[test]
