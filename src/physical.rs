@@ -440,7 +440,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing.dsk");
         let error = unique_physical([missing.as_path()]).unwrap_err();
-        assert!(error.contains("missing.dsk"), "{error}");
+        // Elsewhere nothing is mapped yet, so the reason is the platform.
+        if cfg!(target_os = "linux") {
+            assert!(error.contains("missing.dsk"), "{error}");
+        } else {
+            assert!(error.contains("isn't implemented"), "{error}");
+        }
         assert_eq!(unique_physical([]), Ok(0));
     }
 }
