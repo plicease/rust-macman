@@ -27,6 +27,7 @@ use backend::basilisk2::Basilisk2;
 use backend::macemu;
 use backend::macemu_windows;
 use backend::minivmac::{MiniVmac, SourcePin};
+use backend::qemu::Qemu;
 use backend::sheepshaver::SheepShaver;
 use machine::Config;
 use paths::Paths;
@@ -56,5 +57,6 @@ pub fn default_backends(paths: &Paths) -> Result<Backends> {
             )
             .with_sdl(macemu_windows::sdl_pin(), config.sdl.source_archive),
         ),
+        Box::new(Qemu::new(config.qemu_ppc.executable)),
     ]))
 }

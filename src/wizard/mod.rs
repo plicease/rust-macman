@@ -15,13 +15,13 @@ use crate::app::{App, BootSource, Prepared};
 use crate::cli::CreateArgs;
 use crate::edit::Editor;
 use crate::fsutil::{parse_disk_size, validate_name};
+use crate::machine::QemuMachine;
 use crate::media::{self, Media};
-use crate::model::Model;
 use crate::registry;
 use crate::tui::{self, Leave};
 use inspect::{Observation, OsGuess};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use rules::{Candidate, Install, Route, Situation, Start, Strategy};
+use rules::{Candidate, Install, Route, Situation, Start, Strategy, Variant};
 use std::path::{Path, PathBuf};
 
 /// Where new blank disks start, unless the user picks another size.
@@ -123,7 +123,7 @@ pub struct Wizard<'a> {
     candidates: Option<Vec<Candidate>>,
     pub routes: Vec<Route>,
     /// The chosen backend and model.
-    pub route: Option<(String, Option<Model>)>,
+    pub route: Option<(String, Option<Variant>)>,
     pub strategies: Vec<(Strategy, Option<String>)>,
     pub strategy: Option<Strategy>,
     pub disk_size: String,
@@ -420,7 +420,7 @@ impl<'a> Wizard<'a> {
                         self.tell(text, true);
                     }
                     _ => {
-                        self.route = Some((route.backend.clone(), route.model));
+                        self.route = Some((route.backend.clone(), route.variant));
                         self.message = None;
                     }
                 }
@@ -515,7 +515,7 @@ impl<'a> Wizard<'a> {
             Step::Backend => self
                 .routes
                 .iter()
-                .position(|r| Some((r.backend.clone(), r.model)) == self.route)
+                .position(|r| Some((r.backend.clone(), r.variant)) == self.route)
                 .unwrap_or(0),
             Step::Disk => self
                 .strategies
@@ -619,7 +619,7 @@ impl<'a> Wizard<'a> {
         let (backend, model) = self.route.as_ref()?;
         self.routes
             .iter()
-            .find(|r| &r.backend == backend && r.model == *model)
+            .find(|r| &r.backend == backend && r.variant == *model)
     }
 
     /// Rank the emulators again, keeping the user's pick if it still works.
@@ -640,8 +640,9 @@ impl<'a> Wizard<'a> {
                 .routes
                 .iter()
                 .find(|r| r.recommended)
-                .or_else(|| self.routes.iter().find(|r| r.usable()))
-                .map(|r| (r.backend.clone(), r.model));
+                // One that may well not work is offered, but not picked.
+                .or_else(|| self.routes.iter().find(|r| r.fit == rules::Fit::Good))
+                .map(|r| (r.backend.clone(), r.variant));
         }
     }
 
@@ -732,10 +733,15 @@ impl<'a> Wizard<'a> {
             .strategy
             .clone()
             .ok_or_else(|| anyhow::anyhow!("no boot disk is chosen"))?;
-        let rom = route
-            .rom
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("no registered ROM fits {}", route.label()))?;
+        let uses_rom = self
+            .app
+            .backends
+            .get(&route.backend)
+            .is_ok_and(|backend| backend.uses_rom());
+        let rom = match route.rom.clone() {
+            None if uses_rom => anyhow::bail!("no registered ROM fits {}", route.label()),
+            rom => rom,
+        };
         let (system, disk_size, image) = match strategy {
             Strategy::CopyImage => (None, None, self.image_path()),
             Strategy::Registered(name) => (Some(name), None, None),
@@ -744,13 +750,13 @@ impl<'a> Wizard<'a> {
         let args = CreateArgs {
             name: self.name.clone(),
             backend: Some(route.backend.clone()),
-            model: route.model.map(|m| m.to_string()),
+            model: route.variant.map(Variant::argument),
             rom,
             system,
             disk_size,
             memory: None,
             display: None,
-            scale: 2,
+            scale: None,
             fullscreen: false,
             cpu: None,
             no_fpu: false,
@@ -786,7 +792,9 @@ impl<'a> Wizard<'a> {
         if let Some(old) = &self.settings {
             let old = &old.editor().draft;
             let same = old.emulator.backend == prepared.machine.emulator.backend
-                && old.hardware.model == prepared.machine.hardware.model;
+                && old.hardware.model == prepared.machine.hardware.model
+                && old.qemu.as_ref().map(|q| q.machine)
+                    == prepared.machine.qemu.as_ref().map(|q| q.machine);
             if same {
                 let draft = &mut editor.draft;
                 draft.ephemeral = old.ephemeral;
@@ -795,6 +803,7 @@ impl<'a> Wizard<'a> {
                 draft.display = old.display.clone();
                 draft.basilisk2 = old.basilisk2.clone();
                 draft.sheepshaver = old.sheepshaver.clone();
+                draft.qemu = old.qemu.clone();
             }
         }
         self.settings = Some(tui::Ui::embedded(editor));
@@ -813,6 +822,7 @@ impl<'a> Wizard<'a> {
             guess: self.used_guess(),
             observation: self.used_observation(),
             backend,
+            variant: self.chosen_route().and_then(|r| r.variant),
             strategy,
             ephemeral: self.prepared.as_ref().is_some_and(|p| p.machine.ephemeral),
             name: &self.name,
@@ -1004,8 +1014,9 @@ fn unquote(text: &str) -> String {
     }
 }
 
-/// Every backend, and Mini vMac model, this host has, each with a ROM that
-/// fits or why none does, checked as `create` checks them.
+/// Every backend, and Mini vMac model or QEMU machine, this host has, each
+/// with a ROM that fits, none if it needs none, or why it can't be had,
+/// checked as `create` checks them.
 pub fn candidates(app: &App) -> Vec<Candidate> {
     let roms: Vec<String> = {
         let mut roms: Vec<String> = registry::list_roms(&app.paths)
@@ -1022,12 +1033,28 @@ pub fn candidates(app: &App) -> Vec<Candidate> {
         let installs_from_cd = backend.installs_from_cd();
         let blocked = |why: String| Candidate {
             backend: name.clone(),
-            model: None,
+            variant: None,
             rom: Err(why),
             installs_from_cd,
         };
         if let Err(error) = backend.check_host() {
             list.push(blocked(format!("{error:#}")));
+            continue;
+        }
+        if !backend.uses_rom() {
+            for kind in [QemuMachine::Mac99, QemuMachine::G3beige] {
+                let variant = Some(Variant::Qemu(kind));
+                let args = probe_args(&probe, &name, variant, None);
+                list.push(Candidate {
+                    backend: name.clone(),
+                    variant,
+                    rom: app
+                        .prepare_create(&args, BootSource::Unchosen)
+                        .map(|_| None)
+                        .map_err(|error| format!("{error:#}")),
+                    installs_from_cd,
+                });
+            }
             continue;
         }
         if roms.is_empty() {
@@ -1037,8 +1064,11 @@ pub fn candidates(app: &App) -> Vec<Candidate> {
             )));
             continue;
         }
-        let models: Vec<Option<Model>> = if name == rules::MINIVMAC {
-            rules::MODEL_ORDER.iter().copied().map(Some).collect()
+        let models: Vec<Option<Variant>> = if name == rules::MINIVMAC {
+            rules::MODEL_ORDER
+                .iter()
+                .map(|model| Some(Variant::Model(*model)))
+                .collect()
         } else {
             vec![None]
         };
@@ -1046,7 +1076,7 @@ pub fn candidates(app: &App) -> Vec<Candidate> {
         let mut first_problem = None;
         for model in models {
             let fits = roms.iter().find(|rom| {
-                let args = probe_args(&probe, &name, model, rom);
+                let args = probe_args(&probe, &name, model, Some(rom));
                 match app.prepare_create(&args, BootSource::Unchosen) {
                     Ok(_) => true,
                     Err(error) => {
@@ -1059,8 +1089,8 @@ pub fn candidates(app: &App) -> Vec<Candidate> {
                 found = true;
                 list.push(Candidate {
                     backend: name.clone(),
-                    model,
-                    rom: Ok(rom.clone()),
+                    variant: model,
+                    rom: Ok(Some(rom.clone())),
                     installs_from_cd,
                 });
             }
@@ -1076,17 +1106,22 @@ pub fn candidates(app: &App) -> Vec<Candidate> {
     list
 }
 
-fn probe_args(name: &str, backend: &str, model: Option<Model>, rom: &str) -> CreateArgs {
+fn probe_args(
+    name: &str,
+    backend: &str,
+    variant: Option<Variant>,
+    rom: Option<&str>,
+) -> CreateArgs {
     CreateArgs {
         name: name.to_string(),
         backend: Some(backend.to_string()),
-        model: model.map(|m| m.to_string()),
-        rom: rom.to_string(),
+        model: variant.map(Variant::argument),
+        rom: rom.map(str::to_string),
         system: None,
         disk_size: None,
         memory: None,
         display: None,
-        scale: 2,
+        scale: None,
         fullscreen: false,
         cpu: None,
         no_fpu: false,
@@ -1332,7 +1367,7 @@ mod tests {
         assert_eq!(fs::read(copy).unwrap(), fs::read(&image).unwrap());
         let machine = crate::machine::Machine::load(&app.paths, "mac-os-8.1").unwrap();
         assert_eq!(machine.emulator.backend, "basilisk2");
-        assert_eq!(machine.hardware.rom, "quadra");
+        assert_eq!(machine.hardware.rom.as_deref(), Some("quadra"));
         assert_eq!(
             press(&mut wizard, "q"),
             Some(Outcome::Created {
@@ -1539,9 +1574,17 @@ mod tests {
         let floppy = hfs_image(root.path(), "boot.dsk", "System 6.0.8", 800 * 1024, true);
         let mut wizard = Wizard::new(&app, Some(&floppy), None);
         press(&mut wizard, "nn");
-        assert!(wizard.routes.iter().all(|r| !r.usable()));
+        // QEMU needs no ROM, but doesn't run System 6, so isn't picked.
+        let needing_roms = wizard.routes.iter().filter(|r| r.backend != rules::QEMU);
+        assert!(needing_roms.clone().all(|r| !r.usable()));
+        assert_eq!(wizard.route, None);
         let backend = screen(&wizard);
         assert!(backend.contains("✗ not here"), "{backend}");
+        wizard.cursor = wizard
+            .routes
+            .iter()
+            .position(|r| r.backend == rules::MINIVMAC)
+            .unwrap();
         wizard.handle(key(KeyCode::Enter));
         let (message, _) = wizard.message.clone().unwrap();
         assert!(message.contains("macman rom add"), "{message}");

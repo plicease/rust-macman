@@ -4,12 +4,55 @@
 
 use super::inspect::{Confidence, Observation, OsGuess, Version};
 use crate::disk::DiskFormat;
+use crate::machine::QemuMachine;
 use crate::media::MediaKind;
 use crate::model::Model;
 
 pub const MINIVMAC: &str = "minivmac";
 pub const BASILISK2: &str = "basilisk2";
 pub const SHEEPSHAVER: &str = "sheepshaver";
+pub const QEMU: &str = "qemu-ppc";
+
+/// Which machine of a backend that has several: a Mini vMac model, or the
+/// Power Mac QEMU emulates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Variant {
+    Model(Model),
+    Qemu(QemuMachine),
+}
+
+impl Variant {
+    /// What `create --model` takes for it.
+    pub fn argument(self) -> String {
+        match self {
+            Self::Model(model) => model.to_string(),
+            Self::Qemu(kind) => kind.to_string(),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Model(model) => model_label(model),
+            Self::Qemu(QemuMachine::Mac99) => "mac99, a New World Power Mac G4",
+            Self::Qemu(QemuMachine::G3beige) => "g3beige, an Old World Power Mac G3",
+        }
+    }
+
+    fn order(self) -> usize {
+        match self {
+            Self::Model(model) => MODEL_ORDER.iter().position(|o| *o == model).unwrap_or(99),
+            Self::Qemu(QemuMachine::Mac99) => 0,
+            Self::Qemu(QemuMachine::G3beige) => 1,
+        }
+    }
+
+    fn model(self) -> Option<Model> {
+        match self {
+            Self::Model(model) => Some(model),
+            Self::Qemu(_) => None,
+        }
+    }
+}
 
 /// What the user starts from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,13 +102,14 @@ impl Start {
     }
 }
 
-/// One backend, and model for Mini vMac, as this host can have it.
+/// One backend, and model for Mini vMac or QEMU, as this host can have it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub backend: String,
-    pub model: Option<Model>,
-    /// A registered ROM it starts from, or why it can't be made here at all.
-    pub rom: Result<String, String>,
+    pub variant: Option<Variant>,
+    /// A registered ROM it starts from, none for a backend with its own
+    /// firmware, or why it can't be made here at all.
+    pub rom: Result<Option<String>, String>,
     pub installs_from_cd: bool,
 }
 
@@ -83,7 +127,7 @@ pub enum Fit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
     pub backend: String,
-    pub model: Option<Model>,
+    pub variant: Option<Variant>,
     pub rom: Option<String>,
     pub fit: Fit,
     pub confidence: Confidence,
@@ -95,8 +139,8 @@ pub struct Route {
 impl Route {
     pub fn label(&self) -> String {
         let backend = backend_label(&self.backend);
-        match self.model {
-            Some(model) => format!("{backend}: {}", model_label(model)),
+        match self.variant {
+            Some(variant) => format!("{backend}: {}", variant.label()),
             None => backend.to_string(),
         }
     }
@@ -111,6 +155,7 @@ pub fn backend_label(backend: &str) -> &str {
         MINIVMAC => "Mini vMac",
         BASILISK2 => "Basilisk II",
         SHEEPSHAVER => "SheepShaver",
+        QEMU => "QEMU",
         other => other,
     }
 }
@@ -147,8 +192,33 @@ pub const MODEL_ORDER: [Model; 11] = [
     Model::Twig43,
 ];
 
-/// The systems each backend runs, as upstream documents them.
-fn runs(backend: &str, version: &Version) -> Result<(), String> {
+/// The systems each backend runs, as upstream documents them. For QEMU, the
+/// releases sharing Mac OS 9.2.1's New World support, which started, and not
+/// 9.0.4, which didn't.
+fn runs(backend: &str, variant: Option<Variant>, version: &Version) -> Result<(), String> {
+    let (low, high, what): (&[u32], &[u32], &str) = match (backend, variant) {
+        (QEMU, Some(Variant::Qemu(QemuMachine::G3beige))) => {
+            return Err(
+                "QEMU's g3beige starts from OpenBIOS, which can't start classic Mac OS: that \
+                 needs an Old World ROM. It's for PowerPC Mac OS X"
+                    .to_string(),
+            );
+        }
+        (QEMU, _) => (
+            &[9, 1],
+            &[9, 2, 2],
+            "QEMU's mac99 starts Mac OS 9.1 to 9.2.2 from OpenBIOS, and PowerPC Mac OS X; a Mac \
+             OS 9.0.4 CD didn't start on it when tried",
+        ),
+        _ => (&[], &[], ""),
+    };
+    if !what.is_empty() {
+        return if version.at_least(low) && version.at_most(high) {
+            Ok(())
+        } else {
+            Err(what.to_string())
+        };
+    }
     let (low, high, what): (&[u32], &[u32], &str) = match backend {
         MINIVMAC => (
             &[1],
@@ -182,14 +252,14 @@ fn preference(backend: &str, guess: Option<&OsGuess>, observation: Option<&Obser
             || o.volumes.iter().any(|v| v.format == DiskFormat::RawMfs)
     });
     let ppc_era = guess.is_some_and(|g| g.version.at_least(&[7, 6]));
-    let order: [&str; 3] = if small {
-        [MINIVMAC, BASILISK2, SHEEPSHAVER]
+    let order: [&str; 4] = if small {
+        [MINIVMAC, BASILISK2, SHEEPSHAVER, QEMU]
     } else if ppc_era {
-        [SHEEPSHAVER, BASILISK2, MINIVMAC]
+        [SHEEPSHAVER, QEMU, BASILISK2, MINIVMAC]
     } else {
-        [BASILISK2, SHEEPSHAVER, MINIVMAC]
+        [BASILISK2, SHEEPSHAVER, QEMU, MINIVMAC]
     };
-    order.iter().position(|b| *b == backend).unwrap_or(3) as u32
+    order.iter().position(|b| *b == backend).unwrap_or(4) as u32
 }
 
 /// Every backend, and model, ranked for `start`, from what was seen and
@@ -214,9 +284,7 @@ pub fn routes(
         (
             rank(route),
             preference(&route.backend, guess, observation),
-            route.model.map_or(0, |m| {
-                MODEL_ORDER.iter().position(|o| *o == m).unwrap_or(99)
-            }),
+            route.variant.map_or(0, Variant::order),
         )
     });
     // One Mini vMac model stands for the rest: the others are as good, but
@@ -244,7 +312,7 @@ fn route(
     let mut confidence = Confidence::Low;
     let mut fit = Fit::Good;
     match guess {
-        Some(guess) => match runs(backend, &guess.version) {
+        Some(guess) => match runs(backend, candidate.variant, &guess.version) {
             Ok(()) => {
                 reasons.push(format!(
                     "{} runs {}, which {}",
@@ -269,7 +337,8 @@ fn route(
         ),
         None => {}
     }
-    if let (Some(model), Some(observation)) = (candidate.model, observation)
+    if let (Some(model), Some(observation)) =
+        (candidate.variant.and_then(Variant::model), observation)
         && observation
             .volumes
             .iter()
@@ -324,8 +393,8 @@ fn route(
     }
     Route {
         backend: candidate.backend.clone(),
-        model: candidate.model,
-        rom: candidate.rom.clone().ok(),
+        variant: candidate.variant,
+        rom: candidate.rom.clone().ok().flatten(),
         fit,
         confidence,
         reasons,
@@ -405,6 +474,7 @@ pub struct Situation<'a> {
     pub guess: Option<&'a OsGuess>,
     pub observation: Option<&'a Observation>,
     pub backend: &'a str,
+    pub variant: Option<Variant>,
     pub strategy: &'a Strategy,
     pub ephemeral: bool,
     pub name: &'a str,
@@ -501,7 +571,7 @@ const RULES: &[Rule] = &[
     Rule {
         applies: |s| {
             s.guess
-                .is_some_and(|g| runs(s.backend, &g.version).is_err())
+                .is_some_and(|g| runs(s.backend, s.variant, &g.version).is_err())
         },
         text: |s| {
             let guess = s.guess.expect("checked");
@@ -512,6 +582,12 @@ const RULES: &[Rule] = &[
                 backend_label(s.backend),
                 guess.evidence
             )
+        },
+    },
+    Rule {
+        applies: |s| s.backend == QEMU,
+        text: |_| {
+            "QEMU's window keeps the mouse once you click in it; Ctrl-Alt-G lets it go.".to_string()
         },
     },
     Rule {
@@ -596,21 +672,23 @@ mod tests {
     use crate::wizard::inspect::Volume;
     use std::path::PathBuf;
 
-    fn candidate(backend: &str, model: Option<Model>, cd: bool) -> Candidate {
+    fn candidate(backend: &str, variant: Option<Variant>, cd: bool) -> Candidate {
         Candidate {
             backend: backend.to_string(),
-            model,
-            rom: Ok(format!("{backend}-rom")),
+            variant,
+            rom: Ok((backend != QEMU).then(|| format!("{backend}-rom"))),
             installs_from_cd: cd,
         }
     }
 
     fn host() -> Vec<Candidate> {
         vec![
-            candidate(MINIVMAC, Some(Model::Plus), false),
-            candidate(MINIVMAC, Some(Model::II), false),
+            candidate(MINIVMAC, Some(Variant::Model(Model::Plus)), false),
+            candidate(MINIVMAC, Some(Variant::Model(Model::II)), false),
             candidate(BASILISK2, None, true),
             candidate(SHEEPSHAVER, None, true),
+            candidate(QEMU, Some(Variant::Qemu(QemuMachine::Mac99)), true),
+            candidate(QEMU, Some(Variant::Qemu(QemuMachine::G3beige)), true),
         ]
     }
 
@@ -665,13 +743,45 @@ mod tests {
         );
         assert_eq!(recommended(&routes), ["SheepShaver"]);
         assert_eq!(routes[0].backend, SHEEPSHAVER);
-        assert!(matches!(&routes[1].fit, Fit::Unlikely(why) if why.contains("8.1")));
+        let basilisk2 = routes.iter().find(|r| r.backend == BASILISK2).unwrap();
+        assert!(matches!(&basilisk2.fit, Fit::Unlikely(why) if why.contains("8.1")));
+        // QEMU's mac99 was tried with a 9.0.4 CD, which didn't start.
+        let mac99 = routes.iter().find(|r| r.backend == QEMU).unwrap();
+        assert!(matches!(&mac99.fit, Fit::Unlikely(why) if why.contains("9.0.4 CD didn't")));
         assert!(
             routes
                 .iter()
                 .filter(|r| r.backend == MINIVMAC)
                 .all(|r| r.fit == Fit::Blocked("Mini vMac has no CD drive".into()))
         );
+    }
+
+    #[test]
+    fn mac_os_9_2_goes_to_qemus_mac99_and_never_g3beige() {
+        let observation = cd("Mac OS 9.2.1");
+        let guess = guess("Mac OS 9.2.1");
+        let routes = routes(
+            Start::InstallerCd,
+            Some(&observation),
+            Some(&guess),
+            &host(),
+        );
+        assert_eq!(
+            recommended(&routes),
+            ["QEMU: mac99, a New World Power Mac G4"]
+        );
+        assert_eq!(routes[0].rom, None);
+        assert_eq!(
+            routes[0].variant.map(Variant::argument).as_deref(),
+            Some("mac99")
+        );
+        let g3beige = routes
+            .iter()
+            .find(|r| r.variant == Some(Variant::Qemu(QemuMachine::G3beige)))
+            .unwrap();
+        assert!(matches!(&g3beige.fit, Fit::Unlikely(why) if why.contains("Old World ROM")));
+        let sheepshaver = routes.iter().find(|r| r.backend == SHEEPSHAVER).unwrap();
+        assert!(matches!(&sheepshaver.fit, Fit::Unlikely(why) if why.contains("9.0.4")));
     }
 
     #[test]
@@ -763,6 +873,7 @@ mod tests {
             guess: Some(&guess),
             observation: None,
             backend,
+            variant: None,
             strategy,
             ephemeral: false,
             name: "nine",
@@ -789,6 +900,7 @@ mod tests {
             guess: None,
             observation: None,
             backend: SHEEPSHAVER,
+            variant: None,
             strategy: &Strategy::BlankWithCd,
             ephemeral: true,
             name: "nine",

@@ -290,6 +290,41 @@ because the precompiled JIT operations may assume real addressing. It hasn't bee
 
 For the same reason, the emulator forces SDL onto X11, so a Wayland desktop needs XWayland.
 
+## QEMU
+
+| Host | Status |
+|---|---|
+| Linux x86-64 | Candidate: **starts the Mac OS 9.2.1 CD to the Finder** on `mac99`, smoke test unfinished |
+| Others | Untried |
+
+macman runs the host's own `qemu-system-ppc`, so the backend is offered wherever one is
+found, but only Linux x86-64 has been tried: Ubuntu 26.04, with its QEMU 10.2.1 and
+OpenBIOS v1.1. No host counts as supported until [the smoke test](SMOKE_TEST.md#qemu)
+has passed there, and release targets don't depend on this backend.
+
+These parts of the smoke test have been seen to work on that host:
+
+- `macman doctor` reports QEMU's version and path, and that it starts a `mac99` and a
+  `g3beige`.
+- `macman create --backend qemu-ppc --disk-size 2G`, then `macman run --media` with the Mac
+  OS 9.2.1 CD, started to the Finder from the CD, and quitting QEMU ended the run with
+  exit code 0 and no session left.
+- With no CD, a blank disk stops at OpenBIOS's `0 >` prompt.
+- A second run of a running machine is refused, and `doctor` still reports it runnable.
+- Killing macman with `kill -9` stops QEMU, and the next run warns about the earlier one.
+
+What's been found about guests:
+
+- The Mac OS 9.0.4 CD didn't start on `mac99`, with or without `via=pmu`.
+- A `g3beige` can't start classic Mac OS: OpenBIOS has no Old World ROM, which it needs.
+  It's offered for PowerPC Mac OS X.
+- Mac OS X hasn't been tried, on either machine, for want of media.
+
+These haven't been tested: installing onto the disk and starting from it, `slirp`, sound,
+full screen, a read-only extra disk, and moving a machine to another host. The wizard
+recommends `mac99` only for Mac OS 9.1 to 9.2.2, from 9.2.1's start, and never `g3beige`
+for classic Mac OS.
+
 ## Release targets
 
 `.github/workflows/release.yml` lists its targets explicitly instead of using the

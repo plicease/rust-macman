@@ -211,3 +211,36 @@ On macOS, skip the `vm.mmap_min_addr` steps, and these replace the matching step
 | Quit that emulator, then `macman run p9` | Boots. |
 | While `pn` runs with `--cdrom MacOS9.iso`: `macman run p9 --cdrom MacOS9.iso` | Refused, because the CD image is in use. |
 | On data discs: make them with `hdiutil makehybrid -iso -joliet -o a.iso DIR` | As on Linux. |
+
+## QEMU
+
+Run this on any host with `qemu-system-ppc`. It has been run in part, on Linux x86-64 with
+QEMU 10.2.1, and [PLATFORMS.md](PLATFORMS.md#qemu) lists what passed and what's left.
+QEMU isn't built, so there's nothing to download. It needs an installer CD image of your
+own, and uses separate directories, so it doesn't touch your machines.
+
+```sh
+root="$(mktemp -d)/smoke Zoë"
+export XDG_CONFIG_HOME="$root/config" XDG_DATA_HOME="$root/data" XDG_CACHE_HOME="$root/cache"
+
+macman doctor
+macman media add "Mac OS 9.2.1.toast" --name macos-9.2.1
+macman create g4 --backend qemu-ppc --disk-size 2G
+```
+
+| Step | Expected |
+|---|---|
+| `macman doctor` | Names the QEMU it found, and its version, and says it starts a `mac99` and a `g3beige`. Without `openbios-ppc`, it says QEMU can't start them, and names the package. |
+| `macman create g4x --backend qemu-ppc --rom ANY` | Refused: QEMU takes no Mac ROM. |
+| `macman run g4` | Notes the blank disk, and QEMU stops at OpenBIOS's `0 >` prompt. Close the window: exit code 0. |
+| `macman run g4 --media macos-9.2.1` | Starts from the CD, to the Finder, and offers to initialize the disk. Install onto it, then Shut Down. |
+| While it runs, in a second terminal: `macman run g4` | Refused, because the disk is in use. |
+| While it runs: `macman doctor` | The machine is still reported as runnable. |
+| Kill `macman` with `kill -9` while QEMU runs | QEMU stops at once. The next `macman run g4` warns about the earlier run. |
+| `macman run g4` | Starts from its own disk. The CD image's hash is unchanged. |
+| `macman config set g4 qemu.network slirp`, then run it | The guest gets an address by DHCP. |
+| The same run, with speakers or headphones on | The startup chime plays. |
+| `macman run g4 --disk "extra disk.dsk" --readonly` | Mounts the extra disk locked, and its hash stays the same. |
+| `macman run g4` with three `--disk`s and a `--cdrom` | Refused: QEMU has four drives. |
+| `macman export g4 -o g4.tar.gz`, then import it on another host's QEMU, and run it | Starts, though the QEMU version differs. |
+| A Mac OS X CD, on `mac99` and on `g3beige` | Note what starts. Nothing has been tried yet. |

@@ -572,7 +572,7 @@ mod tests {
             },
             hardware: Hardware {
                 model: None,
-                rom: "r".into(),
+                rom: Some("r".into()),
                 memory: "64M".into(),
             },
             display: Display {
@@ -585,6 +585,7 @@ mod tests {
             system: Default::default(),
             basilisk2: Some(Basilisk2Settings::default()),
             sheepshaver: None,
+            qemu: None,
             disks: vec![],
         }
     }

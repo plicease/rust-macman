@@ -70,8 +70,8 @@ create`, `checkpoint delete`, `rollback`, `disk extract`, and
 | `name` | string | |
 | `current` | boolean | Whether it's the machine `macman use` chose |
 | `aliases` | array of strings | The machine's other names, sorted; empty if none |
-| `backend` | string | `minivmac`, `basilisk2`, or `sheepshaver` |
-| `model` | string or null | The Mini vMac model, such as `plus` or `iix`; `null` for other backends |
+| `backend` | string | `minivmac`, `basilisk2`, `sheepshaver`, or `qemu-ppc` |
+| `model` | string or null | The Mini vMac model, such as `plus` or `iix`, or the QEMU machine, `mac99` or `g3beige`; `null` for other backends |
 | `memory` | string | As configured, such as `4M` |
 | `display` | object | `width`, `height`, `depth`, and `scale` are numbers; `fullscreen` is a boolean |
 | `system_version` | string or null | The system version, for display only |

@@ -149,7 +149,7 @@ revision = "pinned-source-identifier"
 
 [hardware]
 model = "plus"
-rom = "plus-v3"
+rom = "plus-v3"  # absent for QEMU, which takes no Mac ROM
 memory = "4M"
 
 [display]
@@ -265,6 +265,29 @@ On Windows, `src/backend/sheepshaver_windows.rs` builds it as Basilisk II is bui
 - **Links:** much of the tree is symbolic links into Basilisk II's. macman unpacks the archive itself and copies what each link names, as Windows won't make links without privileges.
 - **Generated code:** `genexec.pl` lists the instruction handlers to instantiate. macman does the same in Rust, so Perl isn't needed, and refuses a decoder with templates, which the script would expand.
 - **Launch:** preferences, ROM, disks, and limits are as for Basilisk II on Windows, from shared code in `src/backend/macemu_windows.rs`.
+
+### QEMU
+
+Run with the host's own QEMU and real guests; see [PLATFORMS.md](PLATFORMS.md#qemu). The
+module comment in `src/backend/qemu.rs` has the details. It differs from the others in
+these ways:
+
+- **Emulator:** nothing is built. macman runs `qemu-system-ppc` from `PATH`, or the one
+  `[qemu-ppc] executable` names in `config.toml`. Its `--version` and `-machine help` say
+  what it is and which Power Macs it has.
+- **Revision:** the QEMU version a machine was made with. Any QEMU runs it, so it moves
+  between hosts as it is.
+- **Configuration:** a `[qemu]` table holds `machine` (`mac99` or `g3beige`), `sound`,
+  and `network`. There's no `[hardware] model`, and no `rom`.
+- **ROMs:** none. QEMU starts from OpenBIOS, its own Open Firmware, so `rom` is left out of
+  `[hardware]`, archives carry no ROM for the machine, and `--rom` is refused.
+- **Limits:** 32M to 2048M on a `mac99` and 2047M on a `g3beige`, 640x480 to 3840x2160 at
+  depth 8, 15, or 32, scale 1, and four IDE drives for disks and CDs together.
+- **Launch:** disks and CDs are given whole and raw, CDs read-only, with HFS discs first,
+  and `-boot d` when one can start the Mac. `mac99` gets `via=pmu`, for USB input.
+  `auto-boot?` is set, so OpenBIOS starts the guest without stopping.
+- **Exit status:** QEMU reports problems on stderr and exits with a failure, so macman
+  shows its words. On Linux it stops with macman, as Basilisk II does.
 
 ### Shared code
 
