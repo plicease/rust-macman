@@ -522,8 +522,9 @@ installed Mac OS 9.2.1 from its CD and started from its own disk, and started th
 X 10.4 installer from its DVD. The Mac OS 9.0.4 CD didn't start on `mac99`, and a
 `g3beige` can't start classic Mac OS at all, as QEMU's Open Firmware has no Old World
 ROM. A machine exported there was imported on macOS and ran, with
-networking and sound. Installing Mac OS X, other Mac OS X releases, Mac OS X on a
-`g3beige`, the rest of the smoke test on macOS, and Windows haven't been tried. See [the smoke test](docs/SMOKE_TEST.md#qemu).
+networking and sound, and on Windows sound and networking worked. Installing Mac OS X,
+other Mac OS X releases, Mac OS X on a `g3beige`, and the rest of the smoke test on macOS
+and Windows haven't been tried. See [the smoke test](docs/SMOKE_TEST.md#qemu).
 
 On Debian or Ubuntu:
 
