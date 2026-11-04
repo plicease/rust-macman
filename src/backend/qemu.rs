@@ -209,17 +209,28 @@ fn megabytes(memory: &str) -> Option<u32> {
     }
 }
 
-/// QEMU's own limits: a G4 mac99 takes 2048M, and a g3beige 2047M.
+/// Memory comes in steps of this, as a real Power Mac's does. Mac OS X 10.4's
+/// kernel panicked, with "pmap_map_block: collision", on sizes such as 770M,
+/// 1001M, 1023M, 1540M, and 2044M, and started on every multiple of 32M tried.
+pub const MEMORY_STEP: u32 = 32;
+
+/// QEMU's own limits, a G4 mac99's 2048M and a g3beige's 2047M, in steps of
+/// [`MEMORY_STEP`].
 fn validate_memory(kind: QemuMachine, memory: &str) -> Result<()> {
     let most = match kind {
         QemuMachine::Mac99 => 2048,
-        QemuMachine::G3beige => 2047,
+        QemuMachine::G3beige => 2016,
     };
     match megabytes(memory) {
-        Some(size) if (32..=most).contains(&size) => Ok(()),
+        Some(size) if (32..=most).contains(&size) && size % MEMORY_STEP == 0 => Ok(()),
+        Some(size) if (32..=most).contains(&size) => bail!(
+            "memory {memory} is not supported on a QEMU {kind}; use a multiple of \
+             {MEMORY_STEP}M, as in {}M: Mac OS X panics with sizes like {memory}",
+            size / MEMORY_STEP * MEMORY_STEP
+        ),
         _ => bail!(
-            "memory {memory} is not supported on a QEMU {kind}; use whole megabytes, 32M to \
-             {most}M, as in 512M"
+            "memory {memory} is not supported on a QEMU {kind}; use 32M to {most}M, in steps \
+             of {MEMORY_STEP}M, as in 512M"
         ),
     }
 }
@@ -795,7 +806,19 @@ pub(crate) mod tests {
         let mut g3 = machine(QemuMachine::G3beige);
         g3.hardware.memory = "2048M".into();
         let error = qemu.validate(&g3).unwrap_err().to_string();
-        assert!(error.contains("32M to 2047M"), "{error}");
+        assert!(error.contains("32M to 2016M"), "{error}");
+        g3.hardware.memory = "2016M".into();
+        qemu.validate(&g3).unwrap();
+        // Sizes Mac OS X 10.4 panicked with.
+        for odd in ["1023M", "1540M", "770M", "1018M"] {
+            g4.hardware.memory = odd.into();
+            let error = qemu.validate(&g4).unwrap_err().to_string();
+            assert!(error.contains("multiple of 32M"), "{odd}: {error}");
+        }
+        g4.hardware.memory = "1023M".into();
+        let error = qemu.validate(&g4).unwrap_err().to_string();
+        assert!(error.contains("as in 992M"), "{error}");
+        g4.hardware.memory = "512M".into();
 
         let mut bad = machine(QemuMachine::Mac99);
         bad.display.scale = 2;

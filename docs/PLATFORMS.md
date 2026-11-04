@@ -338,6 +338,10 @@ What's been found about guests:
 - The Mac OS 9.0.4 CD didn't start on `mac99`, with or without `via=pmu`.
 - A `g3beige` can't start classic Mac OS: OpenBIOS has no Old World ROM, which it needs.
   It's offered for PowerPC Mac OS X.
+- Mac OS X 10.4's kernel panics, with `pmap_map_block: collision`, with some memory sizes:
+  770M, 1001M, 1014M, 1018M, 1022M, 1023M, 1540M, and 2044M did, and 260M, 510M, 516M,
+  772M, 896M, 960M, 992M, 1000M, 1008M, 1012M, 1016M, 1020M, 1024M, 1056M, 1152M, 1280M, 1536M, and
+  2048M didn't. No rule fits both but multiples of 32M, which macman requires.
 - Mac OS X 10.4's installer starts on `mac99`. Installing it, other releases, and Mac OS X
   on a `g3beige` haven't been tried.
 

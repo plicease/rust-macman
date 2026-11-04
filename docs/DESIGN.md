@@ -281,8 +281,10 @@ these ways:
   and `network`. There's no `[hardware] model`, and no `rom`.
 - **ROMs:** none. QEMU starts from OpenBIOS, its own Open Firmware, so `rom` is left out of
   `[hardware]`, archives carry no ROM for the machine, and `--rom` is refused.
-- **Limits:** 32M to 2048M on a `mac99` and 2047M on a `g3beige`, 640x480 to 3840x2160 at
-  depth 8, 15, or 32, scale 1, and four IDE drives for disks and CDs together.
+- **Limits:** 640x480 to 3840x2160 at depth 8, 15, or 32, scale 1, and four IDE drives for
+  disks and CDs together. Memory is 32M to 2048M on a `mac99` and 2016M on a `g3beige`, in
+  steps of 32M: Mac OS X 10.4's kernel panicked, with `pmap_map_block: collision`, on
+  sizes such as 770M, 1023M, 1540M, and 2044M, and started on every multiple of 32M tried.
 - **Launch:** disks and CDs are given whole and raw, CDs read-only, with HFS discs first,
   and `-boot d` when one can start the Mac. `mac99` gets `via=pmu`, for USB input.
   `auto-boot?` is set, so OpenBIOS starts the guest without stopping.

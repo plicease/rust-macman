@@ -556,7 +556,7 @@ macman run g4 --media macos-9.2.1
 | `--model` | `mac99`, `g3beige` | `mac99` |
 | `--no-sound` | | sound on, for a `mac99` |
 | `--network` | `none`, `slirp` | `none` |
-| `--memory` | `32M` to `2048M`, or `2047M` on a `g3beige`, in whole megabytes | `512M` |
+| `--memory` | `32M` to `2048M`, or `2016M` on a `g3beige`, in steps of 32M | `512M` |
 | `--display` | 640x480 to 3840x2160, at depth 8, 15, or 32 | `1024x768x32` |
 | `--scale` | 1 | 1 |
 
