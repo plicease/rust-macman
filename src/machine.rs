@@ -34,6 +34,9 @@ pub struct Machine {
     /// Settings only the SheepShaver backend has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sheepshaver: Option<SheepShaverSettings>,
+    /// Settings only the QEMU PowerPC backend has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qemu: Option<QemuSettings>,
     #[serde(default)]
     pub disks: Vec<Disk>,
 }
@@ -50,7 +53,10 @@ pub struct Hardware {
     /// SheepShaver have none: neither is a particular machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
-    pub rom: String,
+    /// The registered ROM it starts from. QEMU has none: it starts from its
+    /// own Open Firmware.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rom: Option<String>,
     pub memory: String,
 }
 
@@ -137,6 +143,65 @@ impl Default for SheepShaverSettings {
             sound: true,
             network: Network::default(),
             shared_folder: None,
+        }
+    }
+}
+
+/// Which Power Mac QEMU emulates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum QemuMachine {
+    /// A New World Power Mac G4, for Mac OS 9 and PowerPC Mac OS X.
+    #[default]
+    Mac99,
+    /// An Old World beige Power Mac G3.
+    G3beige,
+}
+
+impl QemuMachine {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mac99 => "mac99",
+            Self::G3beige => "g3beige",
+        }
+    }
+}
+
+impl std::fmt::Display for QemuMachine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for QemuMachine {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "mac99" => Ok(Self::Mac99),
+            "g3beige" => Ok(Self::G3beige),
+            _ => bail!("unknown QEMU machine {s:?}; QEMU here emulates mac99 or g3beige"),
+        }
+    }
+}
+
+/// `[qemu]` in `machine.toml`. Every one is given to QEMU when it starts, so
+/// nothing is built.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QemuSettings {
+    pub machine: QemuMachine,
+    #[serde(default = "enabled")]
+    pub sound: bool,
+    #[serde(default)]
+    pub network: Network,
+}
+
+impl Default for QemuSettings {
+    fn default() -> Self {
+        Self {
+            machine: QemuMachine::default(),
+            sound: true,
+            network: Network::default(),
         }
     }
 }
@@ -276,6 +341,27 @@ pub struct Config {
     /// The SDL package that Basilisk II builds with on Windows.
     #[serde(default, skip_serializing_if = "SourceConfig::is_empty")]
     pub sdl: SourceConfig,
+    /// Where QEMU is, when it isn't `qemu-system-ppc` on `PATH`.
+    #[serde(
+        default,
+        rename = "qemu-ppc",
+        skip_serializing_if = "QemuConfig::is_empty"
+    )]
+    pub qemu_ppc: QemuConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct QemuConfig {
+    /// The `qemu-system-ppc` to run, by path. It belongs to this host, so
+    /// machines never record it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<PathBuf>,
+}
+
+impl QemuConfig {
+    fn is_empty(&self) -> bool {
+        self.executable.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

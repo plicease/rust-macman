@@ -15,6 +15,10 @@ SHA-256 of its contents. Anything with the same bytes therefore shares a blob: m
 on one ROM, identical disks, two names for one system image, and a fresh machine's disk
 and the image it was created from.
 
+A blob holds a disk's whole length, empty space included, which gzip makes small. Import
+writes stretches of a megabyte or more of zeros as holes, where the filesystem has them,
+so a big disk that's mostly empty, as a Mac OS X one is, takes about what it did before.
+
 ```toml
 format_version = 3
 
@@ -253,9 +257,10 @@ exFAT drive, export elsewhere and copy it.
   such as a link or device, refuses the archive. Entry names are never used as paths.
 - Each blob must be listed in the manifest, appear once, and have the manifest's size
   and digest. Every listed blob must be present.
-- The limits are 16 MiB for the manifest, 4 GiB for a blob, and 64 GiB in all. Blob
-  sizes are checked against the manifest before any data is written, which bounds what
-  a decompression bomb can do.
+- The limits are 16 MiB for the manifest, 64 GiB for a blob, and 256 GiB in all. They
+  were 4 GiB and 64 GiB before QEMU, whose Mac OS X disks are bigger, so an older macman
+  refuses an archive with a disk over 4 GiB. Blob sizes are checked against the manifest
+  before any data is written, which bounds what a decompression bomb can do.
 - Names in the manifest follow the rules for machine, ROM, and system names, and a
   system image's version and origin can't hold control characters.
 - Each system image must be a volume that `system add` would accept. Disk paths must be

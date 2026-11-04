@@ -5,7 +5,8 @@ emulation environments. It creates machines from your own ROMs and bootable disk
 images, builds the right [Mini vMac](https://www.gryphel.com/c/minivmac/) for each
 one, [Basilisk II](#basilisk-ii) for later 68k systems, or a preview of
 [SheepShaver](#sheepshaver) for PowerPC Mac OS, and launches them with
-disk-image safety checks.
+disk-image safety checks. It can also run machines on the host's own
+[QEMU](#qemu) for later PowerPC Mac OS.
 
 macman does not emulate anything itself, and it does not include or download Apple
 ROMs or system software. See [docs/DESIGN.md](docs/DESIGN.md) for the full design.
@@ -128,7 +129,7 @@ Mac first, or use Control Mode: hold Ctrl and press Q, then Y.
 ### Changing a machine's settings
 
 `macman config edit [MACHINE]` opens an editor in the terminal for a machine's settings,
-grouped as Machine, Hardware, Display, and, for Basilisk II and SheepShaver, Emulator. It
+grouped as Machine, Hardware, Display, and, for Basilisk II, SheepShaver, and QEMU, Emulator. It
 offers only what the machine's backend has: Mini vMac has no CPU, sound, network, or shared
 folder settings, a Mac Plus is offered at most 4M of memory and a 1-bit display, and
 Basilisk II on Windows, which can't share a folder, shows that setting read-only. Each
@@ -190,7 +191,7 @@ such as `"display.scale" has no value`, never read as a different machine or key
 | Key | Takes | Machines |
 | --- | --- | --- |
 | `ephemeral` | `true` or `false` | All |
-| `hardware.rom` | A registered ROM | All |
+| `hardware.rom` | A registered ROM | All but QEMU |
 | `hardware.memory` | A size, such as `4M` or `512K` | All |
 | `display.width`, `display.height` | Pixels | All |
 | `display.depth` | Bits per pixel | All |
@@ -198,14 +199,14 @@ such as `"display.scale" has no value`, never read as a different machine or key
 | `display.fullscreen` | `true` or `false` | All |
 | `basilisk2.cpu` | `68020`, `68030`, or `68040` | Basilisk II |
 | `basilisk2.fpu` | `true` or `false` | Basilisk II |
-| `basilisk2.sound`, `sheepshaver.sound` | `true` or `false` | That backend |
-| `basilisk2.network`, `sheepshaver.network` | `none` or `slirp` | That backend |
+| `basilisk2.sound`, `sheepshaver.sound`, `qemu.sound` | `true` or `false` | That backend |
+| `basilisk2.network`, `sheepshaver.network`, `qemu.network` | `none` or `slirp` | That backend |
 | `basilisk2.shared_folder`, `sheepshaver.shared_folder` | A host folder, or `""` for none | That backend |
 
 `true` and `false` may also be given as `on`/`off` or `yes`/`no`. `macman config keys
 [MACHINE]` lists the keys a machine has, with each one's value and, as the machine is now,
 the values it can take. Other keys, such as `name`, `id`, `emulator.backend`,
-`hardware.model`, and `disks`, can't be set, for the reasons `config edit` shows them
+`hardware.model`, `qemu.machine`, and `disks`, can't be set, for the reasons `config edit` shows them
 read-only, and say so; one that's another backend's, or that the machine's backend
 refuses, as Basilisk II on Windows refuses a shared folder, explains that too.
 
@@ -502,10 +503,115 @@ volume needs its HFS wrapper, which disks formatted by Mac OS have. `--readonly`
 `--readonly`, the shared folder stays out of exports, and NVRAM lasts one run. On Linux,
 if macman is killed, it takes the emulator with it.
 
+## QEMU
+
+macman can run machines on [QEMU](https://www.qemu.org/)'s PowerPC emulator,
+`qemu-system-ppc`, which it doesn't build: it uses the one installed on the host. It
+emulates two Power Macs, chosen with `--model`:
+
+| `--model` | Machine | Meant for |
+|---|---|---|
+| `mac99` (default) | A New World G4, with the PMU and USB keyboard and mouse | Mac OS 9.1 to 9.2.2, and PowerPC Mac OS X |
+| `g3beige` | An Old World beige G3, with ADB | PowerPC Mac OS X only |
+
+The wizard recommends `mac99` for Mac OS 9.1 to 9.2.2 and Mac OS X 10.4, and offers
+`g3beige` for nothing classic.
+
+**This backend is new.** On Linux x86-64, with QEMU 10.2.1, a `mac99` machine has
+installed Mac OS 9.2.1 from its CD and started from its own disk, and started the Mac OS
+X 10.4 installer from its DVD. The Mac OS 9.0.4 CD didn't start on `mac99`, and a
+`g3beige` can't start classic Mac OS at all, as QEMU's Open Firmware has no Old World
+ROM. A machine exported there was imported on macOS and ran, with
+networking and sound, and on Windows sound and networking worked. Installing Mac OS X,
+other Mac OS X releases, Mac OS X on a `g3beige`, and the rest of the smoke test on macOS
+and Windows haven't been tried. See [the smoke test](docs/SMOKE_TEST.md#qemu).
+
+On Debian or Ubuntu:
+
+```sh
+apt install qemu-system-ppc
+```
+
+That brings OpenBIOS, QEMU's Open Firmware, as `openbios-ppc`. macman uses the
+`qemu-system-ppc` on your `PATH`, or the one `config.toml` names:
+
+```toml
+[qemu-ppc]
+executable = "/opt/qemu/bin/qemu-system-ppc"
+```
+
+`macman doctor` says which QEMU it found, its version, and whether it starts each
+machine. A machine records the QEMU version it was made with, but runs on whichever is
+installed, so it can move to another host with `export` and `import`.
+
+There's no Mac ROM: QEMU starts from its own firmware, so a machine names none, and
+`--rom` is refused.
+
+```sh
+macman media add Mac-OS-9.2.1.toast --name macos-9.2.1
+macman create g4 --backend qemu-ppc --disk-size 2G
+macman run g4 --media macos-9.2.1
+```
+
+| Option | Values | Default |
+|---|---|---|
+| `--model` | `mac99`, `g3beige` | `mac99` |
+| `--no-sound` | | sound on, for a `mac99` |
+| `--network` | `none`, `slirp` | `none` |
+| `--memory` | `32M` to `2048M`, or `2016M` on a `g3beige`, in steps of 32M | `512M` |
+| `--display` | 640x480 to 3840x2160, at depth 8, 15, or 32 | `1024x768x32` |
+| `--scale` | 1 | 1 |
+
+`slirp` is QEMU's user-mode networking, with a Sun GEM card, which Mac OS drives as
+Apple's own.
+
+QEMU has neither Power Mac's sound chip, so with sound on, a `mac99` gets a USB audio
+device instead. Mac OS 9 plays through it once you choose it under Output in the Sound
+control panel; until then it's silent. A `g3beige` has no USB, so it has no sound. The window isn't magnified, so the scale is 1, and there's no shared
+folder.
+
+Disks and CDs are IDE drives, and QEMU has four, so a run takes at most four disks and CDs
+together. Images are attached whole, as raw disks, so partitioned disks and CD images
+mount as they are. A Disk Copy 4.2 image is refused, since QEMU would see its header as
+part of the disk; take the volume out with `macman disk extract`. A CD with HFS+ in a
+partition map, as Mac OS X discs have, starts the Mac as an HFS one does; register a bare
+HFS+ volume with `macman media add`, which adds the map Open Firmware needs:
+
+```sh
+macman media add "Mac OS X 10.4 Install DVD.iso" --name osx-10.4 --version 10.4
+macman create tiger --backend qemu-ppc --disk-size 10G --memory 1024M
+macman run tiger --media osx-10.4
+```
+
+A system image makes a whole copy for the machine's boot disk.
+
+QEMU's IDE hard disk can't be read-only, so a `--readonly` disk gets a QEMU snapshot of
+its throwaway copy: the guest sees it writable, and its changes go to a temporary overlay
+QEMU discards when it exits. CDs are read-only.
+
+With a blank disk and no CD, QEMU stops at OpenBIOS's `0 >` prompt; close the window
+and attach an installer. Once you click in QEMU's window, it keeps the mouse; Ctrl-Alt-G
+lets it go.
+
+On Linux, macman asks for QEMU's SDL window. QEMU's usual GTK window holds the mouse by
+moving the pointer back, which Wayland doesn't allow, so the pointer slips out of it.
+`macman doctor` warns when QEMU has no SDL window; on Debian and Ubuntu it comes with
+`qemu-system-gui`. The Mac gets a relative USB mouse, as Mac OS 9 doesn't drive QEMU's
+absolute tablet, so the pointer moves by the host's mouse movement, not by where it is.
+Full screen magnifies the Mac's screen, so the pointer seems slower there than in a
+window. For full screen, a display nearer the host screen's size magnifies it less, such
+as 1440x960 on a 2880x1920 screen, and the Mouse control panel sets the speed, which takes
+effect once its window is closed:
+
+```sh
+macman config set g4 display.width 1440 display.height 960
+```
+
 ## Installing from a CD
 
 On Linux and macOS, a SheepShaver or Basilisk II machine can start with a blank disk
-instead of a system image, and install from a CD image of your own:
+instead of a system image, and install from a CD image of your own. So can a
+[QEMU](#qemu) machine:
 
 ```sh
 macman create ss904 --backend sheepshaver --rom newworld --disk-size 1G --memory 256M
@@ -564,17 +670,23 @@ because an installer may check its own disc, and nothing ever writes to it: macm
 stores a read-only copy, and the file you registered from is left as it is. Removing a
 medium with `macman media remove NAME` changes no machine.
 
+The one exception is a bare HFS+ volume, with no partition map around it, as some Mac OS
+X disc images are. QEMU's Open Firmware won't start from one, so the copy stored has a
+partition map put in front of the volume, whose bytes are as given. `media add` says when
+it does this, and `media info` shows the digest of the file you gave as well as the
+stored one's. `run --cdrom` refuses such an image, as it has nowhere to add the map.
+
 `media add` works out from the contents, never the file name, how each image is
 attached:
 
 | Kind | Found for | `run --media` attaches it |
 | --- | --- | --- |
-| `cdrom` | A partition map with an HFS volume, ISO 9660, or HFS larger than a floppy | As a CD, read-only, as `--cdrom` does |
+| `cdrom` | A partition map with an HFS or HFS+ volume, ISO 9660, HFS larger than a floppy, or a bare HFS+ volume | As a CD, read-only, as `--cdrom` does |
 | `floppy` | A raw MFS or HFS volume up to 1440K, or a Disk Copy 4.2 image | As a disk, from a read-only throwaway copy |
 | `disk` | Given with `--kind disk`, or an unrecognized image | As a floppy is |
 
 `--kind` overrides what's found, for instance `--kind disk` for a partitioned hard disk
-image, but a `cdrom` must still hold HFS or ISO 9660. An image macman doesn't recognize
+image, but a `cdrom` must still hold HFS, HFS+, or ISO 9660. An image macman doesn't recognize
 is refused unless you add `--any-format`. `media list` shows each one's kind, size,
 format, whether it has boot blocks, and the version you gave with `--version`, which is
 for display only and never guessed. `media info` also shows the partitions, and reads
@@ -630,7 +742,10 @@ again, keeping the name and settings you chose where they still apply.
    rom add`, then press r), or a host the backend doesn't run on. One the guess says won't
    work stays available, marked unlikely, since the guess may be wrong.
 4. **Boot disk and name**: a copy of the image's volume, as `system add` takes it, or a
-   blank disk of a size you choose to install onto from the CD. A whole CD is attached
+   blank disk of a size you choose to install onto from the CD. The size suggested is 1G
+   for classic Mac OS, and more for Mac OS X: 10G for 10.4, for example, against the 4GB
+   it needs with the developer tools (see [the table](docs/PLATFORMS.md#qemu)). A smaller
+   size is taken, with a warning. A whole CD is attached
    read-only as a CD, partition map and all, and never turned into a hard disk. A new
    installer image can also be registered as media here, to attach by name later.
 5. **Settings**: the same editor as `config edit`, with the same choices and checks, and
@@ -891,9 +1006,11 @@ source_archive = "/path/to/minivmac-36.04.src.tgz"
 
 Basilisk II is a [macemu commit](https://github.com/kanjitalk755/macemu/archive/f532be3d3d70b70f272b52050ce0889a4025d624.tar.gz),
 set the same way under `[basilisk2]`. On Windows, its SDL 2 package is set under `[sdl]`.
-SheepShaver comes from the same archive, and is set under `[sheepshaver]`.
+SheepShaver comes from the same archive, and is set under `[sheepshaver]`. macman
+downloads nothing for QEMU, which is the host's own.
 
 ## License
 
 macman is MIT licensed. Mini vMac, Basilisk II, and SheepShaver, which it fetches and
-compiles but does not include, are GPL-2.0.
+compiles but does not include, are GPL-2.0. QEMU, which it runs but neither fetches
+nor includes, is GPL-2.0 too.

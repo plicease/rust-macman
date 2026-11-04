@@ -281,7 +281,8 @@ pub fn cd_paths(workdir: &Path, cdroms: &[CdImage]) -> Result<Vec<PathBuf>> {
     cdroms.sort_by_key(|cdrom| cdrom.volume != CdVolume::Hfs);
     let mut paths = Vec::new();
     for (index, cdrom) in cdroms.iter().enumerate() {
-        if cdrom.volume == CdVolume::Hfs {
+        // HFS+ is found by reading blocks too, by a guest that reads it at all.
+        if cdrom.volume != CdVolume::Iso9660 {
             paths.push(cdrom.path.clone());
             continue;
         }
@@ -463,12 +464,22 @@ mod tests {
                 path: "/installer.toast".into(),
                 volume: CdVolume::Hfs,
             },
+            CdImage {
+                path: "/tiger.img".into(),
+                volume: CdVolume::HfsPlus,
+            },
         ];
         let paths = cd_paths(&session, &cdroms).unwrap();
+        // HFS+ is read by blocks too, so it's left alone, but doesn't start the Mac.
         assert_eq!(
             paths,
-            [PathBuf::from("/installer.toast"), session.join("cd-2.cue")]
+            [
+                PathBuf::from("/installer.toast"),
+                session.join("cd-2.cue"),
+                PathBuf::from("/tiger.img")
+            ]
         );
+        assert!(!starts_from_cd(&cdroms[2..]));
         assert_eq!(
             fs::read_to_string(&paths[1]).unwrap(),
             "FILE \"cd-2.iso\" BINARY\n  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n"

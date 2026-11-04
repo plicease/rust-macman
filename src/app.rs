@@ -6,7 +6,7 @@ use crate::backend::minivmac::{MANIFEST, Manifest};
 use crate::backend::{
     Backends, CdImage, Check, CheckLevel, EmulatorBackend, LaunchRequest, ResolvedDisk,
 };
-use crate::backend::{basilisk2, minivmac, sheepshaver};
+use crate::backend::{basilisk2, minivmac, qemu, sheepshaver};
 use crate::checkpoint;
 use crate::cli::{
     CheckpointCommand, Cli, Command, ConfigCommand, CreateArgs, DiskCommand, MediaCommand,
@@ -18,8 +18,8 @@ use crate::fsutil::{
     without_verbatim_prefix,
 };
 use crate::machine::{
-    Basilisk2Settings, Config, Disk, Display, EmulatorConfig, Hardware, Machine, SCHEMA_VERSION,
-    SheepShaverSettings, SystemInfo, new_id, publish_dir,
+    Basilisk2Settings, Config, Disk, Display, EmulatorConfig, Hardware, Machine, QemuMachine,
+    QemuSettings, SCHEMA_VERSION, SheepShaverSettings, SystemInfo, new_id, publish_dir,
 };
 use crate::media::{self, MediaFormat, MediaKind};
 use crate::model::{Model, parse_display};
@@ -173,6 +173,14 @@ impl App {
                         "no boot blocks"
                     }
                 );
+                if medium.source_sha256.is_some() {
+                    eprintln!(
+                        "note: {} is an HFS+ volume with nothing around it, so the copy \
+                         registered has a partition map in front of it, which Open Firmware \
+                         needs to start from it; the file itself is unchanged",
+                        file.display()
+                    );
+                }
                 if medium.format == MediaFormat::Unrecognized {
                     eprintln!(
                         "note: macman doesn't recognize what's on {name}, so only an emulator \
@@ -482,7 +490,11 @@ impl App {
             let details = match loaded {
                 Ok(m) => MachineDetails::Readable {
                     backend: m.emulator.backend.clone(),
-                    model: m.hardware.model.map(|model| model.to_string()),
+                    model: m
+                        .hardware
+                        .model
+                        .map(|model| model.to_string())
+                        .or_else(|| m.qemu.as_ref().map(|q| q.machine.to_string())),
                     memory: m.hardware.memory.clone(),
                     display: DisplayReport {
                         width: m.display.width,
@@ -871,6 +883,9 @@ impl App {
         if let Some(source) = &medium.source {
             println!("Registered from: {source}");
         }
+        if let Some(digest) = &medium.source_sha256 {
+            println!("Registered from SHA-256: {digest}, with a partition map added in front");
+        }
         println!("SHA-256: {}", medium.sha256);
         println!(
             "Disk used: {}",
@@ -999,20 +1014,51 @@ impl App {
         };
         let is_basilisk2 = backend.name() == basilisk2::BACKEND_NAME;
         let is_sheepshaver = backend.name() == sheepshaver::BACKEND_NAME;
+        let is_qemu = backend.name() == qemu::BACKEND_NAME;
         let (basilisk2_settings, sheepshaver_settings) =
-            backend_settings(args, is_basilisk2, is_sheepshaver)?;
+            backend_settings(args, is_basilisk2, is_sheepshaver || is_qemu)?;
         let model: Option<Model> = match &args.model {
             Some(_) if is_basilisk2 => {
-                bail!("--model is for Mini vMac; Basilisk II has --cpu instead")
+                bail!("--model is for Mini vMac and QEMU; Basilisk II has --cpu instead")
             }
             Some(_) if is_sheepshaver => {
-                bail!("--model is for Mini vMac; SheepShaver is a generic PowerPC Mac")
+                bail!("--model is for Mini vMac and QEMU; SheepShaver is a generic PowerPC Mac")
             }
+            Some(_) if is_qemu => None,
             Some(model) => Some(model.parse()?),
-            None if is_basilisk2 || is_sheepshaver => None,
+            None if is_basilisk2 || is_sheepshaver || is_qemu => None,
             None => bail!("--model is required, such as --model plus"),
         };
-        let (rom, rom_path) = registry::load_rom(&self.paths, &args.rom)?;
+        let qemu_settings = if is_qemu {
+            if args.shared_folder.is_some() {
+                bail!("--shared-folder needs --backend basilisk2 or sheepshaver");
+            }
+            let machine = match &args.model {
+                Some(model) => model.parse()?,
+                None => QemuMachine::default(),
+            };
+            Some(QemuSettings {
+                machine,
+                sound: !args.no_sound,
+                network: args.network.unwrap_or_default(),
+            })
+        } else {
+            None
+        };
+        let (basilisk2_settings, sheepshaver_settings) = if is_qemu {
+            (None, None)
+        } else {
+            (basilisk2_settings, sheepshaver_settings)
+        };
+        let rom = match (&args.rom, backend.uses_rom()) {
+            (Some(name), true) => Some(registry::load_rom(&self.paths, name)?),
+            (None, true) => bail!("--rom is required for {}", backend.name()),
+            (Some(_), false) => bail!(
+                "--rom isn't used by {}, which starts from its own Open Firmware; leave it out",
+                backend.name()
+            ),
+            (None, false) => None,
+        };
         let mut warnings = Vec::new();
         let unreadable = |format: DiskFormat, what: &str| match model {
             Some(model) if format == DiskFormat::RawHfs && !model.reads_hfs() => Some(format!(
@@ -1031,6 +1077,22 @@ impl App {
                 let format = disk::detect_format(&template)?;
                 warnings.extend(unreadable(format, &system.name));
                 (system.version, BootDisk::Template(template))
+            }
+            // QEMU attaches a disk whole, so a partition map, and the driver
+            // in it, are kept.
+            (None, None, Some(image)) if is_qemu => {
+                if disk::classify(image)? == Classification::Supported(DiskFormat::DiskCopy42) {
+                    bail!(
+                        "{} is a Disk Copy 4.2 image, which QEMU can't read; take the volume out \
+                         with `macman disk extract` first",
+                        image.display()
+                    );
+                }
+                disk::detect_format(image).or_else(|error| match disk::classify(image)? {
+                    Classification::Partitioned(_) => Ok(DiskFormat::RawHfs),
+                    _ => Err(error),
+                })?;
+                (None, BootDisk::Template(image.to_path_buf()))
             }
             (None, None, Some(image)) => {
                 disk::plan_import(image, None, false)?;
@@ -1080,14 +1142,17 @@ impl App {
             (Some(display), _) => parse_display(display)?,
             (None, Some(model)) => model.default_display(),
             (None, None) if is_sheepshaver => sheepshaver::DEFAULT_DISPLAY,
+            (None, None) if is_qemu => qemu::DEFAULT_DISPLAY,
             (None, None) => basilisk2::DEFAULT_DISPLAY,
         };
         let memory = match (&args.memory, model) {
             (Some(memory), _) => memory.to_ascii_uppercase(),
             (None, Some(model)) => model.default_memory().to_string(),
             (None, None) if is_sheepshaver => sheepshaver::DEFAULT_MEMORY.to_string(),
+            (None, None) if is_qemu => qemu::DEFAULT_MEMORY.to_string(),
             (None, None) => basilisk2::DEFAULT_MEMORY.to_string(),
         };
+        let scale = args.scale.unwrap_or(if is_qemu { 1 } else { 2 });
         let machine = Machine {
             schema_version: SCHEMA_VERSION,
             name: args.name.clone(),
@@ -1099,19 +1164,20 @@ impl App {
             },
             hardware: Hardware {
                 model,
-                rom: rom.name.clone(),
+                rom: rom.as_ref().map(|(rom, _)| rom.name.clone()),
                 memory,
             },
             display: Display {
                 width,
                 height,
                 depth,
-                scale: args.scale,
+                scale,
                 fullscreen: args.fullscreen,
             },
             system: SystemInfo { version },
             basilisk2: basilisk2_settings,
             sheepshaver: sheepshaver_settings,
+            qemu: qemu_settings,
             disks: vec![Disk {
                 path: SYSTEM_DISK.to_string(),
                 readonly: false,
@@ -1119,7 +1185,9 @@ impl App {
             }],
         };
         backend.check_host()?;
-        backend.check_rom(&machine, &rom, &rom_path)?;
+        if let Some((rom, rom_path)) = &rom {
+            backend.check_rom(&machine, rom, rom_path)?;
+        }
         backend.validate(&machine)?;
         Ok(Prepared {
             machine,
@@ -1136,9 +1204,8 @@ impl App {
             bail!("machine {:?} already exists", machine.name);
         }
         let backend = self.backends.get(&machine.emulator.backend)?;
-        let (rom, rom_path) = registry::load_rom(&self.paths, &machine.hardware.rom)?;
         backend.check_host()?;
-        backend.check_rom(machine, &rom, &rom_path)?;
+        self.check_machine_rom(backend, machine)?;
         backend.validate(machine)?;
         backend.validate_disks(machine, machine.disks.len())?;
         self.publish_machine(machine, |dir| match &prepared.boot_disk {
@@ -1152,6 +1219,16 @@ impl App {
             }
             BootDisk::Blank(size) => create_blank_disk(&dir.join(SYSTEM_DISK), *size),
         })
+    }
+
+    /// Check the machine's ROM against its backend: one it needs, or none, if
+    /// the backend has its own firmware. Returns the ROM's file, if any.
+    fn check_machine_rom(
+        &self,
+        backend: &dyn EmulatorBackend,
+        machine: &Machine,
+    ) -> Result<Option<PathBuf>> {
+        check_machine_rom(&self.paths, backend, machine)
     }
 
     /// Fill a hidden directory, then rename it into place, so that a failure
@@ -1557,9 +1634,12 @@ impl App {
         let backend = self.backends.get(&machine.emulator.backend)?;
         backend.validate(&machine)?;
 
-        let (rom, rom_path) = registry::load_rom(&self.paths, &machine.hardware.rom)?;
-        registry::verify(&rom_path, "ROM", &rom.name, &rom.sha256)?;
-        backend.check_rom(&machine, &rom, &rom_path)?;
+        let rom_path = self.check_machine_rom(backend, &machine)?;
+        if let Some(name) = &machine.hardware.rom {
+            let (rom, file) = registry::load_rom(&self.paths, name)?;
+            registry::verify(&file, "ROM", &rom.name, &rom.sha256)?;
+        }
+        let rom_path = rom_path.unwrap_or_default();
 
         // Registered media join the CDs and disks given by path, each by its kind.
         // A medium is never written, so a disk one goes as a throwaway copy.
@@ -1607,9 +1687,15 @@ impl App {
                 && extra.is_empty()
                 && disk::classify(path)? == Classification::Blank
             {
+                // QEMU's Open Firmware stops at its own prompt, not the Mac's.
+                let stops = if backend.uses_rom() {
+                    "at a question mark"
+                } else {
+                    "in Open Firmware"
+                };
                 eprintln!(
-                    "note: the boot disk of {name} is blank, so it will stop at a question \
-                     mark; install onto it with `macman run {name} --media NAME` or `--cdrom FILE`"
+                    "note: the boot disk of {name} is blank, so it will stop {stops}; install \
+                     onto it with `macman run {name} --media NAME` or `--cdrom FILE`"
                 );
             }
             if saved_disk_format(backend, path)? == Some(disk::DiskFormat::DiskCopy42)
@@ -2086,8 +2172,7 @@ impl App {
         let backend = self.backends.get(&machine.emulator.backend)?;
         backend.check_host()?;
         backend.validate(&machine)?;
-        let (rom, file) = registry::load_rom(&self.paths, &machine.hardware.rom)?;
-        backend.check_rom(&machine, &rom, &file)?;
+        self.check_machine_rom(backend, &machine)?;
         for (path, _) in machine.disk_paths(&self.paths)? {
             if !path.exists() {
                 let file: PathBuf = path.file_name().map(PathBuf::from).unwrap_or_default();
@@ -2099,6 +2184,35 @@ impl App {
             }
         }
         Ok(())
+    }
+}
+
+/// Check `machine`'s ROM against its backend, returning the ROM's file if it
+/// has one. A backend with its own firmware takes none.
+pub fn check_machine_rom(
+    paths: &Paths,
+    backend: &dyn EmulatorBackend,
+    machine: &Machine,
+) -> Result<Option<PathBuf>> {
+    match (&machine.hardware.rom, backend.uses_rom()) {
+        (Some(name), true) => {
+            let (rom, file) = registry::load_rom(paths, name)?;
+            backend.check_rom(machine, &rom, &file)?;
+            Ok(Some(file))
+        }
+        (None, true) => bail!(
+            "machine {:?} names no ROM, which {} needs; set one with `macman config set {} \
+             hardware.rom NAME`",
+            machine.name,
+            backend.name(),
+            machine.name
+        ),
+        (Some(name), false) => bail!(
+            "machine {:?} names ROM {name:?}, which {} doesn't use",
+            machine.name,
+            backend.name()
+        ),
+        (None, false) => Ok(None),
     }
 }
 

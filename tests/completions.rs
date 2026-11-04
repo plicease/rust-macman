@@ -64,8 +64,8 @@ fn zsh_completes_choices_and_paths() {
     let text = script("zsh");
     assert!(text.starts_with("#compdef macman"), "{text}");
     for expected in [
-        ":BACKEND:(minivmac basilisk2 sheepshaver)",
-        "(twig43 twiggy 128k 512ke plus se sefdhd classic pb100 ii iix)",
+        ":BACKEND:(minivmac basilisk2 sheepshaver qemu-ppc)",
+        "(twig43 twiggy 128k 512ke plus se sefdhd classic pb100 ii iix mac99 g3beige)",
         "68040",
         "slirp",
         "(bash elvish fish powershell zsh)",
@@ -154,7 +154,7 @@ fn bash_completes_commands_and_backends() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     let text = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(text, "import\nminivmac basilisk2 sheepshaver\n");
+    assert_eq!(text, "import\nminivmac basilisk2 sheepshaver qemu-ppc\n");
 }
 
 #[test]

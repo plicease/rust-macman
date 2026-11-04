@@ -239,8 +239,7 @@ impl<'a> Editor<'a> {
         let backend = self.backends.get(&machine.emulator.backend)?;
         backend.validate(machine)?;
         backend.validate_disks(machine, machine.disks.len())?;
-        let (rom, file) = registry::load_rom(self.paths, &machine.hardware.rom)?;
-        backend.check_rom(machine, &rom, &file)?;
+        crate::app::check_machine_rom(self.paths, backend, machine)?;
         if let Some(folder) = shared_folder(machine)
             && !folder.is_dir()
         {
@@ -295,6 +294,11 @@ impl<'a> Editor<'a> {
         let machine = &self.draft;
         let backend = machine.emulator.backend.as_str();
         let macemu = matches!(backend, "basilisk2" | "sheepshaver");
+        let qemu = backend == crate::backend::qemu::BACKEND_NAME;
+        let uses_rom = self
+            .backends
+            .get(backend)
+            .is_ok_and(|backend| backend.uses_rom());
         let why = |reason: &'static str| if self.unsaved { CHOSEN_EARLIER } else { reason };
         let mut fields = vec![
             self.fixed("Machine", "Name", machine.name.clone(), why(RENAME)),
@@ -307,6 +311,10 @@ impl<'a> Editor<'a> {
         ];
         if let Some(model) = machine.hardware.model {
             fields.push(self.fixed("Machine", "Model", model.to_string(), why(MODEL_FIXED)));
+        }
+        if qemu {
+            let kind = machine.qemu.clone().unwrap_or_default().machine;
+            fields.push(self.fixed("Machine", "Model", kind.to_string(), why(MODEL_FIXED)));
         }
         fields.push(self.field(
             FieldId::Ephemeral,
@@ -333,18 +341,20 @@ impl<'a> Editor<'a> {
             .join(", ");
         fields.push(self.fixed("Machine", "Disks", disks, why(DISKS_FIXED)));
 
-        let roms = self.choices(FieldId::Rom, self.roms.iter().cloned());
-        fields.push(self.field(
-            FieldId::Rom,
-            "Hardware",
-            "ROM",
-            "Registered ROMs this machine's backend and model can start from. A different \
-             ROM may not start the system already installed.",
-            Kind::Choice {
-                choices: roms,
-                typed: false,
-            },
-        ));
+        if uses_rom {
+            let roms = self.choices(FieldId::Rom, self.roms.iter().cloned());
+            fields.push(self.field(
+                FieldId::Rom,
+                "Hardware",
+                "ROM",
+                "Registered ROMs this machine's backend and model can start from. A different \
+                 ROM may not start the system already installed.",
+                Kind::Choice {
+                    choices: roms,
+                    typed: false,
+                },
+            ));
+        }
         let memory = self.choices(FieldId::Memory, MEMORY.iter().map(|m| m.to_string()));
         fields.push(self.field(
             FieldId::Memory,
@@ -424,7 +434,7 @@ impl<'a> Editor<'a> {
             Kind::Toggle,
         ));
 
-        if macemu {
+        if macemu || qemu {
             fields.push(self.field(
                 FieldId::Sound,
                 "Emulator",
@@ -446,6 +456,8 @@ impl<'a> Editor<'a> {
                     typed: false,
                 },
             ));
+        }
+        if macemu {
             // Where the backend takes no shared folder at all, as Basilisk II
             // on Windows, say so rather than offer one. Any folder will do to
             // ask, and the machine's own always exists. One already set stays
@@ -635,6 +647,9 @@ fn normalized(machine: &Machine) -> Machine {
         "sheepshaver" => {
             machine.sheepshaver.get_or_insert_with(Default::default);
         }
+        crate::backend::qemu::BACKEND_NAME => {
+            machine.qemu.get_or_insert_with(Default::default);
+        }
         _ => {}
     }
     machine
@@ -677,10 +692,14 @@ pub fn value_of(machine: &Machine, id: FieldId) -> String {
     let basilisk2 = machine.basilisk2.clone().unwrap_or_default();
     let sheepshaver = machine.sheepshaver.clone().unwrap_or_default();
     let is_sheepshaver = machine.emulator.backend == "sheepshaver";
+    let qemu = machine
+        .qemu
+        .clone()
+        .filter(|_| machine.emulator.backend == crate::backend::qemu::BACKEND_NAME);
     let display = &machine.display;
     match id {
         FieldId::Ephemeral => on_off(machine.ephemeral),
-        FieldId::Rom => machine.hardware.rom.clone(),
+        FieldId::Rom => machine.hardware.rom.clone().unwrap_or_default(),
         FieldId::Memory => machine.hardware.memory.clone(),
         FieldId::Cpu => value_name(&basilisk2.cpu),
         FieldId::Fpu => on_off(basilisk2.fpu),
@@ -688,6 +707,8 @@ pub fn value_of(machine: &Machine, id: FieldId) -> String {
         FieldId::Depth => display.depth.to_string(),
         FieldId::Scale => display.scale.to_string(),
         FieldId::Fullscreen => on_off(display.fullscreen),
+        FieldId::Sound if qemu.is_some() => on_off(qemu.unwrap_or_default().sound),
+        FieldId::Network if qemu.is_some() => value_name(&qemu.unwrap_or_default().network),
         FieldId::Sound if is_sheepshaver => on_off(sheepshaver.sound),
         FieldId::Sound => on_off(basilisk2.sound),
         FieldId::Network if is_sheepshaver => value_name(&sheepshaver.network),
@@ -722,7 +743,7 @@ pub(crate) fn apply(machine: &mut Machine, id: FieldId, value: &str) -> Result<(
         FieldId::Ephemeral => machine.ephemeral = parse_toggle(value)?,
         FieldId::Rom => {
             validate_name("ROM", value)?;
-            machine.hardware.rom = value.to_string();
+            machine.hardware.rom = Some(value.to_string());
         }
         FieldId::Memory => {
             let memory = value.trim().to_ascii_uppercase();
@@ -752,6 +773,17 @@ pub(crate) fn apply(machine: &mut Machine, id: FieldId, value: &str) -> Result<(
         FieldId::Depth => machine.display.depth = parse_number("the depth", value)?,
         FieldId::Scale => machine.display.scale = parse_number("the scale", value)?,
         FieldId::Fullscreen => machine.display.fullscreen = parse_toggle(value)?,
+        FieldId::Sound | FieldId::Network
+            if machine.emulator.backend == crate::backend::qemu::BACKEND_NAME =>
+        {
+            let mut settings = machine.qemu.clone().unwrap_or_default();
+            if id == FieldId::Sound {
+                settings.sound = parse_toggle(value)?;
+            } else {
+                settings.network = Network::from_str(value, true).map_err(anyhow::Error::msg)?;
+            }
+            machine.qemu = Some(settings);
+        }
         FieldId::Sound if is_sheepshaver => {
             let mut settings = sheepshaver.clone();
             settings.sound = parse_toggle(value)?;
@@ -922,6 +954,15 @@ pub(crate) mod tests {
                 "tnt",
             ],
         );
+    }
+
+    /// A QEMU machine, saved directly, as `create` would need a real QEMU.
+    pub(crate) fn make_qemu(paths: &Paths) {
+        let machine = crate::backend::qemu::tests::machine(crate::machine::QemuMachine::Mac99);
+        let dir = paths.machine(&machine.name);
+        fs::create_dir_all(&dir).unwrap();
+        machine.save_to(&dir).unwrap();
+        fs::write(dir.join("system.dsk"), vec![0u8; 1 << 20]).unwrap();
     }
 
     fn choices(editor: &Editor, id: FieldId) -> Vec<(String, bool)> {

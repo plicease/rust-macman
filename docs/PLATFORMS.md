@@ -290,6 +290,103 @@ because the precompiled JIT operations may assume real addressing. It hasn't bee
 
 For the same reason, the emulator forces SDL onto X11, so a Wayland desktop needs XWayland.
 
+## QEMU
+
+| Host | Status |
+|---|---|
+| Linux x86-64 | Candidate: **starts the Mac OS 9.2.1 CD to the Finder** on `mac99`, smoke test unfinished |
+| macOS | A machine exported on Linux was imported and ran, with networking and sound; smoke test not run |
+| Windows | Ran, with networking and sound; smoke test not run |
+| Others | Untried |
+
+macman runs the host's own `qemu-system-ppc`, so the backend is offered wherever one is
+found. Linux x86-64 has been tried most: Ubuntu 26.04, with its QEMU 10.2.1 and OpenBIOS
+v1.1. On macOS, only a machine moved from there has been run, and on Windows, only a
+machine run. No host counts as supported until [the smoke test](SMOKE_TEST.md#qemu)
+has passed there, and release targets don't depend on this backend.
+
+These parts of the smoke test have been seen to work on that host:
+
+- `macman doctor` reports QEMU's version and path, and that it starts a `mac99` and a
+  `g3beige`.
+- `doctor`'s other QEMU checks were seen with stand-ins, as the packages weren't removed.
+  With no `qemu-system-ppc` on `PATH`, it warned QEMU isn't available, and failed each
+  qemu-ppc machine, with the install hint. A wrapper on `PATH` passing a missing `-bios`
+  made it fail both machines, quoting QEMU, and name `openbios-ppc`. One leaving `sdl` out
+  of `-display help` made it warn there's no SDL window, and name `qemu-system-gui`.
+- `macman create --backend qemu-ppc --disk-size 2G`, then `macman run --media` with the Mac
+  OS 9.2.1 CD, started to the Finder from the CD, and quitting QEMU ended the run with
+  exit code 0 and no session left.
+- With no CD, a blank disk stops at OpenBIOS's `0 >` prompt.
+- A second run of a running machine is refused, and `doctor` still reports it runnable.
+- Killing macman with `kill -9` stops QEMU, and the next run warns about the earlier one.
+- On KDE Plasma under Wayland, QEMU's GTK window let the grabbed pointer slip out, even
+  in full screen, and SDL's held it, which is why macman asks for SDL on Linux. `macman
+  run` opens SDL's window by itself, and Ctrl-Alt-G lets the mouse go there. With the
+  Mac's relative mouse, the pointer is slower in full screen than in a window, as full
+  screen magnifies the Mac's display. Full screen at 1440x960 on a 2880x1920 panel, with
+  the speed raised in the Mouse control panel, was usable, if less responsive than the
+  host. The new speed took effect only once the control panel's window closed. Mac OS
+  9.2.1 ignored QEMU's `usb-tablet`.
+- QEMU emulates no Power Mac sound chip, so Mac OS 9.2.1 had no sound. With
+  `-device usb-audio`, chosen as the output in the Sound control panel, it played. Until
+  then, the device only had silence from it. It was tried first through a wrapper, then
+  as macman adds it for a `mac99` with sound on, where the Sound control panel's choice,
+  saved on the Mac's disk, carried over to the next run.
+- `slirp` networking worked in Mac OS 9.2.1.
+- A machine made by the wizard from the 9.2.1 CD installed onto its blank disk, and then
+  started from that disk with no CD.
+
+- The wizard, started from the registered Mac OS X 10.4 DVD, recommended `mac99` and
+  suggested a 10G blank disk. A size under 4G, typed in, was taken with a warning.
+- Mac OS X 10.4's retail DVD, as a bare HFS+ volume, registered with `media add`, which
+  put a partition map in front, and `macman run --media` started its installer to the
+  language screen. OpenBIOS found no startup file on the volume without the map.
+
+- A machine set to full screen started in a window: `-display` replaces every display
+  option before it, `-full-screen` among them, as `query-display-options` over QMP showed.
+  macman now passes `-display sdl` first, and the machine starts in full screen.
+- `run --disk --readonly` failed, as QEMU's IDE hard disk refuses `readonly=on` with
+  "Block node is read-only". macman now gives it `snapshot=on`, with which QEMU starts.
+  Mac OS 9.2.1's Drive Setup saw two synthetic HFS images attached that way, and
+  initialized them. The next run found them as they were, and their hashes were unchanged.
+  Mac OS 9 didn't mount them first, as they have no ATA driver partition, which only Drive
+  Setup adds. A copy initialized by Drive Setup in a writable run then mounted with
+  `--readonly`, with the first run's data. A change made in one `--readonly` run was gone
+  in the next, and the file was unchanged.
+
+What's been found about guests:
+
+- The Mac OS 9.0.4 CD didn't start on `mac99`, with or without `via=pmu`.
+- A `g3beige` can't start classic Mac OS: OpenBIOS has no Old World ROM, which it needs.
+  It's offered for PowerPC Mac OS X.
+- Mac OS X 10.4's kernel panics, with `pmap_map_block: collision`, with some memory sizes:
+  770M, 1001M, 1014M, 1018M, 1022M, 1023M, 1540M, and 2044M did, and 260M, 510M, 516M,
+  772M, 896M, 960M, 992M, 1000M, 1008M, 1012M, 1016M, 1020M, 1024M, 1056M, 1152M, 1280M, 1536M, and
+  2048M didn't. No rule fits both but multiples of 32M, which macman requires.
+- Mac OS X 10.4's installer starts on `mac99`. Installing it, other releases, and Mac OS X
+  on a `g3beige` haven't been tried.
+
+A blank disk for Mac OS X, from the wizard, is bigger than the 1G it suggests for classic
+Mac OS: Apple's requirement for the release, with room for applications and updates. A
+smaller size typed in is taken, with a warning that it's below the requirement.
+
+| Release | Apple's requirement | Wizard suggests |
+|---|---|---|
+| 10.0, 10.1 | 1.5GB ([Macintosh Repository](https://www.macintoshrepository.org/45-mac-os-x-for-ppc-osx-10-0-10-1-10-2-10-3-10-4-10-5), [TechRadar](https://www.techradar.com/news/computing/apple/macos-through-the-ages-a-visual-guide-1254878/2)) | 4G |
+| 10.2 | 3GB ([TechRadar](https://www.techradar.com/news/computing/apple/macos-through-the-ages-a-visual-guide-1254878/2)) | 6G |
+| 10.3 | 1.5GB ([Wikipedia](https://en.wikipedia.org/wiki/Mac_OS_X_Panther)) | 6G |
+| 10.4 | 3GB, 4GB with the Xcode developer tools ([Wikipedia](https://en.wikipedia.org/wiki/Mac_OS_X_Tiger), [Apple Discussions](https://discussions.apple.com/thread/2411058?page=1)) | 10G |
+| 10.5 | 9GB ([Apple](https://support.apple.com/kb/sp517)) | 20G |
+
+The warning uses 4GB for 10.4, as the developer tools are on its DVD. Disks are sparse
+where the host allows, so a bigger one costs little until it fills.
+
+A machine exported on Linux, imported on macOS with its own QEMU, ran there, with
+networking and sound. On Windows, with its own QEMU, sound and networking worked too. The wizard recommends `mac99` for Mac OS 9.1 to 9.2.2, from 9.2.1's
+start, and Mac OS X 10.4, from its installer's start, and never `g3beige` for classic Mac
+OS.
+
 ## Release targets
 
 `.github/workflows/release.yml` lists its targets explicitly instead of using the
