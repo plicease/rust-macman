@@ -12,8 +12,9 @@
 //!   with ADB.
 //! - Disks and CDs are IDE drives, four in all: QEMU refuses a fifth. Images are
 //!   given whole, as raw disks, so partitioned disks and CDs mount as they are.
-//!   OpenBIOS starts from the first CD when one has an HFS volume (`-boot d`),
-//!   and otherwise from the first disk (`-boot c`).
+//!   OpenBIOS starts from the first CD when one has an HFS volume, and
+//!   otherwise from the first disk. A CD is started from once (`-boot
+//!   order=c,once=d`), so an installer's Restart comes up from the disk.
 //! - The display size and depth go to OpenBIOS (`-g`), which offers 8, 15, and
 //!   32 bits. The window isn't magnified, so the scale is 1.
 //! - Networking is QEMU's user-mode NAT with a Sun GEM card, which Mac OS 9 and
@@ -319,7 +320,14 @@ pub fn arguments(request: &LaunchRequest<'_>) -> Result<Vec<OsString>> {
         "-prom-env".into(),
         "auto-boot?=true".into(),
         "-boot".into(),
-        if starts_from_cd { "d" } else { "c" }.into(),
+        // From the CD only until the guest restarts, as installers end with
+        // Restart: then it's the disk, with the new system.
+        if starts_from_cd {
+            "order=c,once=d"
+        } else {
+            "c"
+        }
+        .into(),
     ];
     for disk in request.disks {
         arguments.extend(["-drive".into(), drive(&disk.path, "disk", disk.writable)]);
@@ -693,7 +701,7 @@ pub(crate) mod tests {
         };
         assert_eq!(
             strings(&arguments(&request).unwrap()).join(" "),
-            "-M mac99,via=pmu -m 512 -g 1024x768x32 -name g4 -prom-env auto-boot?=true -boot d \
+            "-M mac99,via=pmu -m 512 -g 1024x768x32 -name g4 -prom-env auto-boot?=true -boot order=c,once=d \
              -drive file=/m/g4/system.dsk,format=raw,media=disk \
              -drive file=/data/a,,b.img,format=raw,media=disk,snapshot=on \
              -drive file=/cds/Mac OS 9.toast,format=raw,media=cdrom,readonly=on \
@@ -762,7 +770,7 @@ pub(crate) mod tests {
             verbose: false,
         };
         let arguments = strings(&arguments(&request).unwrap()).join(" ");
-        assert!(arguments.contains(" -boot d "), "{arguments}");
+        assert!(arguments.contains(" -boot order=c,once=d "), "{arguments}");
         let tiger = arguments.find("tiger.img").unwrap();
         assert!(tiger < arguments.find("data.iso").unwrap(), "{arguments}");
     }

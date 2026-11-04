@@ -343,7 +343,7 @@ fn an_hfs_cd_is_started_from_and_never_written() {
     let run = h.runs().pop().unwrap();
     let resolved = fs::canonicalize(&cd).unwrap();
     let doubled = resolved.to_str().unwrap().replace(',', ",,");
-    assert!(run.contains(" -boot d "), "{run}");
+    assert!(run.contains(" -boot order=c,once=d "), "{run}");
     assert!(
         run.contains(&format!(
             "-drive file={},format=raw,media=disk -drive file={doubled},format=raw,media=cdrom,readonly=on",
@@ -357,7 +357,7 @@ fn an_hfs_cd_is_started_from_and_never_written() {
         .unwrap();
     h.cmd(&["run", "new", "--media", "os9"]).unwrap();
     let run = h.runs().pop().unwrap();
-    assert!(run.contains(" -boot d "), "{run}");
+    assert!(run.contains(" -boot order=c,once=d "), "{run}");
     assert!(run.contains("media=cdrom,readonly=on"), "{run}");
 
     // Without one, it starts from its disk.

@@ -343,8 +343,11 @@ These parts of the smoke test have been seen to work on that host:
   put a partition map in front, and `macman run --media` started its installer to the
   language screen. OpenBIOS found no startup file on the volume without the map.
 - Mac OS X 10.4 installed from that DVD onto a 10G blank disk. The installer offers only
-  Restart when it's done, not Shut Down, and with the DVD still attached macman starts
-  from it, so quit QEMU then. The disk was left as a partition
+  Restart when it's done, not Shut Down, and with `-boot d` the restart went back to the
+  installer. macman now passes `-boot order=c,once=d`, so only the first start is from
+  the DVD. A copy of the installed disk, started that way with the DVD and then reset
+  from QEMU's monitor, read the DVD first and then its own disk, to the Finder with the
+  DVD mounted. The disk was left as a partition
   map and one HFS+ volume, and then started from that disk with no DVD. The first start
   was slow: the gray Apple stayed for several minutes, with no spinner, and the screen
   then turned blue with a spinning beach ball before going on. Booting a copy headless

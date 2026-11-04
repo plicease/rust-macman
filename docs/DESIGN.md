@@ -286,7 +286,8 @@ these ways:
   steps of 32M: Mac OS X 10.4's kernel panicked, with `pmap_map_block: collision`, on
   sizes such as 770M, 1023M, 1540M, and 2044M, and started on every multiple of 32M tried.
 - **Launch:** disks and CDs are given whole and raw, CDs read-only, with HFS discs first,
-  and `-boot d` when one can start the Mac. A read-only disk gets `snapshot=on`, as QEMU's
+  and `-boot order=c,once=d` when one can start the Mac: from the CD, and from the disk
+  once the guest restarts, as Mac OS X's installer offers only Restart. A read-only disk gets `snapshot=on`, as QEMU's
   IDE hard disk refuses `readonly=on` ("Block node is read-only"). `mac99` gets `via=pmu`, for USB input.
   `auto-boot?` is set, so OpenBIOS starts the guest without stopping.
 - **Sound:** QEMU has neither Power Mac's sound chip, so with sound on a `mac99` gets
