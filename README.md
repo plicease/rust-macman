@@ -573,6 +573,15 @@ With a blank disk and no CD, QEMU stops at OpenBIOS's `0 >` prompt; close the wi
 and attach an installer. Once you click in QEMU's window, it keeps the mouse; Ctrl-Alt-G
 lets it go.
 
+On Linux, macman asks for QEMU's SDL window. QEMU's usual GTK window holds the mouse by
+moving the pointer back, which Wayland doesn't allow, so the pointer slips out of it.
+`macman doctor` warns when QEMU has no SDL window; on Debian and Ubuntu it comes with
+`qemu-system-gui`. The Mac gets a relative USB mouse, as Mac OS 9 doesn't drive QEMU's
+absolute tablet, so the pointer moves by the host's mouse movement, not by where it is.
+Full screen magnifies the Mac's screen, so the pointer seems slower there than in a
+window; set its speed in the Mouse control panel for the way you use it, or choose a
+larger `--display` for full screen.
+
 ## Installing from a CD
 
 On Linux and macOS, a SheepShaver or Basilisk II machine can start with a blank disk

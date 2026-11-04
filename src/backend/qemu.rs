@@ -58,6 +58,8 @@ pub struct Found {
     pub version: String,
     /// The machine types it emulates, as `-machine help` lists them.
     pub machines: Vec<String>,
+    /// Its windows, as `-display help` lists them; empty if it doesn't say.
+    pub displays: Vec<String>,
 }
 
 pub struct Qemu {
@@ -137,10 +139,14 @@ fn discover(chosen: Option<&Path>) -> Result<Found> {
     let version = parse_version(&output(&path, &["--version"])?)
         .with_context(|| format!("{} doesn't say it's QEMU in its --version", path.display()))?;
     let machines = parse_machines(&output(&path, &["-machine", "help"])?);
+    let displays = output(&path, &["-display", "help"])
+        .map(|text| parse_displays(&text))
+        .unwrap_or_default();
     Ok(Found {
         path,
         version,
         machines,
+        displays,
     })
 }
 
@@ -164,6 +170,28 @@ pub fn parse_machines(text: &str) -> Vec<String> {
         .filter_map(|line| line.split_whitespace().next())
         .map(str::to_string)
         .collect()
+}
+
+/// The display backends in `-display help`, one per line after its heading.
+pub fn parse_displays(text: &str) -> Vec<String> {
+    text.lines()
+        .skip_while(|line| !line.starts_with("Available display backend types"))
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
+        .map(|line| line.trim().to_string())
+        .collect()
+}
+
+/// The window to ask for. On Linux, SDL's: QEMU's default there is GTK's,
+/// which holds the mouse by moving the pointer back, and Wayland lets no
+/// program move it, so the pointer slips out. SDL confines it instead.
+/// Elsewhere, QEMU's own choice.
+pub fn display_arguments(displays: &[String]) -> Vec<OsString> {
+    if cfg!(target_os = "linux") && displays.iter().any(|d| d == "sdl") {
+        vec!["-display".into(), "sdl".into()]
+    } else {
+        Vec::new()
+    }
 }
 
 pub fn settings(machine: &Machine) -> QemuSettings {
@@ -472,6 +500,7 @@ impl EmulatorBackend for Qemu {
         let mut command = Command::new(&request.executable.path);
         command
             .args(arguments(request)?)
+            .args(display_arguments(&self.found()?.displays))
             .current_dir(request.workdir);
         supervise(command, request.verbose)
     }
@@ -491,6 +520,12 @@ impl EmulatorBackend for Qemu {
             found.version,
             found.path.display()
         ))];
+        if cfg!(target_os = "linux") && !found.displays.iter().any(|d| d == "sdl") {
+            checks.push(Check::warn(
+                "QEMU has no SDL window, so on Wayland the mouse may slip out of its window",
+                "install QEMU's SDL display (Debian and Ubuntu: `apt install qemu-system-gui`)",
+            ));
+        }
         for kind in [QemuMachine::Mac99, QemuMachine::G3beige] {
             if found.machines.iter().any(|m| m == kind.as_str()) {
                 checks.push(firmware_check(&found.path, kind));
@@ -573,6 +608,18 @@ pub(crate) mod tests {
                     g3beige              Heathrow based PowerMac (default)\n\
                     mac99                Mac99 based PowerMac\n";
         assert_eq!(parse_machines(help), ["40p", "g3beige", "mac99"]);
+        // As QEMU 10.2.1 prints it.
+        let help = "Available display backend types:\nnone\ngtk\nsdl\negl-headless\n\n\
+                    Some display backends support suboptions, which can be set with\n";
+        let displays = parse_displays(help);
+        assert_eq!(displays, ["none", "gtk", "sdl", "egl-headless"]);
+        let chosen = strings(&display_arguments(&displays));
+        if cfg!(target_os = "linux") {
+            assert_eq!(chosen, ["-display", "sdl"]);
+        } else {
+            assert!(chosen.is_empty());
+        }
+        assert!(display_arguments(&displays[..2]).is_empty());
     }
 
     #[test]

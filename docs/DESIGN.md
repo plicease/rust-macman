@@ -286,6 +286,10 @@ these ways:
 - **Launch:** disks and CDs are given whole and raw, CDs read-only, with HFS discs first,
   and `-boot d` when one can start the Mac. `mac99` gets `via=pmu`, for USB input.
   `auto-boot?` is set, so OpenBIOS starts the guest without stopping.
+- **Window:** on Linux, SDL's when `-display help` lists it. GTK's, QEMU's default, grabs
+  the mouse by warping the pointer, which Wayland refuses, so the pointer escapes; SDL
+  confines it. Elsewhere QEMU chooses. Mac OS 9 doesn't drive `usb-tablet`, so the mouse
+  stays relative.
 - **Exit status:** QEMU reports problems on stderr and exits with a failure, so macman
   shows its words. On Linux it stops with macman, as Basilisk II does.
 
