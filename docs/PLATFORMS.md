@@ -342,6 +342,10 @@ These parts of the smoke test have been seen to work on that host:
 
 - `run --disk --readonly` failed, as QEMU's IDE hard disk refuses `readonly=on` with
   "Block node is read-only". macman now gives it `snapshot=on`, with which QEMU starts.
+  Mac OS 9.2.1's Drive Setup saw two synthetic HFS images attached that way, and
+  initialized them. The next run found them as they were, and their hashes were unchanged.
+  Mac OS 9 didn't mount them first, as they have no ATA driver partition, which only Drive
+  Setup adds.
 
 What's been found about guests:
 
@@ -370,7 +374,7 @@ smaller size typed in is taken, with a warning that it's below the requirement.
 The warning uses 4GB for 10.4, as the developer tools are on its DVD. Disks are sparse
 where the host allows, so a bigger one costs little until it fills.
 
-These haven't been tested: a read-only extra disk, and moving a machine to another host. The wizard
+These haven't been tested: a read-only disk the guest has initialized, and moving a machine to another host. The wizard
 recommends `mac99` for Mac OS 9.1 to 9.2.2, from 9.2.1's start, and Mac OS X 10.4, from its
 installer's start, and never `g3beige` for classic Mac OS.
 
