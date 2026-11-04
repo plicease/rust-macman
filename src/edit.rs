@@ -19,7 +19,7 @@ use std::path::PathBuf;
 /// editor also takes any other size typed in.
 const MEMORY: &[&str] = &[
     "128K", "512K", "1M", "2M", "2.5M", "4M", "5M", "8M", "16M", "24M", "32M", "48M", "64M", "96M",
-    "128M", "192M", "256M", "384M", "512M", "768M", "1023M", "1024M",
+    "128M", "192M", "256M", "384M", "512M", "768M", "1023M", "1024M", "1536M", "2048M",
 ];
 /// Display sizes offered, as for [`MEMORY`].
 const SIZES: &[(u32, u32)] = &[
@@ -954,6 +954,22 @@ pub(crate) mod tests {
                 "tnt",
             ],
         );
+    }
+
+    #[test]
+    fn qemu_offers_memory_up_to_its_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        make_qemu(&paths);
+        let backends = crate::default_backends(&paths).unwrap();
+        let editor = Editor::open(&paths, &backends, "g4").unwrap();
+
+        let memory = allowed(&editor, FieldId::Memory);
+        for size in ["1024M", "1536M", "2048M"] {
+            assert!(memory.contains(&size.to_string()), "{size}: {memory:?}");
+        }
+        // Mac OS X panics on sizes that aren't a multiple of 32M.
+        assert!(!memory.contains(&"1023M".to_string()), "{memory:?}");
     }
 
     /// A QEMU machine, saved directly, as `create` would need a real QEMU.
