@@ -579,7 +579,13 @@ moving the pointer back, which Wayland doesn't allow, so the pointer slips out o
 `qemu-system-gui`. The Mac gets a relative USB mouse, as Mac OS 9 doesn't drive QEMU's
 absolute tablet, so the pointer moves by the host's mouse movement, not by where it is.
 Full screen magnifies the Mac's screen, so the pointer seems slower there than in a
-window. Changing its speed in Mac OS 9.2.1's Mouse control panel didn't help.
+window. For full screen, a display nearer the host screen's size magnifies it less, such
+as 1440x960 on a 2880x1920 screen, and the Mouse control panel sets the speed, which takes
+effect once its window is closed:
+
+```sh
+macman config set g4 display.width 1440 display.height 960
+```
 
 ## Installing from a CD
 
