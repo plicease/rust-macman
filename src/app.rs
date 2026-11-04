@@ -24,13 +24,14 @@ use crate::machine::{
 use crate::media::{self, MediaFormat, MediaKind};
 use crate::model::{Model, parse_display};
 use crate::paths::Paths;
+use crate::physical;
 use crate::registry::{self, PowerPcRom};
 use crate::report::{
     BuildDetails, BuildEntry, BuildList, CheckpointEntry, CheckpointList, ConfigKeys, ConfigSet,
     Current, DiskInfo, DiskUsage, DisplayReport, DoctorReport, FixedKey, Format, ImportResult,
     Layout, MachineConfig, MachineDetails, MachineEntry, MachineList, MediaEntry, MediaInfo,
-    MediaList, PartitionReport, RomEntry, RomList, SystemEntry, SystemList, UsageEntry, UsageKind,
-    print_json,
+    MediaList, PartitionReport, PhysicalUsage, RomEntry, RomList, SystemEntry, SystemList,
+    UsageEntry, UsageKind, print_json,
 };
 use crate::settings;
 use crate::usage;
@@ -309,7 +310,7 @@ impl App {
                 return self.import(&file, rename.as_deref(), dry_run, json);
             }
             Command::Remove { name, delete_disks } => self.remove(&name, delete_disks)?,
-            Command::Du => self.disk_usage(json)?,
+            Command::Du { physical } => self.disk_usage(json, physical)?,
             Command::Completions { shell } => return print_completions(shell, json),
         }
         Ok(0)
@@ -446,7 +447,7 @@ impl App {
             | Command::Current
             | Command::Unalias { .. }
             | Command::Import { .. }
-            | Command::Du
+            | Command::Du { .. }
             | Command::Completions { .. } => Ok(()),
         }
     }
@@ -720,11 +721,12 @@ impl App {
     ///
     /// The total is measured from every entry's files together, so a file
     /// reached from more than one entry, by a hard link, is counted once.
-    fn disk_usage(&self, json: bool) -> Result<()> {
+    /// With `physical`, so is the unique physical storage those files take.
+    fn disk_usage(&self, json: bool, physical: bool) -> Result<()> {
         let mut entries = Vec::new();
-        // Every file behind the entries, or `None` once a machine's can't be
-        // found out, which leaves the total unavailable.
-        let mut files: Option<Vec<PathBuf>> = Some(Vec::new());
+        // Every file behind the entries, or why they can't all be found out,
+        // which leaves the totals unavailable.
+        let mut files: Result<Vec<PathBuf>, String> = Ok(Vec::new());
         for name in list_dir(&self.paths.machines())? {
             let own = Machine::load(&self.paths, &name)
                 .ok()
@@ -733,8 +735,9 @@ impl App {
                 .as_ref()
                 .and_then(|own| usage::allocated_total(own.iter().map(PathBuf::as_path)));
             match (&mut files, own) {
-                (Some(files), Some(own)) => files.extend(own),
-                _ => files = None,
+                (Ok(files), Some(own)) => files.extend(own),
+                (Ok(_), None) => files = Err(format!("the files of machine {name} can't be found")),
+                (Err(_), _) => {}
             }
             entries.push(UsageEntry {
                 name,
@@ -744,7 +747,7 @@ impl App {
         }
         let mut single = |file: PathBuf, name: String, kind: UsageKind| {
             let used = usage::allocated(&file);
-            if let Some(files) = &mut files {
+            if let Ok(files) = &mut files {
                 files.push(file);
             }
             UsageEntry {
@@ -767,18 +770,28 @@ impl App {
         }
         sort_usage(&mut entries);
         // A file that can't be measured leaves it unavailable too.
-        let total =
-            files.and_then(|files| usage::allocated_total(files.iter().map(PathBuf::as_path)));
+        let total = files
+            .as_ref()
+            .ok()
+            .and_then(|files| usage::allocated_total(files.iter().map(PathBuf::as_path)));
+        let unique = physical.then(|| {
+            files.and_then(|files| physical::unique_physical(files.iter().map(PathBuf::as_path)))
+        });
         if json {
             return print_json(&DiskUsage {
                 entries,
                 total_host_disk_used_bytes: total,
+                physical: unique.map(PhysicalUsage::from),
             });
+        }
+        let mut totals = vec![("total", total)];
+        if let Some(unique) = &unique {
+            totals.push(("physical", unique.as_ref().ok().copied()));
         }
         let used: Vec<String> = entries
             .iter()
             .map(|entry| entry.host_disk_used_bytes)
-            .chain([total])
+            .chain(totals.iter().map(|(_, bytes)| *bytes))
             .map(usage::format_usage)
             .collect();
         let width = used
@@ -795,11 +808,14 @@ impl App {
         let names = entries
             .into_iter()
             .map(|entry| (entry.name, entry.kind.as_str()))
-            .chain([("total".to_string(), "-")]);
+            .chain(totals.iter().map(|(name, _)| (name.to_string(), "-")));
         for ((name, kind), used) in names.zip(used) {
             rows.push(vec![name, kind.to_string(), format!("{used:>width$}")]);
         }
         print_table(&rows, &[]);
+        if let Some(Err(why)) = unique {
+            eprintln!("note: unique physical usage is unavailable: {why}");
+        }
         Ok(())
     }
 
@@ -2295,7 +2311,7 @@ fn without_json(command: &Command) -> Option<&'static str> {
         | Command::System(SystemCommand::List)
         | Command::Disk(DiskCommand::Info { .. })
         | Command::Current
-        | Command::Du
+        | Command::Du { .. }
         | Command::Checkpoint(CheckpointCommand::List { .. })
         | Command::Media(MediaCommand::List | MediaCommand::Info { .. })
         | Command::Config(

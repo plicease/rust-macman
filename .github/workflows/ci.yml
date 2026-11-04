@@ -28,3 +28,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: cargo test --locked
+
+  # du --physical on the file systems where it can tell which blocks files
+  # share, with reflinks and deduplication; ext4 is the runner's own.
+  filesystems:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y btrfs-progs xfsprogs
+      - name: Mount Btrfs, with a subvolume, and XFS
+        run: |
+          truncate -s 1G "$RUNNER_TEMP/btrfs.img" "$RUNNER_TEMP/xfs.img"
+          mkfs.btrfs -q "$RUNNER_TEMP/btrfs.img"
+          mkfs.xfs -q -m reflink=1 "$RUNNER_TEMP/xfs.img"
+          for fs in btrfs xfs; do
+            sudo mkdir -p "/mnt/$fs"
+            sudo mount -o loop "$RUNNER_TEMP/$fs.img" "/mnt/$fs"
+          done
+          sudo btrfs subvolume create /mnt/btrfs/sub
+          sudo chmod 1777 /mnt/btrfs /mnt/btrfs/sub /mnt/xfs
+          df -T /tmp /mnt/btrfs /mnt/xfs
+      - run: cargo test --locked --test physical -- --nocapture
+        env:
+          MACMAN_TEST_FS_DIRS: /mnt/btrfs:/mnt/xfs:/mnt/btrfs/sub

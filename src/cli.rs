@@ -278,7 +278,13 @@ pub enum Command {
         delete_disks: bool,
     },
     /// Show the host disk space each machine, ROM, system image, and medium takes, largest last
-    Du,
+    Du {
+        /// Also show the unique physical storage everything takes, counting blocks shared by
+        /// reflinks or deduplication once; reads every file's extents, and needs ext4, XFS, or
+        /// Btrfs on Linux
+        #[arg(long)]
+        physical: bool,
+    },
     /// Print a shell completion script, such as for `macman completions zsh > ~/.zfunc/_macman`
     Completions {
         /// The shell to complete for

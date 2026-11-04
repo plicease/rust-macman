@@ -95,7 +95,7 @@ directory, and if macman is killed, the next `run` removes it.
 
 Other commands: `list [--builds]`, `current`, `rom list`, `system list`, `system remove`,
 `media list`, `media info`, `media remove`, `config show`, `config edit`, `clone`, `export`,
-`import`, `remove`, `du`, and `doctor`. Add `--verbose` for build and launch logs. Add `--json` to
+`import`, `remove`, `du [--physical]`, and `doctor`. Add `--verbose` for build and launch logs. Add `--json` to
 `list`, `doctor`, `rom list`, `system list`, `media list`, `media info`, `disk info`,
 `config show`, `current`, or `du` for output that scripts can read; [docs/JSON.md](docs/JSON.md) has the fields.
 
@@ -681,12 +681,67 @@ links are. macman itself makes copies rather than links, so they only arise when
 by hand. The total is still of allocated files, not of unique physical storage: blocks
 that different files share, by reflinks or deduplication, are counted for each of them,
 in the total as in every entry, because what the platform reports per file can't say
-which blocks are shared.
+which blocks are shared. `du --physical` measures that where it can, as below.
 
 `--json` gives the raw byte counts: `system_disk_capacity_bytes` and
 `host_disk_used_bytes` in `list`, `host_disk_used_bytes` in the registry lists, and
 `du`'s entries in the same order as its text, with the total as
 `total_host_disk_used_bytes`. See [docs/JSON.md](docs/JSON.md).
+
+### Unique physical usage
+
+`macman du --physical` adds a last line, `physical`, for the unique physical storage
+everything takes: each block on the host counted once, however many files use it, whether
+they share it by a hard link, a reflink (a copy made with `cp --reflink`, or by a file
+system that clones rather than copies), or the file system's deduplication. It covers
+the same files as `total`, so persistent disks and checkpoints, and not a run's temporary
+copies.
+
+```text
+$ macman du --physical
+NAME          TYPE     DISK USED
+...
+total         -          455 MiB
+physical      -          214 MiB
+```
+
+That makes three different measures, and `du` shows only the first two:
+
+- **Allocated bytes**, each entry's `DISK USED` and `total`: what the file system has
+  allocated to each file, with a file reached by several hard links counted once.
+- **Unique physical bytes**, `physical`: the blocks those files occupy, with shared
+  blocks counted once, so it's never more than `total` and can be much less.
+- **What deleting would free**, which isn't shown: blocks shared with something macman
+  doesn't know about, such as a snapshot or a reflinked copy outside its directories,
+  stay in use after macman's files go.
+
+Where the platform can't say reliably which blocks files share, `physical` is `-`, never
+an estimate, and a note on stderr says why. It's measured:
+
+| Host | File system | `physical` |
+|---|---|---|
+| Linux | ext4 | Measured |
+| Linux | XFS | Measured, unless a file is on a realtime device |
+| Linux | Btrfs | Measured, unless a file is compressed; reflinks between subvolumes count once |
+| Linux | ZFS, tmpfs, overlayfs, NFS, SMB, FUSE, and others | Unavailable |
+| macOS | APFS, HFS+ | Unavailable, not implemented yet |
+| Windows | NTFS, ReFS | Unavailable, not implemented yet |
+
+On Linux it reads where each file's data is with `FIEMAP`, and counts the physical block
+ranges, per file system. That's only trusted where the ranges identify blocks, so it's
+unavailable, too, for a file that's missing or unreadable, that has data whose place isn't
+known, or is stored in its metadata, or that kept changing while it was read. ZFS has
+block cloning and deduplication but doesn't say which of a file's blocks are shared.
+
+What's counted is the blocks the files point at. Btrfs keeps a whole extent while any of
+it is used, so after a file's blocks are partly rewritten, space no file uses any more
+can remain allocated and isn't counted, and redundancy below the file system, such as
+Btrfs RAID1 or DUP, or a RAID device, isn't multiplied in.
+
+Reading every extent of every file is slower than `du` alone, and each file's pending
+writes are flushed first so its blocks are final. For a consistent figure, run it while no
+machine is running: a file that changes as it's read is tried again, then left
+unavailable, but changes between one file and the next aren't noticed.
 
 ## Moving machines between hosts
 

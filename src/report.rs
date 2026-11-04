@@ -244,6 +244,31 @@ pub struct DiskUsage {
     /// more than one, by a hard link, once; `None` if any is unavailable, as a
     /// partial total would understate the whole.
     pub total_host_disk_used_bytes: Option<u64>,
+    /// With `--physical` only.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub physical: Option<PhysicalUsage>,
+}
+
+/// `du --physical`'s unique physical storage, or why it's unavailable.
+#[derive(Debug, Serialize)]
+pub struct PhysicalUsage {
+    pub unique_physical_bytes: Option<u64>,
+    pub unique_physical_unavailable: Option<String>,
+}
+
+impl From<Result<u64, String>> for PhysicalUsage {
+    fn from(measured: Result<u64, String>) -> Self {
+        match measured {
+            Ok(bytes) => Self {
+                unique_physical_bytes: Some(bytes),
+                unique_physical_unavailable: None,
+            },
+            Err(why) => Self {
+                unique_physical_bytes: None,
+                unique_physical_unavailable: Some(why),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
