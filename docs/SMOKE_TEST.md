@@ -247,7 +247,7 @@ macman create g4 --backend qemu-ppc --disk-size 2G
 | `macman media add "Mac OS X 10.4.iso" --name osx-10.4 --version 10.4`, with a bare HFS+ image | Says it put a partition map in front. `media info` shows both digests, and verifies. |
 | `macman run tiger --cdrom "Mac OS X 10.4.iso"`, with that bare image | Refused, saying to register it. |
 | `macman wizard --media osx-10.4` | Recommends QEMU's `mac99`, and suggests a 10G blank disk. A size under 4G is taken with a warning. |
-| `macman create tiger --backend qemu-ppc --disk-size 10G --memory 1024M`, then `macman run tiger --media osx-10.4` | The installer starts to its language screen. Install, then Restart. |
+| `macman create tiger --backend qemu-ppc --disk-size 10G --memory 1024M`, then `macman run tiger --media osx-10.4` | The installer starts to its language screen. Install. It offers only Restart when it's done, and with the DVD attached, the Mac would start the installer again, so quit QEMU when it restarts. |
 | `macman run tiger` | Starts from its disk, with no DVD. The first start sits at the gray Apple for several minutes, then a blue screen with a beach ball, before Setup Assistant. Shut down from the Apple menu; the next start is quicker. |
 | Under Mac OS X 10.4: full screen, and `qemu.network slirp` | Both work. |
 | In System Preferences' Sound pane, choose the USB audio device under Output, restart, then click an alert sound | It plays on the host. Before the restart it's silent. |
