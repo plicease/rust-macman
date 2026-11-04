@@ -51,3 +51,31 @@ jobs:
       - run: cargo test --locked --test physical -- --nocapture
         env:
           MACMAN_TEST_FS_DIRS: /mnt/btrfs:/mnt/xfs:/mnt/btrfs/sub
+          MACMAN_TEST_MEASURABLE_DIRS: /tmp:/mnt/btrfs:/mnt/xfs:/mnt/btrfs/sub
+
+  # The same on Windows: NTFS is the runner's own, ReFS has block cloning,
+  # and exFAT can't be measured.
+  windows-filesystems:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mount ReFS and exFAT
+        shell: pwsh
+        run: |
+          $script = foreach ($fs in @{ name = 'refs'; letter = 'R' }, @{ name = 'exfat'; letter = 'X' }) {
+            $vhd = Join-Path $env:RUNNER_TEMP "$($fs.name).vhdx"
+            "create vdisk file=`"$vhd`" maximum=2048 type=expandable"
+            "select vdisk file=`"$vhd`""
+            'attach vdisk'
+            'create partition primary'
+            "format fs=$($fs.name) quick"
+            "assign letter=$($fs.letter)"
+          }
+          $script | Set-Content -Encoding ascii "$env:RUNNER_TEMP\volumes.txt"
+          diskpart /s "$env:RUNNER_TEMP\volumes.txt"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Get-Volume -DriveLetter R, X | Format-Table DriveLetter, FileSystemType, AllocationUnitSize
+      - run: cargo test --locked --test physical -- --nocapture
+        env:
+          MACMAN_TEST_FS_DIRS: 'R:\;X:\'
+          MACMAN_TEST_MEASURABLE_DIRS: '${{ runner.temp }};R:\'

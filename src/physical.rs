@@ -6,19 +6,29 @@
 //!
 //! It's measured only where the file system says where each file's data is
 //! and those places identify the blocks: on Linux, through `FIEMAP`, on ext4,
-//! XFS, and Btrfs. Anything else, or anything those can't account for, makes
-//! the whole figure unavailable, with the reason, never a guess:
+//! XFS, and Btrfs, and on Windows, through `FSCTL_GET_RETRIEVAL_POINTERS`, on
+//! local NTFS and ReFS volumes, whose cluster numbers are addresses in the
+//! volume's one cluster space, so a block-cloned cluster on ReFS has the same
+//! number in every file that shares it. Anything else, or anything those
+//! can't account for, makes the whole figure unavailable, with the reason,
+//! never a guess:
 //!
 //! - other file systems, including ZFS, whose block cloning and deduplication
-//!   aren't visible per file, and stacked ones such as overlayfs, whose
-//!   extents belong to the file systems underneath;
-//! - compressed (encoded) extents, as on Btrfs, whose length is the data's
-//!   and not what it takes on disk, and extents whose place isn't known yet,
-//!   or is shared with metadata (inline or tail-packed data);
+//!   aren't visible per file, stacked ones such as overlayfs, whose extents
+//!   belong to the file systems underneath, and network shares;
+//! - compressed data, as on Btrfs or NTFS, whose length is the data's and not
+//!   what it takes on disk, and extents whose place isn't known yet, or is
+//!   shared with metadata (inline or tail-packed data, or a small file kept
+//!   in its NTFS file record);
+//! - Windows files whose data isn't in the clusters they report: reparse
+//!   points, among them files deduplicated by Windows Server's Data
+//!   Deduplication or held in the cloud, and files compacted by `compact
+//!   /exe` or WIMBoot, whose reparse point is hidden; and, as a check on all
+//!   of them, any file whose clusters don't cover all of its data;
 //! - files on an XFS realtime device, whose addresses aren't the data
 //!   device's;
 //! - a file that's missing or unreadable, or changes while it's mapped;
-//! - macOS and Windows, for now.
+//! - macOS, for now.
 //!
 //! What's counted is the blocks the files reference. Two caveats remain, and
 //! are documented rather than measured: Btrfs keeps a whole extent while any
@@ -28,17 +38,20 @@
 //! files would free, which depends on references macman doesn't know about,
 //! such as snapshots or files outside its directories.
 //!
-//! Mapping a file first flushes its pending writes, so its extents are final,
-//! which costs time while an emulator is writing to it; that, and reading
-//! every extent of every file, is why it's asked for rather than shown by
-//! default.
+//! On Linux, mapping a file first flushes its pending writes, so its extents
+//! are final, which costs time while an emulator is writing to it; that, and
+//! reading every extent of every file, is why it's asked for rather than
+//! shown by default. On Windows, only a sparse file whose recent writes have
+//! no clusters yet is flushed, as that takes opening it to write, which
+//! would decompress a compacted file. Only a file's main data is counted: on Windows, its
+//! alternate data streams aren't, as they aren't in its allocation either.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 /// What makes a physical address unique: the file system it's on.
-// Only Linux measures yet.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// Each platform makes only its own kinds.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Volume {
     /// A file system on one device, by its device number.
@@ -46,6 +59,9 @@ enum Volume {
     /// Btrfs, whose subvolumes have device numbers of their own but share
     /// one address space, by the file system's UUID.
     Btrfs([u8; 16]),
+    /// A Windows volume, by its GUID path, `\\?\Volume{...}\`, which unlike
+    /// its serial number can't be the same as another's.
+    Windows(String),
 }
 
 /// One extent of a file, as the file system reports it.
@@ -56,7 +72,7 @@ struct Extent {
     flags: u32,
 }
 
-// FIEMAP's extent flags, from linux/fiemap.h.
+// FIEMAP's extent flags, from linux/fiemap.h; Windows's extents have none.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const LAST: u32 = 0x0001;
 const UNKNOWN: u32 = 0x0002;
@@ -66,14 +82,18 @@ const NOT_ALIGNED: u32 = 0x0100;
 const DATA_INLINE: u32 = 0x0200;
 const DATA_TAIL: u32 = 0x0400;
 
+const ALONGSIDE_METADATA: &str =
+    "has data stored alongside metadata rather than in blocks of its own";
+const PLACE_UNKNOWN: &str = "has data whose place on disk isn't known yet";
+
 /// Why `extent` can't be counted by its place and length, if it can't.
 fn unaccountable(extent: &Extent) -> Option<&'static str> {
     if extent.flags & (UNKNOWN | DELALLOC) != 0 {
-        Some("has data whose place on disk isn't known yet")
+        Some(PLACE_UNKNOWN)
     } else if extent.flags & ENCODED != 0 {
         Some("has compressed or otherwise encoded data, whose size on disk isn't reported")
     } else if extent.flags & (NOT_ALIGNED | DATA_INLINE | DATA_TAIL) != 0 {
-        Some("has data stored alongside metadata rather than in blocks of its own")
+        Some(ALONGSIDE_METADATA)
     } else {
         None
     }
@@ -359,7 +379,500 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+mod imp {
+    use super::{ALONGSIDE_METADATA, Extent, PLACE_UNKNOWN, Volume};
+    use std::fs::{File, OpenOptions};
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+    use windows_sys::Win32::Foundation::{
+        ERROR_HANDLE_EOF, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_FUNCTION, ERROR_MORE_DATA,
+        ERROR_NOT_SUPPORTED, ERROR_OBJECT_NOT_EXTERNALLY_BACKED,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE,
+        FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SPARSE_FILE, FILE_ATTRIBUTE_TAG_INFO,
+        FILE_BASIC_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileAttributeTagInfo, FileBasicInfo,
+        FileStandardInfo, GetDiskFreeSpaceW, GetFileInformationByHandleEx,
+        GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, VOLUME_NAME_GUID,
+    };
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    use windows_sys::Win32::System::Ioctl::{
+        FSCTL_GET_EXTERNAL_BACKING, FSCTL_GET_RETRIEVAL_POINTERS, FSCTL_QUERY_ALLOCATED_RANGES,
+    };
+
+    /// Runs fetched per call.
+    const BATCH: usize = 256;
+    /// Times a file that changes while it's mapped is tried.
+    const ATTEMPTS: usize = 3;
+
+    /// One run of `RETRIEVAL_POINTERS_BUFFER`: the clusters up to `next_vcn`
+    /// are at `lcn` onwards, or are a hole if it's -1.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct Run {
+        next_vcn: i64,
+        lcn: i64,
+    }
+
+    /// `RETRIEVAL_POINTERS_BUFFER`, with room for a batch of runs.
+    #[repr(C)]
+    struct Pointers {
+        extent_count: u32,
+        starting_vcn: i64,
+        runs: [Run; BATCH],
+    }
+
+    /// The information of class `class` about `file`.
+    fn info<T: Default>(file: &File, class: FILE_INFO_BY_HANDLE_CLASS) -> io::Result<T> {
+        let mut value = T::default();
+        // SAFETY: the handle is open, and `value` is the class's struct, of
+        // the size given.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                class,
+                (&raw mut value).cast(),
+                size_of::<T>() as u32,
+            )
+        };
+        if ok == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(value)
+        }
+    }
+
+    fn wide_to_string(wide: &[u16]) -> String {
+        let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+        String::from_utf16_lossy(&wide[..end])
+    }
+
+    /// The name of the file system `file` is on, such as `NTFS`.
+    fn file_system(file: &File) -> io::Result<String> {
+        let mut name = [0u16; 261];
+        // SAFETY: the handle is open, the buffer is the length given, and
+        // what isn't asked for is null.
+        let ok = unsafe {
+            GetVolumeInformationByHandleW(
+                file.as_raw_handle(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                name.as_mut_ptr(),
+                name.len() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(wide_to_string(&name))
+    }
+
+    /// The GUID path of the volume `file` is on, `\\?\Volume{...}\`, which
+    /// only a local volume has.
+    fn volume_root(file: &File) -> io::Result<String> {
+        let mut buffer = vec![0u16; 512];
+        loop {
+            // SAFETY: the handle is open, and the buffer is the length given.
+            let length = unsafe {
+                GetFinalPathNameByHandleW(
+                    file.as_raw_handle(),
+                    buffer.as_mut_ptr(),
+                    buffer.len() as u32,
+                    VOLUME_NAME_GUID,
+                )
+            } as usize;
+            if length == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // Too small, it says the length needed, terminator included.
+            if length >= buffer.len() {
+                buffer.resize(length + 1, 0);
+                continue;
+            }
+            let path = String::from_utf16_lossy(&buffer[..length]);
+            return match path.find("}\\") {
+                Some(end) if path.starts_with(r"\\?\Volume{") => Ok(path[..end + 2].to_string()),
+                _ => Err(io::Error::other(format!(
+                    "{path} isn't a volume's GUID path"
+                ))),
+            };
+        }
+    }
+
+    /// The bytes in a cluster of the volume at `root`.
+    fn cluster_size(root: &str) -> io::Result<u64> {
+        let root: Vec<u16> = std::ffi::OsStr::new(root)
+            .encode_wide()
+            .chain([0])
+            .collect();
+        let (mut sectors, mut bytes) = (0u32, 0u32);
+        // SAFETY: `root` is terminated, and the counts are writable; the free
+        // and total counts aren't asked for.
+        let ok = unsafe {
+            GetDiskFreeSpaceW(
+                root.as_ptr(),
+                &mut sectors,
+                &mut bytes,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        match u64::from(sectors) * u64::from(bytes) {
+            0 => Err(io::Error::other("the volume reports no cluster size")),
+            size => Ok(size),
+        }
+    }
+
+    /// What changes when a file's data or allocation does, and its size.
+    fn version(file: &File) -> io::Result<(i64, i64, i64, i64)> {
+        let standard: FILE_STANDARD_INFO = info(file, FileStandardInfo)?;
+        let basic: FILE_BASIC_INFO = info(file, FileBasicInfo)?;
+        Ok((
+            standard.EndOfFile,
+            standard.AllocationSize,
+            basic.LastWriteTime,
+            basic.ChangeTime,
+        ))
+    }
+
+    /// Where `file`'s data is, and on which volume, or why that can't be
+    /// trusted to identify its clusters.
+    pub fn map(path: &Path) -> Result<(Volume, Vec<Extent>), String> {
+        let shown = path.display();
+        // Attributes only, which is all that mapping needs, and which an
+        // emulator holding the image with sharing denied still allows.
+        let file = OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(path)
+            .map_err(|error| format!("can't read {shown}: {error}"))?;
+        let tag: FILE_ATTRIBUTE_TAG_INFO = info(&file, FileAttributeTagInfo)
+            .map_err(|error| format!("can't read {shown}'s attributes: {error}"))?;
+        let attributes = tag.FileAttributes;
+        if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            return Err(format!("{shown} isn't a regular file"));
+        }
+        // A link was followed to what it names, so this is the file itself.
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(format!(
+                "{shown} is a reparse point (tag {:#x}), such as a deduplicated, compacted, \
+                 or cloud file, whose data isn't in the clusters it reports",
+                tag.ReparseTag
+            ));
+        }
+        if attributes
+            & (FILE_ATTRIBUTE_OFFLINE
+                | FILE_ATTRIBUTE_RECALL_ON_OPEN
+                | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+            != 0
+        {
+            return Err(format!("{shown} isn't all stored on this host"));
+        }
+        if attributes & FILE_ATTRIBUTE_COMPRESSED != 0 {
+            return Err(format!(
+                "{shown} is compressed, and its clusters aren't counted as its size on disk"
+            ));
+        }
+        let system = file_system(&file)
+            .map_err(|error| format!("can't tell what file system {shown} is on: {error}"))?;
+        if system != "NTFS" && system != "ReFS" {
+            return Err(format!(
+                "{shown} is on {system}, where macman can't tell which blocks files share; \
+                 it can on NTFS and ReFS"
+            ));
+        }
+        // A network share can report NTFS, but has no GUID path here.
+        let root = volume_root(&file).map_err(|error| {
+            format!("{shown} isn't on a local volume macman can identify: {error}")
+        })?;
+        let cluster = cluster_size(&root)
+            .map_err(|error| format!("can't read the cluster size of {root}: {error}"))?;
+        // Its reparse point hidden, a file `compact /exe` or WIMBoot left
+        // keeps its data elsewhere, and is decompressed if opened to write.
+        if externally_backed(&file)
+            .map_err(|error| format!("can't tell where {shown} keeps its data: {error}"))?
+        {
+            return Err(format!(
+                "{shown} is compressed or backed by another file, as `compact /exe` and \
+                 WIMBoot leave files, and its clusters aren't counted as its size on disk"
+            ));
+        }
+        // A sparse file's data is wherever it isn't a hole, which takes
+        // reading to ask; anything else's is all of it.
+        let sparse = attributes & FILE_ATTRIBUTE_SPARSE_FILE != 0;
+        let reader = sparse
+            .then(|| File::open(path))
+            .transpose()
+            .map_err(|error| format!("can't read {shown}: {error}"))?;
+        let mut flushed = false;
+        // One more for after a flush.
+        for _ in 0..=ATTEMPTS {
+            let before = version(&file).map_err(|error| format!("{shown}: {error}"))?;
+            let size = u64::try_from(before.0).unwrap_or(0);
+            let mapped = extents(&file, cluster)
+                .map_err(|error| format!("can't map where {shown}'s data is on disk: {error}"))?;
+            let data = match &reader {
+                Some(reader) => allocated_ranges(reader, size)
+                    .map_err(|error| format!("can't read where {shown} has data: {error}"))?,
+                None => vec![(0, size)],
+            };
+            let after = version(&file).map_err(|error| format!("{shown}: {error}"))?;
+            if before != after {
+                continue;
+            }
+            let (extents, covered) = match mapped {
+                Some(mapped) => mapped,
+                // No clusters at all: data that isn't sparse is kept in the
+                // file's record, as a small file's is on NTFS.
+                None if !sparse && size > 0 => {
+                    return Err(format!("{shown} {ALONGSIDE_METADATA}"));
+                }
+                None => (Vec::new(), Vec::new()),
+            };
+            if covers(&covered, &data, cluster) {
+                return Ok((Volume::Windows(root), extents));
+            }
+            // Data written to a sparse file's holes is given clusters as it's
+            // flushed, so the map can be missing what's just been written.
+            // Nothing else is opened to write, which can change a file.
+            if flushed || !sparse {
+                return Err(format!("{shown} {PLACE_UNKNOWN}"));
+            }
+            flushed = true;
+            flush(path).map_err(|error| {
+                format!("{shown} {PLACE_UNKNOWN}, and its writes can't be flushed: {error}")
+            })?;
+        }
+        Err(format!("{shown} kept changing while it was being measured"))
+    }
+
+    /// Whether `file`'s data is kept by the Windows Overlay Filter, as
+    /// `compact /exe` and WIMBoot keep it, rather than in its own clusters.
+    fn externally_backed(file: &File) -> io::Result<bool> {
+        let mut info = [0u8; 64];
+        let mut returned = 0u32;
+        // SAFETY: there's no input, the output is the size given, and it
+        // isn't overlapped.
+        let ok = unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                FSCTL_GET_EXTERNAL_BACKING,
+                std::ptr::null(),
+                0,
+                info.as_mut_ptr().cast(),
+                info.len() as u32,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok != 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error().map(|code| code as u32) {
+            // There's backing, with more to say than fits.
+            Some(ERROR_INSUFFICIENT_BUFFER | ERROR_MORE_DATA) => Ok(true),
+            // None, or no overlay filter on the volume to have any.
+            Some(
+                ERROR_OBJECT_NOT_EXTERNALLY_BACKED | ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED,
+            ) => Ok(false),
+            _ => Err(error),
+        }
+    }
+
+    /// Write `path`'s cached data to disk, which needs a handle that can
+    /// write, so its clusters are all assigned.
+    fn flush(path: &Path) -> io::Result<()> {
+        OpenOptions::new().write(true).open(path)?.sync_all()
+    }
+
+    /// Whether the byte ranges `covered`, `(start, end)` in whole clusters,
+    /// sorted, take in every cluster of the ranges `data`.
+    fn covers(covered: &[(u64, u64)], data: &[(u64, u64)], cluster: u64) -> bool {
+        data.iter().all(|&(start, end)| {
+            if start >= end {
+                return true;
+            }
+            let start = start / cluster * cluster;
+            let end = end.div_ceil(cluster).saturating_mul(cluster);
+            let mut reached = start;
+            for &(from, to) in covered {
+                if from > reached {
+                    break;
+                }
+                reached = reached.max(to);
+                if reached >= end {
+                    return true;
+                }
+            }
+            false
+        })
+    }
+
+    /// `FILE_ALLOCATED_RANGE_BUFFER`.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default, Debug)]
+    struct Range {
+        offset: i64,
+        length: i64,
+    }
+
+    /// The byte ranges of `file`, `size` long, that hold data rather than
+    /// being holes, as `(start, end)`; it needs a handle that can read.
+    fn allocated_ranges(file: &File, size: u64) -> io::Result<Vec<(u64, u64)>> {
+        let mut found = Vec::new();
+        let mut offset = 0u64;
+        while offset < size {
+            let query = Range {
+                offset: offset as i64,
+                length: (size - offset) as i64,
+            };
+            let mut ranges = Box::new([Range::default(); BATCH]);
+            let mut returned = 0u32;
+            // SAFETY: the input is one range, the output room for a batch,
+            // both live for the call, and it isn't overlapped.
+            let ok = unsafe {
+                DeviceIoControl(
+                    file.as_raw_handle(),
+                    FSCTL_QUERY_ALLOCATED_RANGES,
+                    (&raw const query).cast(),
+                    size_of::<Range>() as u32,
+                    ranges.as_mut_ptr().cast(),
+                    size_of::<[Range; BATCH]>() as u32,
+                    &mut returned,
+                    std::ptr::null_mut(),
+                )
+            };
+            let more = if ok != 0 {
+                false
+            } else {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error().map(|code| code as u32) != Some(ERROR_MORE_DATA) {
+                    return Err(error);
+                }
+                true
+            };
+            let count = (returned as usize / size_of::<Range>()).min(BATCH);
+            for range in &ranges[..count] {
+                let (start, length) = (range.offset as u64, range.length as u64);
+                found.push((start, start.saturating_add(length)));
+            }
+            match found.last() {
+                Some(&(_, end)) if more && end > offset => offset = end,
+                _ if more => return Err(io::Error::other("the ranges didn't advance")),
+                _ => break,
+            }
+        }
+        Ok(found)
+    }
+
+    /// Every cluster run of `file` that has clusters, fetched a batch at a
+    /// time, in bytes, and the byte ranges of the file they hold, or `None`
+    /// if it has no clusters at all.
+    #[allow(clippy::type_complexity)]
+    fn extents(file: &File, cluster: u64) -> io::Result<Option<(Vec<Extent>, Vec<(u64, u64)>)>> {
+        let too_far = || io::Error::other("an extent is beyond what can be counted");
+        let mut found = Vec::new();
+        let mut covered: Vec<(u64, u64)> = Vec::new();
+        let mut vcn = 0i64;
+        loop {
+            let mut pointers = Box::new(Pointers {
+                extent_count: 0,
+                starting_vcn: 0,
+                runs: [Run::default(); BATCH],
+            });
+            let mut returned = 0u32;
+            // SAFETY: the input is a STARTING_VCN_INPUT_BUFFER, the output a
+            // RETRIEVAL_POINTERS_BUFFER of the size given, both live for the
+            // call, and it isn't overlapped.
+            let ok = unsafe {
+                DeviceIoControl(
+                    file.as_raw_handle(),
+                    FSCTL_GET_RETRIEVAL_POINTERS,
+                    (&raw const vcn).cast(),
+                    size_of::<i64>() as u32,
+                    (&raw mut *pointers).cast(),
+                    size_of::<Pointers>() as u32,
+                    &mut returned,
+                    std::ptr::null_mut(),
+                )
+            };
+            let more = if ok != 0 {
+                false
+            } else {
+                let error = io::Error::last_os_error();
+                match error.raw_os_error().map(|code| code as u32) {
+                    Some(ERROR_MORE_DATA) => true,
+                    Some(ERROR_HANDLE_EOF) if vcn == 0 => return Ok(None),
+                    Some(ERROR_HANDLE_EOF) => return Ok(Some((found, covered))),
+                    _ => return Err(error),
+                }
+            };
+            let count = (pointers.extent_count as usize).min(BATCH);
+            let mut from = pointers.starting_vcn;
+            for run in &pointers.runs[..count] {
+                let clusters = run.next_vcn.checked_sub(from).filter(|&n| n > 0);
+                let clusters = clusters.ok_or_else(|| io::Error::other("a run is empty"))?;
+                let bytes = |vcn: i64| (vcn as u64).checked_mul(cluster).ok_or_else(too_far);
+                // -1 is a hole in a sparse file, which takes nothing.
+                if run.lcn >= 0 {
+                    found.push(Extent {
+                        physical: bytes(run.lcn)?,
+                        length: bytes(clusters)?,
+                        flags: 0,
+                    });
+                    let (start, end) = (bytes(from)?, bytes(run.next_vcn)?);
+                    match covered.last_mut() {
+                        Some(last) if last.1 == start => last.1 = end,
+                        _ => covered.push((start, end)),
+                    }
+                }
+                from = run.next_vcn;
+            }
+            if !more {
+                return Ok(Some((found, covered)));
+            }
+            if from <= vcn {
+                return Err(io::Error::other("the runs didn't advance"));
+            }
+            vcn = from;
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::covers;
+
+        #[test]
+        fn data_must_be_in_clusters_the_map_has() {
+            let map = [(0, 8192), (16384, 20480)];
+            assert!(covers(&map, &[], 4096));
+            assert!(covers(&map, &[(0, 100), (16384, 16385)], 4096));
+            // Partial clusters count as theirs.
+            assert!(covers(&map, &[(1, 8191)], 4096));
+            assert!(covers(&map, &[(5, 5)], 4096));
+            assert!(!covers(&map, &[(0, 8193)], 4096));
+            assert!(!covers(&map, &[(12288, 12289)], 4096));
+            assert!(!covers(&map, &[(16384, 24576)], 4096));
+            assert!(!covers(&[], &[(0, 1)], 4096));
+            assert!(covers(&[(0, 4096), (4096, 8192)], &[(0, 8192)], 4096));
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 mod imp {
     use super::{Extent, Volume};
     use std::path::Path;
@@ -369,7 +882,6 @@ mod imp {
             "unique physical usage isn't implemented on {} yet",
             match std::env::consts::OS {
                 "macos" => "macOS",
-                "windows" => "Windows",
                 other => other,
             }
         ))
@@ -410,7 +922,9 @@ mod tests {
         extents.insert(Volume::Device(1), vec![(0, 4096), (0, 4096)]);
         extents.insert(Volume::Device(2), vec![(0, 4096)]);
         extents.insert(Volume::Btrfs([7; 16]), vec![(0, 4096)]);
-        assert_eq!(unique_bytes(extents), 12288);
+        extents.insert(Volume::Windows(r"\\?\Volume{a}\".into()), vec![(0, 4096)]);
+        extents.insert(Volume::Windows(r"\\?\Volume{b}\".into()), vec![(0, 4096)]);
+        assert_eq!(unique_bytes(extents), 20480);
     }
 
     #[test]
@@ -441,7 +955,7 @@ mod tests {
         let missing = dir.path().join("missing.dsk");
         let error = unique_physical([missing.as_path()]).unwrap_err();
         // Elsewhere nothing is mapped yet, so the reason is the platform.
-        if cfg!(target_os = "linux") {
+        if cfg!(any(target_os = "linux", windows)) {
             assert!(error.contains("missing.dsk"), "{error}");
         } else {
             assert!(error.contains("isn't implemented"), "{error}");
