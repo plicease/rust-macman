@@ -41,10 +41,11 @@
 //! On Linux, mapping a file first flushes its pending writes, so its extents
 //! are final, which costs time while an emulator is writing to it; that, and
 //! reading every extent of every file, is why it's asked for rather than
-//! shown by default. On Windows, only a sparse file whose recent writes have
-//! no clusters yet is flushed, as that takes opening it to write, which
-//! would decompress a compacted file. Only a file's main data is counted: on Windows, its
-//! alternate data streams aren't, as they aren't in its allocation either.
+//! shown by default. On Windows, only a file whose recent writes have no
+//! clusters yet is flushed, as that takes opening it to write, which an
+//! emulator holding it may not allow. Only a file's main data is counted: on
+//! Windows, its alternate data streams aren't, as they aren't in its
+//! allocation either.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -632,27 +633,27 @@ mod imp {
             if before != after {
                 continue;
             }
-            let (extents, covered) = match mapped {
-                Some(mapped) => mapped,
+            let (extents, covered, reason) = match mapped {
+                Some((extents, covered)) => (extents, covered, PLACE_UNKNOWN),
                 // No clusters at all: data that isn't sparse is kept in the
-                // file's record, as a small file's is on NTFS.
-                None if !sparse && size > 0 => {
-                    return Err(format!("{shown} {ALONGSIDE_METADATA}"));
-                }
-                None => (Vec::new(), Vec::new()),
+                // file's record, as a small file's is on NTFS, unless it's
+                // still to be placed.
+                None if !sparse && size > 0 => (Vec::new(), Vec::new(), ALONGSIDE_METADATA),
+                None => (Vec::new(), Vec::new(), PLACE_UNKNOWN),
             };
             if covers(&covered, &data, cluster) {
                 return Ok((Volume::Windows(root), extents));
             }
-            // Data written to a sparse file's holes is given clusters as it's
-            // flushed, so the map can be missing what's just been written.
-            // Nothing else is opened to write, which can change a file.
-            if flushed || !sparse {
-                return Err(format!("{shown} {PLACE_UNKNOWN}"));
+            // Data just written is given clusters as it's flushed, so the map
+            // can be missing it: ReFS places all new data that way, and NTFS
+            // what's written to a sparse file's holes. Files that opening to
+            // write would change, compressed or compacted, were refused above.
+            if flushed {
+                return Err(format!("{shown} {reason}"));
             }
             flushed = true;
             flush(path).map_err(|error| {
-                format!("{shown} {PLACE_UNKNOWN}, and its writes can't be flushed: {error}")
+                format!("{shown} {reason}, and its writes can't be flushed: {error}")
             })?;
         }
         Err(format!("{shown} kept changing while it was being measured"))

@@ -509,6 +509,20 @@ fn du(root: &Path) -> serde_json::Value {
     serde_json::from_str(&ok(root, &["--json", "du", "--physical"])).unwrap()
 }
 
+/// Whether macman can keep its data in `root`: it needs hard links, which
+/// FAT and exFAT lack.
+fn holds_data(root: &Path) -> bool {
+    let probe = root.join("link-probe");
+    fs::write(&probe, b"probe").unwrap();
+    let linked = fs::hard_link(&probe, root.join("link-probe-2")).is_ok();
+    let _ = fs::remove_file(root.join("link-probe-2"));
+    fs::remove_file(&probe).unwrap();
+    if !linked {
+        eprintln!("macman can't keep its data in {}", root.display());
+    }
+    linked
+}
+
 /// A ROM, a system, a medium, and a machine with a checkpoint, registered in
 /// `root`, and the medium's and checkpoint's files.
 fn registered(root: &Path) -> (PathBuf, PathBuf) {
@@ -544,6 +558,9 @@ fn registered(root: &Path) -> (PathBuf, PathBuf) {
 fn du_counts_storage_shared_across_entries_once() {
     for root in roots() {
         let root = root.path();
+        if !holds_data(root) {
+            continue;
+        }
         let (medium, checkpoint) = registered(root);
         let data = root.join("data/macman");
         let system = data.join("systems/sys.dsk");
@@ -626,6 +643,9 @@ fn du_counts_storage_shared_across_entries_once() {
 fn a_missing_file_leaves_it_unavailable() {
     for root in roots() {
         let root = root.path();
+        if !holds_data(root) {
+            continue;
+        }
         let (medium, _) = registered(root);
         fs::remove_file(&medium).unwrap();
         let json = du(root);

@@ -812,10 +812,11 @@ disk, so it's unavailable for any file whose data isn't in the clusters it repor
 - reparse points, including files that Windows Server's Data Deduplication has moved into
   its chunk store, and OneDrive and other cloud files, as well as anything offline;
 - a small file that NTFS keeps inside its file record, with no clusters of its own;
-- a file with data that isn't in its clusters yet. Data written to a sparse file's holes
-  gets its clusters when it's flushed, so a sparse file is flushed once if it needs to be.
-  That's the only time a file is opened for writing; nothing else is, because opening a
-  `compact /exe` file for writing decompresses it.
+- a file with data that isn't in its clusters yet. ReFS gives new data its clusters when
+  it's flushed, as NTFS does for data written to a sparse file's holes, so a file whose
+  clusters fall short is flushed once and read again. That's the only time a file is opened
+  for writing, and only after it's known not to be compressed or compacted, because opening
+  a `compact /exe` file for writing decompresses it.
 
 Unavailable, too, is a file on any file system but NTFS or ReFS, or on a network share,
 including one that reports NTFS, as well as one that's missing or unreadable, or that kept
@@ -828,8 +829,8 @@ can remain allocated and isn't counted, and redundancy below the file system, su
 Btrfs RAID1 or DUP, or a RAID device, isn't multiplied in.
 
 Reading every extent of every file is slower than `du` alone. On Linux each file's pending
-writes are flushed first so its blocks are final, and on Windows a sparse file's are
-flushed if they're not on disk yet. For a consistent figure, run it while no
+writes are flushed first so its blocks are final, and on Windows a file's are flushed
+if they're not on disk yet. For a consistent figure, run it while no
 machine is running: a file that changes as it's read is tried again, then left
 unavailable, but changes between one file and the next aren't noticed.
 
