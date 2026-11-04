@@ -352,7 +352,8 @@ These parts of the smoke test have been seen to work on that host:
   does before it has a kernel extension cache. A run with `--ephemeral` throws that work
   away, so the next start is as slow; run it on its own disk and shut down from the Apple
   menu. A clone given more memory felt less slow.
-- Under Mac OS X 10.4, full screen and `slirp` networking worked. Sound played through
+- Under Mac OS X 10.4, full screen and `slirp` networking worked. It installed at
+  1024x768x32, and ran at 1440x960x32 once `config edit` changed it. Sound played through
   `usb-audio` once it was chosen under Output in System Preferences' Sound pane and the
   Mac restarted. Until then, though chosen, it was silent. A trace of QEMU's USB
   controller then showed isochronous transfers flowing to it, with a few overruns.
