@@ -238,6 +238,9 @@ pub struct CheckpointEntry {
 #[derive(Debug, Serialize)]
 pub struct DiskUsage {
     pub entries: Vec<UsageEntry>,
+    /// The sum of the entries, or `None` if any is unavailable, as a partial
+    /// total would understate the whole.
+    pub total_host_disk_used_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

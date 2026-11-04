@@ -200,8 +200,15 @@ is the boot disk alone.
 ## `macman du`
 
 ```json
-{"entries": [{"name": "plus-v3", "type": "rom", "host_disk_used_bytes": 131072}, {"name": "ss904", "type": "machine", "host_disk_used_bytes": 432013312}]}
+{"entries": [{"name": "plus-v3", "type": "rom", "host_disk_used_bytes": 131072}, {"name": "ss904", "type": "machine", "host_disk_used_bytes": 432013312}], "total_host_disk_used_bytes": 432144384}
 ```
+
+| Field | Type | |
+|---|---|---|
+| `entries` | array | One per machine, ROM, system, and medium, as below |
+| `total_host_disk_used_bytes` | number or null | The sum of the entries; `null` if any of them is unavailable |
+
+Each entry has:
 
 | Field | Type | |
 |---|---|---|

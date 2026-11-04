@@ -930,7 +930,11 @@ fn disk_usage_is_allocated_space_listed_smallest_first() {
         lines[0].starts_with("NAME") && lines[0].ends_with("DISK USED"),
         "{du}"
     );
-    let names: Vec<_> = lines[1..]
+    // The last line is the total, unavailable as one entry is.
+    let (total, lines_entries) = lines[1..].split_last().unwrap();
+    let cells: Vec<_> = total.split_whitespace().collect();
+    assert_eq!(cells, ["total", "-", "-"], "{du}");
+    let names: Vec<_> = lines_entries
         .iter()
         .map(|l| l.split_whitespace().take(2).collect::<Vec<_>>().join(" "))
         .collect();
@@ -948,7 +952,7 @@ fn disk_usage_is_allocated_space_listed_smallest_first() {
         "wombat-6 machine",
         "unavailable last: {du}"
     );
-    assert!(lines.last().unwrap().ends_with(" -"), "{du}");
+    assert!(lines_entries.last().unwrap().ends_with(" -"), "{du}");
     // Every row's value ends in the same column.
     let width = lines[0].len();
     assert!(lines.iter().all(|l| l.len() == width), "{du}");
@@ -966,11 +970,30 @@ fn disk_usage_is_allocated_space_listed_smallest_first() {
     assert_eq!(entries[4]["type"], "machine");
     assert!(entries[4]["host_disk_used_bytes"].is_null());
     let order: Vec<_> = entries.iter().map(|e| e["name"].clone()).collect();
-    let text_order: Vec<_> = lines[1..]
+    let text_order: Vec<_> = lines_entries
         .iter()
         .map(|l| serde_json::Value::from(l.split_whitespace().next().unwrap()))
         .collect();
     assert_eq!(order, text_order, "the same order as the text");
+    assert!(json["total_host_disk_used_bytes"].is_null(), "{json}");
+
+    // With nothing unavailable, the total is the sum of the entries.
+    env.ok(&["remove", "wombat-6", "--delete-disks"]);
+    let json: serde_json::Value = serde_json::from_str(&env.ok(&["--json", "du"])).unwrap();
+    let sum: u64 = json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["host_disk_used_bytes"].as_u64().unwrap())
+        .sum();
+    assert_eq!(json["total_host_disk_used_bytes"], sum, "{json}");
+    let du = env.ok(&["du"]);
+    let total = du.lines().last().unwrap();
+    assert!(total.starts_with("total") && total.contains(" - "), "{du}");
+    assert!(
+        total.ends_with(&macman::usage::format_bytes(sum)) && !total.ends_with(" -"),
+        "{du}"
+    );
 }
 
 #[test]

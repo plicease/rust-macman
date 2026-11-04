@@ -684,12 +684,22 @@ impl App {
             });
         }
         sort_usage(&mut entries);
+        let total = entries.iter().try_fold(0u64, |sum, entry| {
+            entry
+                .host_disk_used_bytes
+                .map(|bytes| sum.saturating_add(bytes))
+        });
         if json {
-            return print_json(&DiskUsage { entries });
+            return print_json(&DiskUsage {
+                entries,
+                total_host_disk_used_bytes: total,
+            });
         }
         let used: Vec<String> = entries
             .iter()
-            .map(|entry| usage::format_usage(entry.host_disk_used_bytes))
+            .map(|entry| entry.host_disk_used_bytes)
+            .chain([total])
+            .map(usage::format_usage)
             .collect();
         let width = used
             .iter()
@@ -702,12 +712,12 @@ impl App {
             "TYPE".to_string(),
             format!("{:>width$}", "DISK USED"),
         ]];
-        for (entry, used) in entries.into_iter().zip(used) {
-            rows.push(vec![
-                entry.name,
-                entry.kind.as_str().to_string(),
-                format!("{used:>width$}"),
-            ]);
+        let names = entries
+            .into_iter()
+            .map(|entry| (entry.name, entry.kind.as_str()))
+            .chain([("total".to_string(), "-")]);
+        for ((name, kind), used) in names.zip(used) {
+            rows.push(vec![name, kind.to_string(), format!("{used:>width$}")]);
         }
         print_table(&rows, &[]);
         Ok(())
