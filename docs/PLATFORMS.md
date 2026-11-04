@@ -329,6 +329,8 @@ These parts of the smoke test have been seen to work on that host:
 - A machine made by the wizard from the 9.2.1 CD installed onto its blank disk, and then
   started from that disk with no CD.
 
+- The wizard, started from the registered Mac OS X 10.4 DVD, recommended `mac99` and
+  suggested a 10G blank disk.
 - Mac OS X 10.4's retail DVD, as a bare HFS+ volume, registered with `media add`, which
   put a partition map in front, and `macman run --media` started its installer to the
   language screen. OpenBIOS found no startup file on the volume without the map.
@@ -361,8 +363,8 @@ The warning uses 4GB for 10.4, as the developer tools are on its DVD. Disks are 
 where the host allows, so a bigger one costs little until it fills.
 
 These haven't been tested: a read-only extra disk, and moving a machine to another host. The wizard
-recommends `mac99` only for Mac OS 9.1 to 9.2.2, from 9.2.1's start, and never `g3beige`
-for classic Mac OS.
+recommends `mac99` for Mac OS 9.1 to 9.2.2, from 9.2.1's start, and Mac OS X 10.4, from its
+installer's start, and never `g3beige` for classic Mac OS.
 
 ## Release targets
 
