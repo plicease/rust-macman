@@ -24,6 +24,16 @@ use tempfile::TempDir;
 
 /// Stands in for QEMU. `-S` is only ever the doctor's firmware check.
 const QEMU: &str = r#"#!/bin/sh
+case "$1 $2" in
+    "-display help")
+        echo "Available display backend types:"
+        echo "none"
+        echo "gtk"
+        if [ "$(cat MODE 2>/dev/null)" != nosdl ]; then echo "sdl"; fi
+        echo
+        echo "Some display backends support suboptions, which can be set with"
+        exit 0 ;;
+esac
 case "$1" in
     --version)
         echo "QEMU emulator version VERSION (fixture)"
@@ -35,14 +45,6 @@ case "$1" in
         echo "g3beige              Heathrow based PowerMAC (default)"
         echo "mac99                Mac99 based PowerMAC"
         echo "none                 empty machine"
-        exit 0 ;;
-    -display)
-        echo "Available display backend types:"
-        echo "none"
-        echo "gtk"
-        if [ "$(cat MODE 2>/dev/null)" != nosdl ]; then echo "sdl"; fi
-        echo
-        echo "Some display backends support suboptions, which can be set with"
         exit 0 ;;
 esac
 mode=$(cat MODE 2>/dev/null)
@@ -261,14 +263,14 @@ fn a_run_describes_the_machine_to_qemu() {
     assert_eq!(
         runs[0],
         format!(
-            "-M mac99,via=pmu -m 512 -g 1024x768x32 -name g4 -prom-env auto-boot?=true -boot c \
-             -drive file={},format=raw,media=disk -nic none -device usb-audio{}",
-            disk.display(),
+            "{}-M mac99,via=pmu -m 512 -g 1024x768x32 -name g4 -prom-env auto-boot?=true -boot c \
+             -drive file={},format=raw,media=disk -nic none -device usb-audio",
             if cfg!(target_os = "linux") {
-                " -display sdl"
+                "-display sdl "
             } else {
                 ""
-            }
+            },
+            disk.display(),
         )
     );
 
@@ -285,7 +287,7 @@ fn a_run_describes_the_machine_to_qemu() {
     );
     h.cmd(&["run", "beige"]).unwrap();
     let run = h.runs().pop().unwrap();
-    assert!(run.starts_with("-M g3beige -m 512 "), "{run}");
+    assert!(run.contains("-M g3beige -m 512 "), "{run}");
     assert!(
         run.contains("-nic user,model=sungem -audio none -full-screen"),
         "{run}"
@@ -395,7 +397,15 @@ fn sdl_s_window_is_chosen_when_qemu_has_one() {
     let says_no_sdl = |h: &Harness| h.doctor().iter().any(|l| l.contains("no SDL window"));
     assert!(!says_no_sdl(&h));
     h.cmd(&["run", "g4"]).unwrap();
-    assert!(h.runs().pop().unwrap().ends_with(" -display sdl"));
+    assert!(h.runs().pop().unwrap().starts_with("-display sdl "));
+
+    // Before -full-screen, which a later -display would undo.
+    h.cmd(&["config", "set", "g4", "display.fullscreen", "true"])
+        .unwrap();
+    h.cmd(&["run", "g4"]).unwrap();
+    let run = h.runs().pop().unwrap();
+    assert!(run.starts_with("-display sdl "), "{run}");
+    assert!(run.ends_with(" -full-screen"), "{run}");
 
     // A new macman run asks QEMU again.
     h.act("nosdl");

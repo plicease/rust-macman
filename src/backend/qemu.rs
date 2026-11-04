@@ -525,9 +525,11 @@ impl EmulatorBackend for Qemu {
 
     fn launch(&self, request: &LaunchRequest<'_>) -> Result<ExitStatus> {
         let mut command = Command::new(&request.executable.path);
+        // The display first: `-display` replaces every display option given
+        // before it, `-full-screen` among them.
         command
-            .args(arguments(request)?)
             .args(display_arguments(&self.found()?.displays))
+            .args(arguments(request)?)
             .current_dir(request.workdir);
         supervise(command, request.verbose)
     }

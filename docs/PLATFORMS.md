@@ -340,12 +340,17 @@ These parts of the smoke test have been seen to work on that host:
   put a partition map in front, and `macman run --media` started its installer to the
   language screen. OpenBIOS found no startup file on the volume without the map.
 
+- A machine set to full screen started in a window: `-display` replaces every display
+  option before it, `-full-screen` among them, as `query-display-options` over QMP showed.
+  macman now passes `-display sdl` first, and the machine starts in full screen.
 - `run --disk --readonly` failed, as QEMU's IDE hard disk refuses `readonly=on` with
   "Block node is read-only". macman now gives it `snapshot=on`, with which QEMU starts.
   Mac OS 9.2.1's Drive Setup saw two synthetic HFS images attached that way, and
   initialized them. The next run found them as they were, and their hashes were unchanged.
   Mac OS 9 didn't mount them first, as they have no ATA driver partition, which only Drive
-  Setup adds.
+  Setup adds. A copy initialized by Drive Setup in a writable run then mounted with
+  `--readonly`, with the first run's data. A change made in one `--readonly` run was gone
+  in the next, and the file was unchanged.
 
 What's been found about guests:
 
@@ -374,9 +379,9 @@ smaller size typed in is taken, with a warning that it's below the requirement.
 The warning uses 4GB for 10.4, as the developer tools are on its DVD. Disks are sparse
 where the host allows, so a bigger one costs little until it fills.
 
-These haven't been tested: a read-only disk the guest has initialized, and moving a machine to another host. The wizard
-recommends `mac99` for Mac OS 9.1 to 9.2.2, from 9.2.1's start, and Mac OS X 10.4, from its
-installer's start, and never `g3beige` for classic Mac OS.
+Moving a machine to another host hasn't been tested. The wizard recommends `mac99` for Mac
+OS 9.1 to 9.2.2, from 9.2.1's start, and Mac OS X 10.4, from its installer's start, and
+never `g3beige` for classic Mac OS.
 
 ## Release targets
 
