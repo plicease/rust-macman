@@ -330,7 +330,7 @@ These parts of the smoke test have been seen to work on that host:
   started from that disk with no CD.
 
 - The wizard, started from the registered Mac OS X 10.4 DVD, recommended `mac99` and
-  suggested a 10G blank disk.
+  suggested a 10G blank disk. A size under 4G, typed in, was taken with a warning.
 - Mac OS X 10.4's retail DVD, as a bare HFS+ volume, registered with `media add`, which
   put a partition map in front, and `macman run --media` started its installer to the
   language screen. OpenBIOS found no startup file on the volume without the map.
