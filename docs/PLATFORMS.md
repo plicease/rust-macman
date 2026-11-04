@@ -306,6 +306,11 @@ These parts of the smoke test have been seen to work on that host:
 
 - `macman doctor` reports QEMU's version and path, and that it starts a `mac99` and a
   `g3beige`.
+- `doctor`'s other QEMU checks were seen with stand-ins, as the packages weren't removed.
+  With no `qemu-system-ppc` on `PATH`, it warned QEMU isn't available, and failed each
+  qemu-ppc machine, with the install hint. A wrapper on `PATH` passing a missing `-bios`
+  made it fail both machines, quoting QEMU, and name `openbios-ppc`. One leaving `sdl` out
+  of `-display help` made it warn there's no SDL window, and name `qemu-system-gui`.
 - `macman create --backend qemu-ppc --disk-size 2G`, then `macman run --media` with the Mac
   OS 9.2.1 CD, started to the Finder from the CD, and quitting QEMU ended the run with
   exit code 0 and no session left.
