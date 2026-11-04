@@ -340,6 +340,9 @@ These parts of the smoke test have been seen to work on that host:
   put a partition map in front, and `macman run --media` started its installer to the
   language screen. OpenBIOS found no startup file on the volume without the map.
 
+- `run --disk --readonly` failed, as QEMU's IDE hard disk refuses `readonly=on` with
+  "Block node is read-only". macman now gives it `snapshot=on`, with which QEMU starts.
+
 What's been found about guests:
 
 - The Mac OS 9.0.4 CD didn't start on `mac99`, with or without `via=pmu`.

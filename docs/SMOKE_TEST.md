@@ -241,7 +241,7 @@ macman create g4 --backend qemu-ppc --disk-size 2G
 | `macman run g4` | Starts from its own disk. The CD image's hash is unchanged. |
 | `macman config set g4 qemu.network slirp`, then run it | The guest gets an address by DHCP. |
 | In the Sound control panel, choose the USB audio device under Output, then click an alert sound | It plays on the host. There's no startup chime: that's the Mac's ROM, which QEMU doesn't have. |
-| `macman run g4 --disk "extra disk.dsk" --readonly` | Mounts the extra disk locked, and its hash stays the same. |
+| `macman run g4 --disk "extra disk.dsk" --readonly` | Mounts the extra disk, writable in the guest, as QEMU's disks can't be read-only. A file made on it is gone next run, and its hash stays the same. |
 | `macman run g4` with three `--disk`s and a `--cdrom` | Refused: QEMU has four drives. |
 | `macman export g4 -o g4.tar.gz`, then import it on another host's QEMU, and run it | Starts, though the QEMU version differs. |
 | `macman media add "Mac OS X 10.4.iso" --name osx-10.4 --version 10.4`, with a bare HFS+ image | Says it put a partition map in front. `media info` shows both digests, and verifies. |

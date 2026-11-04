@@ -579,8 +579,13 @@ HFS+ volume with `macman media add`, which adds the map Open Firmware needs:
 macman media add "Mac OS X 10.4 Install DVD.iso" --name osx-10.4 --version 10.4
 macman create tiger --backend qemu-ppc --disk-size 10G --memory 1024M
 macman run tiger --media osx-10.4
-``` A system image makes a
-whole copy for the machine's boot disk.
+```
+
+A system image makes a whole copy for the machine's boot disk.
+
+QEMU's IDE hard disk can't be read-only, so a `--readonly` disk gets a QEMU snapshot of
+its throwaway copy: the guest sees it writable, and its changes go to a temporary overlay
+QEMU discards when it exits. CDs are read-only.
 
 With a blank disk and no CD, QEMU stops at OpenBIOS's `0 >` prompt; close the window
 and attach an installer. Once you click in QEMU's window, it keeps the mouse; Ctrl-Alt-G

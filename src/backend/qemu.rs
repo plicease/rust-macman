@@ -268,12 +268,18 @@ fn drive_value(path: &Path) -> OsString {
     }
 }
 
+/// A `-drive` value. A CD is read-only. QEMU's IDE hard disk can't be
+/// ("Block node is read-only"), so a disk kept from the guest's writes gets
+/// a snapshot instead: the guest writes to a temporary overlay QEMU discards
+/// when it exits, and nothing reaches the file.
 fn drive(path: &Path, media: &str, writable: bool) -> OsString {
     let mut value = OsString::from("file=");
     value.push(drive_value(path));
     value.push(format!(",format=raw,media={media}"));
-    if !writable {
-        value.push(",readonly=on");
+    match (writable, media) {
+        (true, _) => {}
+        (false, "cdrom") => value.push(",readonly=on"),
+        (false, _) => value.push(",snapshot=on"),
     }
     value
 }
@@ -686,7 +692,7 @@ pub(crate) mod tests {
             strings(&arguments(&request).unwrap()).join(" "),
             "-M mac99,via=pmu -m 512 -g 1024x768x32 -name g4 -prom-env auto-boot?=true -boot d \
              -drive file=/m/g4/system.dsk,format=raw,media=disk \
-             -drive file=/data/a,,b.img,format=raw,media=disk,readonly=on \
+             -drive file=/data/a,,b.img,format=raw,media=disk,snapshot=on \
              -drive file=/cds/Mac OS 9.toast,format=raw,media=cdrom,readonly=on \
              -drive file=/cds/data.iso,format=raw,media=cdrom,readonly=on \
              -nic user,model=sungem -device usb-audio -full-screen"

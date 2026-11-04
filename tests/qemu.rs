@@ -55,6 +55,12 @@ for argument in "$@"; do
         sleep 10
         exit 0
     fi
+    # As QEMU's IDE hard disk does.
+    case "$argument" in
+        *media=disk*readonly=on*)
+            echo "qemu-system-ppc: Block node is read-only" >&2
+            exit 1 ;;
+    esac
 done
 echo "run $*" >> LOG
 echo "cwd $(pwd -P)" >> LOG
@@ -284,6 +290,34 @@ fn a_run_describes_the_machine_to_qemu() {
         run.contains("-nic user,model=sungem -audio none -full-screen"),
         "{run}"
     );
+}
+
+#[test]
+fn a_readonly_disk_gets_a_snapshot_as_qemus_disks_cant_be_read_only() {
+    let h = Harness::new();
+    h.cmd(&[
+        "create",
+        "new",
+        "--backend",
+        "qemu-ppc",
+        "--disk-size",
+        "8M",
+    ])
+    .unwrap();
+    let extra = write_disk(h.root.path(), "extra.dsk");
+    let before = fs::read(&extra).unwrap();
+    let extra = extra.to_str().unwrap();
+
+    h.cmd(&["run", "new", "--disk", extra, "--readonly"])
+        .unwrap();
+    let run = h.runs().pop().unwrap();
+    assert!(run.contains("media=disk,snapshot=on"), "{run}");
+    assert!(!run.contains("media=disk,readonly"), "{run}");
+    assert_eq!(fs::read(extra).unwrap(), before);
+
+    h.cmd(&["run", "new", "--disk", extra]).unwrap();
+    let run = h.runs().pop().unwrap();
+    assert!(!run.contains("snapshot"), "{run}");
 }
 
 #[test]
