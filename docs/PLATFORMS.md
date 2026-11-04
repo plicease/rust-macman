@@ -315,7 +315,8 @@ These parts of the smoke test have been seen to work on that host:
 - On KDE Plasma under Wayland, QEMU's GTK window let the grabbed pointer slip out, even
   in full screen, and SDL's held it, which is why macman asks for SDL on Linux. With the
   Mac's relative mouse, the pointer is slower in full screen than in a window, as full
-  screen magnifies the Mac's display. Mac OS 9.2.1 ignored QEMU's `usb-tablet`.
+  screen magnifies the Mac's display, and the Mouse control panel's speed didn't change
+that noticeably. Mac OS 9.2.1 ignored QEMU's `usb-tablet`.
 
 What's been found about guests:
 
