@@ -345,6 +345,21 @@ What's been found about guests:
 - Mac OS X 10.4's installer starts on `mac99`. Installing it, other releases, and Mac OS X
   on a `g3beige` haven't been tried.
 
+A blank disk for Mac OS X, from the wizard, is bigger than the 1G it suggests for classic
+Mac OS: Apple's requirement for the release, with room for applications and updates. A
+smaller size typed in is taken, with a warning that it's below the requirement.
+
+| Release | Apple's requirement | Wizard suggests |
+|---|---|---|
+| 10.0, 10.1 | 1.5GB ([Macintosh Repository](https://www.macintoshrepository.org/45-mac-os-x-for-ppc-osx-10-0-10-1-10-2-10-3-10-4-10-5), [TechRadar](https://www.techradar.com/news/computing/apple/macos-through-the-ages-a-visual-guide-1254878/2)) | 4G |
+| 10.2 | 3GB ([TechRadar](https://www.techradar.com/news/computing/apple/macos-through-the-ages-a-visual-guide-1254878/2)) | 6G |
+| 10.3 | 1.5GB ([Wikipedia](https://en.wikipedia.org/wiki/Mac_OS_X_Panther)) | 6G |
+| 10.4 | 3GB, 4GB with the Xcode developer tools ([Wikipedia](https://en.wikipedia.org/wiki/Mac_OS_X_Tiger), [Apple Discussions](https://discussions.apple.com/thread/2411058?page=1)) | 10G |
+| 10.5 | 9GB ([Apple](https://support.apple.com/kb/sp517)) | 20G |
+
+The warning uses 4GB for 10.4, as the developer tools are on its DVD. Disks are sparse
+where the host allows, so a bigger one costs little until it fills.
+
 These haven't been tested: a read-only extra disk, and moving a machine to another host. The wizard
 recommends `mac99` only for Mac OS 9.1 to 9.2.2, from 9.2.1's start, and never `g3beige`
 for classic Mac OS.

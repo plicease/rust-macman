@@ -25,7 +25,7 @@ use rules::{Candidate, Install, Route, Situation, Start, Strategy, Variant};
 use std::path::{Path, PathBuf};
 
 /// Where new blank disks start, unless the user picks another size.
-pub const DEFAULT_DISK_SIZE: &str = "1G";
+pub use rules::DEFAULT_DISK_SIZE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
@@ -127,6 +127,8 @@ pub struct Wizard<'a> {
     pub strategies: Vec<(Strategy, Option<String>)>,
     pub strategy: Option<Strategy>,
     pub disk_size: String,
+    /// Whether the user typed the disk size, so it isn't suggested over.
+    disk_size_typed: bool,
     pub name: String,
     /// Whether the user typed the name, so it isn't suggested over.
     name_typed: bool,
@@ -168,6 +170,7 @@ impl<'a> Wizard<'a> {
             strategies: Vec::new(),
             strategy: None,
             disk_size: DEFAULT_DISK_SIZE.to_string(),
+            disk_size_typed: false,
             name: String::new(),
             name_typed: false,
             settings: None,
@@ -451,15 +454,24 @@ impl<'a> Wizard<'a> {
                     Some(Row::Name) => self.set_name(text.trim()),
                     Some(Row::DiskSize) => parse_disk_size(text.trim()).map(|_| {
                         self.disk_size = text.trim().to_string();
+                        self.disk_size_typed = true;
                     }),
                     Some(Row::RegisterName) => self.set_register_name(text.trim()),
                     _ => Ok(()),
                 };
+                let sized = row == Some(Row::DiskSize) && result.is_ok();
                 if let Err(error) = result {
                     self.tell(format!("{error:#}"), true);
                     self.typing = Some(text);
                 } else if row != Some(Row::Image) {
                     self.message = None;
+                }
+                if sized
+                    && let Some(why) = parse_disk_size(&self.disk_size)
+                        .ok()
+                        .and_then(|bytes| rules::disk_too_small(self.used_guess(), bytes))
+                {
+                    self.tell(format!("That may be too small: {why}."), true);
                 }
             }
             KeyCode::Esc => {}
@@ -675,6 +687,9 @@ impl<'a> Wizard<'a> {
         }
         if self.name.is_empty() {
             self.name = self.suggested_name();
+        }
+        if !self.disk_size_typed {
+            self.disk_size = rules::suggested_disk_size(self.used_guess()).to_string();
         }
     }
 
@@ -1375,6 +1390,41 @@ mod tests {
                 launch: false
             })
         );
+    }
+
+    #[test]
+    fn a_mac_os_x_installer_gets_a_bigger_blank_disk_unless_one_is_typed() {
+        let root = tempfile::tempdir().unwrap();
+        let app = app(root.path());
+        let cd = installer_cd(root.path(), "Mac OS X 10.4");
+        let mut wizard = Wizard::new(&app, Some(&cd), None);
+        assert_eq!(wizard.start, Start::InstallerCd);
+        wizard.route = Some((rules::QEMU.to_string(), None));
+        wizard.step = Step::Disk;
+        wizard.plan_disk();
+        assert_eq!(wizard.strategy, Some(Strategy::BlankWithCd));
+        assert_eq!(wizard.disk_size, "10G");
+
+        wizard.cursor = wizard
+            .rows()
+            .iter()
+            .position(|r| *r == Row::DiskSize)
+            .unwrap();
+        wizard.handle(key(KeyCode::Enter));
+        for _ in 0..wizard.disk_size.len() {
+            wizard.handle(key(KeyCode::Backspace));
+        }
+        type_text(&mut wizard, "2G");
+        assert_eq!(wizard.disk_size, "2G");
+        let (message, _) = wizard.message.clone().unwrap();
+        assert!(
+            message.contains("4GB") && message.contains("10G"),
+            "{message}"
+        );
+
+        // What was typed stays when the disk is worked out again.
+        wizard.plan_disk();
+        assert_eq!(wizard.disk_size, "2G");
     }
 
     #[test]

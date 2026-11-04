@@ -13,6 +13,66 @@ pub const BASILISK2: &str = "basilisk2";
 pub const SHEEPSHAVER: &str = "sheepshaver";
 pub const QEMU: &str = "qemu-ppc";
 
+/// A blank boot disk's size when nothing calls for more.
+pub const DEFAULT_DISK_SIZE: &str = "1G";
+
+/// Mac OS X's own disk space requirements, as Apple gave them, with the size
+/// the wizard suggests for a blank disk: the requirement, with room for
+/// applications and updates. Each is (from, least in megabytes, why, suggested).
+const MAC_OS_X_DISKS: &[(&[u32], u64, &str, &str)] = &[
+    (
+        &[10, 5],
+        9 * 1024,
+        "Mac OS X 10.5 needs 9GB of disk space",
+        "20G",
+    ),
+    (
+        &[10, 4],
+        4 * 1024,
+        "Mac OS X 10.4 needs 3GB of disk space, and 4GB with the Xcode developer tools",
+        "10G",
+    ),
+    (
+        &[10, 3],
+        1536,
+        "Mac OS X 10.3 needs 1.5GB of disk space",
+        "6G",
+    ),
+    (
+        &[10, 2],
+        3 * 1024,
+        "Mac OS X 10.2 needs 3GB of disk space",
+        "6G",
+    ),
+    (
+        &[10, 0],
+        1536,
+        "Mac OS X 10.0 and 10.1 need 1.5GB of disk space",
+        "4G",
+    ),
+];
+
+fn mac_os_x_disk(
+    guess: Option<&OsGuess>,
+) -> Option<&'static (&'static [u32], u64, &'static str, &'static str)> {
+    let guess = guess.filter(|g| g.family == "Mac OS X")?;
+    MAC_OS_X_DISKS
+        .iter()
+        .find(|(from, ..)| guess.version.at_least(from))
+}
+
+/// The size to suggest for a blank boot disk, for the system `guess` names.
+pub fn suggested_disk_size(guess: Option<&OsGuess>) -> &'static str {
+    mac_os_x_disk(guess).map_or(DEFAULT_DISK_SIZE, |(.., suggested)| suggested)
+}
+
+/// Why a blank disk of `bytes` is too small for the system `guess` names, if
+/// it is.
+pub fn disk_too_small(guess: Option<&OsGuess>, bytes: u64) -> Option<String> {
+    let (_, least, why, suggested) = mac_os_x_disk(guess)?;
+    (bytes < least << 20).then(|| format!("{why}; try {suggested}"))
+}
+
 /// Which machine of a backend that has several: a Mini vMac model, or the
 /// Power Mac QEMU emulates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -787,6 +847,26 @@ mod tests {
         assert!(matches!(&g3beige.fit, Fit::Unlikely(why) if why.contains("Old World ROM")));
         let sheepshaver = routes.iter().find(|r| r.backend == SHEEPSHAVER).unwrap();
         assert!(matches!(&sheepshaver.fit, Fit::Unlikely(why) if why.contains("9.0.4")));
+    }
+
+    #[test]
+    fn mac_os_x_gets_a_disk_big_enough_for_it() {
+        let size = |text: &str| suggested_disk_size(Some(&guess(text)));
+        assert_eq!(suggested_disk_size(None), DEFAULT_DISK_SIZE);
+        assert_eq!(size("Mac OS 9.2.1"), DEFAULT_DISK_SIZE);
+        assert_eq!(size("Mac OS X 10.0"), "4G");
+        assert_eq!(size("Mac OS X 10.1.5"), "4G");
+        assert_eq!(size("Mac OS X 10.2"), "6G");
+        assert_eq!(size("Mac OS X 10.3.9"), "6G");
+        assert_eq!(size("Mac OS X 10.4"), "10G");
+        assert_eq!(size("Mac OS X 10.5.8"), "20G");
+
+        let tiger = guess("Mac OS X 10.4");
+        let small = disk_too_small(Some(&tiger), 2 << 30).unwrap();
+        assert!(small.contains("4GB") && small.contains("10G"), "{small}");
+        assert_eq!(disk_too_small(Some(&tiger), 4 << 30), None);
+        assert_eq!(disk_too_small(Some(&guess("Mac OS 9.2.1")), 1 << 20), None);
+        assert!(disk_too_small(Some(&guess("Mac OS X 10.5")), 8 << 30).is_some());
     }
 
     #[test]

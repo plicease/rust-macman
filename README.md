@@ -735,7 +735,10 @@ again, keeping the name and settings you chose where they still apply.
    rom add`, then press r), or a host the backend doesn't run on. One the guess says won't
    work stays available, marked unlikely, since the guess may be wrong.
 4. **Boot disk and name**: a copy of the image's volume, as `system add` takes it, or a
-   blank disk of a size you choose to install onto from the CD. A whole CD is attached
+   blank disk of a size you choose to install onto from the CD. The size suggested is 1G
+   for classic Mac OS, and more for Mac OS X: 10G for 10.4, for example, against the 4GB
+   it needs with the developer tools (see [the table](docs/PLATFORMS.md#qemu)). A smaller
+   size is taken, with a warning. A whole CD is attached
    read-only as a CD, partition map and all, and never turned into a hard disk. A new
    installer image can also be registered as media here, to attach by name later.
 5. **Settings**: the same editor as `config edit`, with the same choices and checks, and
