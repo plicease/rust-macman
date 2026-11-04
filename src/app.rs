@@ -643,52 +643,58 @@ impl App {
 
     /// Everything registered, by what it takes on the host, smallest first:
     /// measured entries by size, then type and name; unavailable ones last.
+    ///
+    /// The total is measured from every entry's files together, so a file
+    /// reached from more than one entry, by a hard link, is counted once.
     fn disk_usage(&self, json: bool) -> Result<()> {
         let mut entries = Vec::new();
+        // Every file behind the entries, or `None` once a machine's can't be
+        // found out, which leaves the total unavailable.
+        let mut files: Option<Vec<PathBuf>> = Some(Vec::new());
         for name in list_dir(&self.paths.machines())? {
-            let used = Machine::load(&self.paths, &name)
+            let own = Machine::load(&self.paths, &name)
                 .ok()
-                .and_then(|machine| usage::machine_used(&self.paths, &machine));
+                .and_then(|machine| usage::machine_files(&self.paths, &machine));
+            let used = own
+                .as_ref()
+                .and_then(|own| usage::allocated_total(own.iter().map(PathBuf::as_path)));
+            match (&mut files, own) {
+                (Some(files), Some(own)) => files.extend(own),
+                _ => files = None,
+            }
             entries.push(UsageEntry {
                 name,
                 kind: UsageKind::Machine,
                 host_disk_used_bytes: used,
             });
         }
+        let mut single = |file: PathBuf, name: String, kind: UsageKind| {
+            let used = usage::allocated(&file);
+            if let Some(files) = &mut files {
+                files.push(file);
+            }
+            UsageEntry {
+                name,
+                kind,
+                host_disk_used_bytes: used,
+            }
+        };
         for rom in registry::list_roms(&self.paths)? {
             let file = self.paths.roms().join(format!("{}.rom", rom.name));
-            entries.push(UsageEntry {
-                host_disk_used_bytes: usage::allocated(&file),
-                name: rom.name,
-                kind: UsageKind::Rom,
-            });
+            entries.push(single(file, rom.name, UsageKind::Rom));
         }
         for system in registry::list_systems(&self.paths)? {
-            entries.push(UsageEntry {
-                host_disk_used_bytes: usage::allocated(&registry::system_file(
-                    &self.paths,
-                    &system.name,
-                )),
-                name: system.name,
-                kind: UsageKind::System,
-            });
+            let file = registry::system_file(&self.paths, &system.name);
+            entries.push(single(file, system.name, UsageKind::System));
         }
         for medium in media::list_media(&self.paths)? {
-            entries.push(UsageEntry {
-                host_disk_used_bytes: usage::allocated(&media::media_file(
-                    &self.paths,
-                    &medium.name,
-                )),
-                name: medium.name,
-                kind: UsageKind::Media,
-            });
+            let file = media::media_file(&self.paths, &medium.name);
+            entries.push(single(file, medium.name, UsageKind::Media));
         }
         sort_usage(&mut entries);
-        let total = entries.iter().try_fold(0u64, |sum, entry| {
-            entry
-                .host_disk_used_bytes
-                .map(|bytes| sum.saturating_add(bytes))
-        });
+        // A file that can't be measured leaves it unavailable too.
+        let total =
+            files.and_then(|files| usage::allocated_total(files.iter().map(PathBuf::as_path)));
         if json {
             return print_json(&DiskUsage {
                 entries,

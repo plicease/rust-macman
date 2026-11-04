@@ -238,8 +238,9 @@ pub struct CheckpointEntry {
 #[derive(Debug, Serialize)]
 pub struct DiskUsage {
     pub entries: Vec<UsageEntry>,
-    /// The sum of the entries, or `None` if any is unavailable, as a partial
-    /// total would understate the whole.
+    /// What the entries' files take together, counting a file reached from
+    /// more than one, by a hard link, once; `None` if any is unavailable, as a
+    /// partial total would understate the whole.
     pub total_host_disk_used_bytes: Option<u64>,
 }
 

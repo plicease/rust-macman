@@ -1095,6 +1095,45 @@ fn checkpoints_count_toward_a_machine_but_not_its_capacity() {
 
 #[cfg(unix)]
 #[test]
+fn du_counts_a_file_shared_by_two_entries_once_in_its_total() {
+    let env = Env::new();
+    env.register();
+    env.create("wombat-6");
+    // The machine's disk replaced by a link to the system it was made from.
+    let system = env.path().join("data/macman/systems/system-6.0.8.dsk");
+    let disk = env.machine_disk("wombat-6");
+    std::fs::remove_file(&disk).unwrap();
+    std::fs::hard_link(&system, &disk).unwrap();
+
+    let json: serde_json::Value = serde_json::from_str(&env.ok(&["--json", "du"])).unwrap();
+    let used = |name: &str| {
+        json["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap()["host_disk_used_bytes"]
+            .as_u64()
+            .unwrap()
+    };
+    let (machine, system, rom) = (used("wombat-6"), used("system-6.0.8"), used("plus-v3"));
+    assert_eq!(machine, system, "each entry still counts the file: {json}");
+    assert!(system > 0);
+    assert_eq!(
+        json["total_host_disk_used_bytes"],
+        rom + system,
+        "the shared file once: {json}"
+    );
+    let du = env.ok(&["du"]);
+    let total = du.lines().last().unwrap();
+    assert!(
+        total.ends_with(&macman::usage::format_bytes(rom + system)),
+        "{du}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_checkpoint_hard_linked_to_the_disk_counts_once() {
     let env = Env::new();
     env.register();
