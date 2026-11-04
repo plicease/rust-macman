@@ -291,6 +291,7 @@ these ways:
   `auto-boot?` is set, so OpenBIOS starts the guest without stopping.
 - **Sound:** QEMU has neither Power Mac's sound chip, so with sound on a `mac99` gets
   `-device usb-audio`, which Mac OS 9 drives once it's chosen in the Sound control panel.
+  Mac OS X 10.4 plays nothing through it.
   A `g3beige` has no USB bus, so it gets `-audio none` either way.
 - **HFS+ discs:** a CD with HFS+ in a partition map starts the Mac, as an HFS one does.
   OpenBIOS won't start a bare HFS+ volume, so `media add` stores one behind a two-entry
