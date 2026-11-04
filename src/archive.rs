@@ -9,8 +9,8 @@
 use crate::backend::Backends;
 use crate::disk::{self, ImageLock, LockMode};
 use crate::fsutil::{
-    HeldLock, atomic_copy_range_checked, hex_digest, list_dir, publish_new, sha256_file,
-    temp_sibling, validate_name, windows_can_name,
+    HeldLock, atomic_copy_range_checked, copy_sparse, hex_digest, list_dir, publish_new,
+    sha256_file, temp_sibling, validate_name, windows_can_name,
 };
 use crate::machine::{
     Basilisk2Settings, Disk, Display, Machine, SCHEMA_VERSION, SheepShaverSettings, SystemInfo,
@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
 /// The newest format this reads, and writes when an archive needs it: one
@@ -42,9 +42,10 @@ const MACHINES_ONLY_FORMAT: u32 = 1;
 const MANIFEST: &str = "manifest.toml";
 const BLOB_DIR: &str = "blobs/";
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
-/// Limits that bound what a hostile archive can make macman write.
-pub const MAX_BLOB_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-pub const MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+/// Limits that bound what a hostile archive can make macman write. A blob
+/// holds a whole disk, and Mac OS X wants several gigabytes of one.
+pub const MAX_BLOB_BYTES: u64 = 64 << 30;
+pub const MAX_TOTAL_BYTES: u64 = 256 << 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Manifest {
@@ -1084,24 +1085,22 @@ fn unpack_blob<R: Read>(
         );
     }
 
-    let mut output: Box<dyn Write> = if keep(sha256) {
-        let target = blobs.join(sha256);
-        Box::new(
-            OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&target)
-                .with_context(|| format!("cannot stage {sha256}"))?,
-        )
-    } else {
-        Box::new(io::sink())
-    };
     let mut reader = HashingReader {
         inner: entry.take(size),
         hasher: Sha256::new(),
     };
-    let written = io::copy(&mut reader, &mut output).context("the archive is damaged")?;
-    output.flush()?;
+    // Disks are mostly empty, so they're staged sparse where they can be.
+    let written = if keep(sha256) {
+        let target = blobs.join(sha256);
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&target)
+            .with_context(|| format!("cannot stage {sha256}"))?;
+        copy_sparse(&mut reader, &mut output).context("the archive is damaged")?
+    } else {
+        io::copy(&mut reader, &mut io::sink()).context("the archive is damaged")?
+    };
     if written != size || hex_digest(reader.hasher) != sha256 {
         bail!("{sha256} doesn't match its digest; the archive is damaged");
     }

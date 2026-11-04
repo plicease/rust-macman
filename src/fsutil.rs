@@ -94,6 +94,42 @@ pub fn atomic_copy_range(src: &Path, offset: u64, length: u64, dst: &Path) -> Re
     atomic_copy_range_checked(src, offset, length, dst, |_| Ok(()))
 }
 
+/// Copy all of `input` to the start of `output`, a new file, skipping over
+/// blocks of zeros, so a mostly empty disk image stays sparse where the
+/// filesystem allows. What's read back is the same either way.
+pub fn copy_sparse(input: &mut impl Read, output: &mut File) -> io::Result<u64> {
+    // Big enough that only a disk's empty stretches become holes.
+    const BLOCK: usize = 1 << 20;
+    let mut buffer = vec![0u8; BLOCK];
+    let mut total = 0u64;
+    loop {
+        let mut filled = 0;
+        while filled < BLOCK {
+            match input.read(&mut buffer[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if filled == 0 {
+            break;
+        }
+        let block = &buffer[..filled];
+        if block.iter().all(|&byte| byte == 0) {
+            output.seek(SeekFrom::Current(filled as i64))?;
+        } else {
+            output.write_all(block)?;
+        }
+        total += filled as u64;
+        if filled < BLOCK {
+            break;
+        }
+    }
+    output.set_len(total)?;
+    Ok(total)
+}
+
 /// As [`atomic_copy_range`], with `check` deciding, from the finished temporary
 /// file, whether to publish it. A rejected copy never appears at `dst`.
 pub fn atomic_copy_range_checked(
@@ -111,7 +147,7 @@ pub fn atomic_copy_range_checked(
         let mut input = File::open(src)?;
         input.seek(SeekFrom::Start(offset))?;
         let mut output = File::create(&tmp)?;
-        if io::copy(&mut input.take(length), &mut output)? != length {
+        if copy_sparse(&mut input.take(length), &mut output)? != length {
             bail!("source ended early");
         }
         output.sync_all()?;
@@ -416,6 +452,24 @@ impl Drop for HeldLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sparse_copy_is_the_same_and_skips_zeros() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = vec![0u8; 4 << 20];
+        bytes[100] = 1;
+        bytes[(3 << 20) + 5] = 2;
+        bytes.extend_from_slice(&[0u8; 1000]);
+        for source in [bytes.clone(), vec![0u8; 3 << 20], vec![7u8; 10], Vec::new()] {
+            let path = dir.path().join("copy");
+            let mut output = File::create(&path).unwrap();
+            let copied = copy_sparse(&mut source.as_slice(), &mut output).unwrap();
+            drop(output);
+            assert_eq!(copied, source.len() as u64);
+            assert_eq!(fs::read(&path).unwrap(), source);
+            fs::remove_file(&path).unwrap();
+        }
+    }
 
     #[test]
     fn an_independent_copy_is_writable_and_never_reaches_its_source() {
