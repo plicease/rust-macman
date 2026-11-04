@@ -928,8 +928,10 @@ disk, so it's unavailable for any file whose data isn't in the clusters it repor
   its chunk store, and OneDrive and other cloud files, as well as anything offline;
 - a small file that NTFS keeps inside its file record, with no clusters of its own;
 - a file with data that isn't in its clusters yet. ReFS gives new and rewritten data its
-  clusters when it's flushed, so every file on ReFS is flushed before it's read; until
-  then, a rewritten part of a block clone would still show the clusters it shared. NTFS
+  clusters when it's flushed, so every writable file on ReFS is flushed before it's read;
+  until then, a rewritten part of a block clone would still show the clusters it shared.
+  A read-only file can't be written, and macman flushes its files, such as checkpoints,
+  before making them read-only, so those aren't flushed again. NTFS
   does the same only for data written to a sparse file's holes, so there a file whose
   clusters fall short is flushed once and read again. Those are the only times a file is
   opened for writing, and only after it's known not to be compressed or compacted, because
@@ -947,8 +949,8 @@ can remain allocated and isn't counted, and redundancy below the file system, su
 Btrfs RAID1 or DUP, or a RAID device, isn't multiplied in.
 
 Reading every extent of every file is slower than `du` alone. On Linux each file's pending
-writes are flushed first so its blocks are final, and on Windows a ReFS file's are,
-as is an NTFS file's if they're not on disk yet. For a consistent figure, run it while no
+writes are flushed first so its blocks are final, and on Windows a writable ReFS
+file's are, as is an NTFS file's if they're not on disk yet. For a consistent figure, run it while no
 machine is running: a file that changes as it's read is tried again, then left
 unavailable, but changes between one file and the next aren't noticed.
 

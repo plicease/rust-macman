@@ -41,8 +41,9 @@
 //! On Linux, mapping a file first flushes its pending writes, so its extents
 //! are final, which costs time while an emulator is writing to it; that, and
 //! reading every extent of every file, is why it's asked for rather than
-//! shown by default. On Windows, every file on ReFS is flushed, as ReFS
-//! moves rewritten data to new clusters only then, but on NTFS only a file
+//! shown by default. On Windows, every writable file on ReFS is flushed,
+//! as ReFS moves rewritten data to new clusters only then (macman flushes a
+//! file before making it read-only, which keeps it from being written), but on NTFS only a file
 //! whose recent writes have no clusters yet, as flushing takes opening it to
 //! write, which an emulator holding it may not allow. Only a file's main data is counted: on
 //! Windows, its alternate data streams aren't, as they aren't in its
@@ -396,12 +397,13 @@ mod imp {
     };
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE,
-        FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SPARSE_FILE, FILE_ATTRIBUTE_TAG_INFO,
-        FILE_BASIC_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileAttributeTagInfo, FileBasicInfo,
-        FileStandardInfo, GetDiskFreeSpaceW, GetFileInformationByHandleEx,
-        GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, VOLUME_NAME_GUID,
+        FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+        FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SPARSE_FILE,
+        FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
+        FileAttributeTagInfo, FileBasicInfo, FileStandardInfo, GetDiskFreeSpaceW,
+        GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumeInformationByHandleW,
+        VOLUME_NAME_GUID,
     };
     use windows_sys::Win32::System::IO::DeviceIoControl;
     use windows_sys::Win32::System::Ioctl::{
@@ -623,7 +625,9 @@ mod imp {
         // is, such as still in clusters a clone shares, and cover the file
         // all the same. NTFS rewrites in place, so needs a flush only for
         // what it hasn't placed at all, which falling short shows below.
-        if system == "ReFS" {
+        // A read-only file takes no writes, and can't be opened to flush;
+        // macman flushes its files before making them read-only.
+        if system == "ReFS" && attributes & FILE_ATTRIBUTE_READONLY == 0 {
             flush(path).map_err(|error| {
                 format!("can't flush {shown}'s writes so its clusters are final: {error}")
             })?;
