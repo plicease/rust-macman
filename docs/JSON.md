@@ -200,8 +200,15 @@ is the boot disk alone.
 ## `macman du`
 
 ```json
-{"entries": [{"name": "plus-v3", "type": "rom", "host_disk_used_bytes": 131072}, {"name": "ss904", "type": "machine", "host_disk_used_bytes": 432013312}]}
+{"entries": [{"name": "plus-v3", "type": "rom", "host_disk_used_bytes": 131072}, {"name": "ss904", "type": "machine", "host_disk_used_bytes": 432013312}], "total_host_disk_used_bytes": 432144384}
 ```
+
+| Field | Type | |
+|---|---|---|
+| `entries` | array | One per machine, ROM, system, and medium, as below |
+| `total_host_disk_used_bytes` | number or null | Host storage allocated to all the entries' files together, counting a file shared between entries by a hard link once, so it can be less than their sum; `null` if any entry is unavailable. Blocks shared by reflinks or deduplication are still counted for each file. See [Disk usage](../README.md#disk-usage) |
+
+Each entry has:
 
 | Field | Type | |
 |---|---|---|

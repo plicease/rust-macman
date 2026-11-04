@@ -613,6 +613,7 @@ sys6-install  media      800 KiB
 system-6.0.8  system     800 KiB
 wombat-6      machine     41 MiB
 ss904         machine    412 MiB
+total         -          455 MiB
 ```
 
 The two numbers measure different things. A disk's capacity is what the guest sees: the
@@ -628,7 +629,11 @@ done.
 
 `du` sorts by usage, then by type and name, so its order is the same every time. An entry
 whose usage can't be measured, such as a machine with a missing disk or checkpoint, shows `-`, never
-`0 B`, and comes after the rest; listings carry on past it.
+`0 B`, and comes after the rest; listings carry on past it. The last line, of type `-`, is
+the total: what all the entries' files take together, measured from the files rather than
+added up from the lines above, so a file that two entries share by a hard link is counted
+once and the total can be less than their sum. It shows `-` if any entry does, as a
+partial total would understate the whole.
 
 Usage is allocation as the platform reports it, `st_blocks` on Linux and macOS and the
 allocation size on Windows, which may round up to whole blocks or clusters. It can't see
@@ -636,12 +641,17 @@ storage shared between files: a reflinked or deduplicated copy, as Btrfs, XFS, a
 can make, is counted in full for each file that shares it, so totals can overstate what
 removing something would free. Transparent compression may be
 reported either way, depending on the file system. Hard links to one file are counted
-once within a machine, checkpoints included. Elsewhere macman makes copies rather than links, so they don't
-arise.
+once within a machine, checkpoints included, and once within `du`'s total, wherever the
+links are. macman itself makes copies rather than links, so they only arise when made
+by hand. The total is still of allocated files, not of unique physical storage: blocks
+that different files share, by reflinks or deduplication, are counted for each of them,
+in the total as in every entry, because what the platform reports per file can't say
+which blocks are shared.
 
 `--json` gives the raw byte counts: `system_disk_capacity_bytes` and
 `host_disk_used_bytes` in `list`, `host_disk_used_bytes` in the registry lists, and
-`du`'s entries in the same order as its text. See [docs/JSON.md](docs/JSON.md).
+`du`'s entries in the same order as its text, with the total as
+`total_host_disk_used_bytes`. See [docs/JSON.md](docs/JSON.md).
 
 ## Moving machines between hosts
 
