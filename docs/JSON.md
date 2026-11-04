@@ -210,6 +210,8 @@ is the boot disk alone.
 |---|---|---|
 | `entries` | array | One per machine, ROM, system, and medium, as below |
 | `total_host_disk_used_bytes` | number or null | Host storage allocated to all the entries' files together, counting a file shared between entries by a hard link once, so it can be less than their sum; `null` if any entry is unavailable. Blocks shared by reflinks or deduplication are still counted for each file. See [Disk usage](../README.md#disk-usage) |
+| `unique_physical_bytes` | number or null | With `--physical` only. The unique physical storage of the same files, with blocks shared by hard links, reflinks, or deduplication counted once; `null` if it can't be measured reliably. See [Unique physical usage](../README.md#unique-physical-usage) |
+| `unique_physical_unavailable` | string or null | With `--physical` only. Why `unique_physical_bytes` is `null`, such as the file system a file is on; `null` when it's measured |
 
 Each entry has:
 

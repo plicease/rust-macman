@@ -14,6 +14,7 @@ pub mod machine;
 pub mod media;
 pub mod model;
 pub mod paths;
+pub mod physical;
 pub mod registry;
 pub mod report;
 pub mod settings;
