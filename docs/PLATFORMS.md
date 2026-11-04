@@ -342,6 +342,31 @@ These parts of the smoke test have been seen to work on that host:
 - Mac OS X 10.4's retail DVD, as a bare HFS+ volume, registered with `media add`, which
   put a partition map in front, and `macman run --media` started its installer to the
   language screen. OpenBIOS found no startup file on the volume without the map.
+- Mac OS X 10.4 installed from that DVD onto a 10G blank disk. The installer offers only
+  Restart when it's done, not Shut Down, and with `-boot d` the restart went back to the
+  installer. macman now passes `-boot order=c,once=d`, so only the first start is from
+  the DVD. A copy of the installed disk, started that way with the DVD and then reset
+  from QEMU's monitor, read the DVD first and then its own disk, to the Finder with the
+  DVD mounted. The disk was left as a partition
+  map and one HFS+ volume, and then started from that disk with no DVD. The first start
+  was slow: the gray Apple stayed for several minutes, with no spinner, and the screen
+  then turned blue with a spinning beach ball before going on. Booting a copy headless
+  showed the disk being read throughout, about 10MB in 3 minutes, in 512-byte reads, and
+  verbose text, asked for with `-prom-env boot-args=-v`, never appeared in that time, so
+  it was still in BootX, the loader, rather than the kernel. That's what a fresh install
+  does before it has a kernel extension cache. A run with `--ephemeral` throws that work
+  away, so the next start is as slow; run it on its own disk and shut down from the Apple
+  menu. A clone given more memory felt less slow.
+- Under Mac OS X 10.4, full screen and `slirp` networking worked. It installed at
+  1024x768x32, and ran at 1440x960x32 once `config edit` changed it. At depth 8 it started,
+  but showed only dithered grays, as if its palette never reached QEMU's display. At depth
+  15, the gray Apple was drawn at half width in the left half of the window, in wrong
+  colors, as if the loader wrote 2 bytes a pixel and the display read 4. Only depth 32
+  worked, and macman warns about a lower one unless the machine records a classic Mac OS
+  version. Sound played through
+  `usb-audio` once it was chosen under Output in System Preferences' Sound pane and the
+  Mac restarted. Until then, though chosen, it was silent. A trace of QEMU's USB
+  controller then showed isochronous transfers flowing to it, with a few overruns.
 
 - A machine set to full screen started in a window: `-display` replaces every display
   option before it, `-full-screen` among them, as `query-display-options` over QMP showed.
@@ -364,8 +389,8 @@ What's been found about guests:
   770M, 1001M, 1014M, 1018M, 1022M, 1023M, 1540M, and 2044M did, and 260M, 510M, 516M,
   772M, 896M, 960M, 992M, 1000M, 1008M, 1012M, 1016M, 1020M, 1024M, 1056M, 1152M, 1280M, 1536M, and
   2048M didn't. No rule fits both but multiples of 32M, which macman requires.
-- Mac OS X 10.4's installer starts on `mac99`. Installing it, other releases, and Mac OS X
-  on a `g3beige` haven't been tried.
+- Mac OS X 10.4 installs on `mac99` and starts from its own disk. Other
+  releases, and Mac OS X on a `g3beige`, haven't been tried.
 
 A blank disk for Mac OS X, from the wizard, is bigger than the 1G it suggests for classic
 Mac OS: Apple's requirement for the release, with room for applications and updates. A
@@ -384,7 +409,7 @@ where the host allows, so a bigger one costs little until it fills.
 
 A machine exported on Linux, imported on macOS with its own QEMU, ran there, with
 networking and sound. On Windows, with its own QEMU, sound and networking worked too. The wizard recommends `mac99` for Mac OS 9.1 to 9.2.2, from 9.2.1's
-start, and Mac OS X 10.4, from its installer's start, and never `g3beige` for classic Mac
+start, and Mac OS X 10.4, which installed and started, and never `g3beige` for classic Mac
 OS.
 
 ## Release targets

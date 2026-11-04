@@ -19,7 +19,7 @@ use std::path::PathBuf;
 /// editor also takes any other size typed in.
 const MEMORY: &[&str] = &[
     "128K", "512K", "1M", "2M", "2.5M", "4M", "5M", "8M", "16M", "24M", "32M", "48M", "64M", "96M",
-    "128M", "192M", "256M", "384M", "512M", "768M", "1023M", "1024M",
+    "128M", "192M", "256M", "384M", "512M", "768M", "1023M", "1024M", "1536M", "2048M",
 ];
 /// Display sizes offered, as for [`MEMORY`].
 const SIZES: &[(u32, u32)] = &[
@@ -49,7 +49,7 @@ pub const DISKS_FIXED: &str = "The disk files and their order aren't edited here
 /// Why the same fields are fixed for a machine the wizard hasn't made yet.
 pub const CHOSEN_EARLIER: &str =
     "Chosen in an earlier step of the wizard; go back with b to change it.";
-const DEPTHS: &[u32] = &[1, 2, 4, 8, 16, 32];
+const DEPTHS: &[u32] = &[1, 2, 4, 8, 15, 16, 32];
 const SCALES: &[u32] = &[1, 2, 3, 4];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -597,6 +597,13 @@ impl<'a> Editor<'a> {
                     .to_string(),
             );
         }
+        if before.display.depth != after.display.depth
+            && let Some(warning) = crate::backend::qemu::depth_warning(after)
+        {
+            let mut sentence = warning[..1].to_uppercase() + &warning[1..];
+            sentence.push('.');
+            notes.push(sentence);
+        }
         if !before.ephemeral && after.ephemeral {
             notes.push(
                 "A plain `run` will discard the guest's changes to the boot disk; use `run \
@@ -954,6 +961,44 @@ pub(crate) mod tests {
                 "tnt",
             ],
         );
+    }
+
+    #[test]
+    fn qemu_offers_its_depths_and_memory_up_to_its_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        make_qemu(&paths);
+        let backends = crate::default_backends(&paths).unwrap();
+        let editor = Editor::open(&paths, &backends, "g4").unwrap();
+
+        // OpenBIOS offers 15 bits, not 16.
+        assert_eq!(allowed(&editor, FieldId::Depth), vec!["8", "15", "32"]);
+        let memory = allowed(&editor, FieldId::Memory);
+        for size in ["1024M", "1536M", "2048M"] {
+            assert!(memory.contains(&size.to_string()), "{size}: {memory:?}");
+        }
+        // Mac OS X panics on sizes that aren't a multiple of 32M.
+        assert!(!memory.contains(&"1023M".to_string()), "{memory:?}");
+    }
+
+    #[test]
+    fn qemu_warns_below_depth_32() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        make_qemu(&paths);
+        let backends = crate::default_backends(&paths).unwrap();
+        let mut editor = Editor::open(&paths, &backends, "g4").unwrap();
+        let warned = |editor: &Editor| {
+            editor
+                .notes()
+                .iter()
+                .any(|note| note.starts_with("Depth 15 doesn't display Mac OS X"))
+        };
+
+        editor.set(FieldId::Depth, "15").unwrap();
+        assert!(warned(&editor), "{:?}", editor.notes());
+        editor.set(FieldId::Depth, "32").unwrap();
+        assert!(editor.notes().is_empty(), "{:?}", editor.notes());
     }
 
     /// A QEMU machine, saved directly, as `create` would need a real QEMU.

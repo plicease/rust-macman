@@ -1189,6 +1189,7 @@ impl App {
             backend.check_rom(&machine, rom, rom_path)?;
         }
         backend.validate(&machine)?;
+        warnings.extend(qemu::depth_warning(&machine));
         Ok(Prepared {
             machine,
             boot_disk,

@@ -254,7 +254,7 @@ pub const MODEL_ORDER: [Model; 11] = [
 
 /// The systems each backend runs, as upstream documents them. For QEMU, the
 /// releases sharing Mac OS 9.2.1's New World support, which started, and not
-/// 9.0.4, which didn't, and Mac OS X 10.4, whose installer started.
+/// 9.0.4, which didn't, and Mac OS X 10.4, which installed and started.
 fn runs(backend: &str, variant: Option<Variant>, version: &Version) -> Result<(), String> {
     let mac99 = matches!(variant, None | Some(Variant::Qemu(QemuMachine::Mac99)));
     if backend == QEMU && mac99 && version.at_least(&[10, 4]) && version.at_most(&[10, 4]) {

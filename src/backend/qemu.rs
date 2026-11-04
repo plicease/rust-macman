@@ -12,15 +12,17 @@
 //!   with ADB.
 //! - Disks and CDs are IDE drives, four in all: QEMU refuses a fifth. Images are
 //!   given whole, as raw disks, so partitioned disks and CDs mount as they are.
-//!   OpenBIOS starts from the first CD when one has an HFS volume (`-boot d`),
-//!   and otherwise from the first disk (`-boot c`).
+//!   OpenBIOS starts from the first CD when one has an HFS volume, and
+//!   otherwise from the first disk. A CD is started from once (`-boot
+//!   order=c,once=d`), so an installer's Restart comes up from the disk.
 //! - The display size and depth go to OpenBIOS (`-g`), which offers 8, 15, and
 //!   32 bits. The window isn't magnified, so the scale is 1.
 //! - Networking is QEMU's user-mode NAT with a Sun GEM card, which Mac OS 9 and
 //!   Mac OS X drive as Apple's own.
 //! - QEMU has neither Power Mac's sound chip. With sound on, a mac99 gets a USB
 //!   audio device, which Mac OS 9 plays through once it's chosen in the Sound
-//!   control panel. A g3beige has no USB, so no sound.
+//!   control panel, and Mac OS X 10.4 once it's chosen in System Preferences
+//!   and the Mac restarts. A g3beige has no USB, so no sound.
 //! - On Linux the window is SDL's, as GTK's can't hold the mouse on Wayland.
 //!
 //! A machine records the QEMU version it was made with as its revision. That
@@ -235,6 +237,31 @@ fn validate_memory(kind: QemuMachine, memory: &str) -> Result<()> {
     }
 }
 
+/// A warning for a QEMU machine below depth 32, unless it's known to hold
+/// classic Mac OS. Mac OS X 10.4 showed only dithered grays at 8 bits, and drew
+/// its startup screen at half width in wrong colors at 15. Classic Mac OS
+/// hasn't been tried at either, so it isn't warned about.
+pub fn depth_warning(machine: &Machine) -> Option<String> {
+    let depth = machine.display.depth;
+    if machine.emulator.backend != BACKEND_NAME || depth == 32 {
+        return None;
+    }
+    let major = |version: &str| version.split('.').next()?.parse::<u32>().ok();
+    if machine
+        .system
+        .version
+        .as_deref()
+        .and_then(major)
+        .is_some_and(|major| major < 10)
+    {
+        return None;
+    }
+    Some(format!(
+        "depth {depth} doesn't display Mac OS X properly under QEMU: Mac OS X 10.4 showed only \
+         grays at depth 8, and drew wrongly at 15; use depth 32 for Mac OS X"
+    ))
+}
+
 fn validate_display(display: &Display) -> Result<()> {
     let Display {
         width,
@@ -318,7 +345,14 @@ pub fn arguments(request: &LaunchRequest<'_>) -> Result<Vec<OsString>> {
         "-prom-env".into(),
         "auto-boot?=true".into(),
         "-boot".into(),
-        if starts_from_cd { "d" } else { "c" }.into(),
+        // From the CD only until the guest restarts, as installers end with
+        // Restart: then it's the disk, with the new system.
+        if starts_from_cd {
+            "order=c,once=d"
+        } else {
+            "c"
+        }
+        .into(),
     ];
     for disk in request.disks {
         arguments.extend(["-drive".into(), drive(&disk.path, "disk", disk.writable)]);
@@ -692,7 +726,7 @@ pub(crate) mod tests {
         };
         assert_eq!(
             strings(&arguments(&request).unwrap()).join(" "),
-            "-M mac99,via=pmu -m 512 -g 1024x768x32 -name g4 -prom-env auto-boot?=true -boot d \
+            "-M mac99,via=pmu -m 512 -g 1024x768x32 -name g4 -prom-env auto-boot?=true -boot order=c,once=d \
              -drive file=/m/g4/system.dsk,format=raw,media=disk \
              -drive file=/data/a,,b.img,format=raw,media=disk,snapshot=on \
              -drive file=/cds/Mac OS 9.toast,format=raw,media=cdrom,readonly=on \
@@ -730,6 +764,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn depths_below_32_warn_unless_the_system_is_classic() {
+        let warns = |depth: u32, version: Option<&str>| {
+            let mut g4 = machine(QemuMachine::Mac99);
+            g4.display.depth = depth;
+            g4.system.version = version.map(str::to_string);
+            depth_warning(&g4)
+        };
+        assert_eq!(warns(32, None), None);
+        assert_eq!(warns(32, Some("10.4")), None);
+        for (depth, version) in [
+            (8, None),
+            (15, None),
+            (15, Some("10.4")),
+            (8, Some("10.4.11")),
+        ] {
+            let warning = warns(depth, version).unwrap();
+            assert!(warning.contains(&format!("depth {depth}")), "{warning}");
+            assert!(warning.contains("use depth 32"), "{warning}");
+        }
+        // Classic Mac OS hasn't been tried at these depths.
+        assert_eq!(warns(8, Some("9.2.1")), None);
+        assert_eq!(warns(15, Some("9")), None);
+
+        // Other backends have their own depths.
+        let mut plus = machine(QemuMachine::Mac99);
+        plus.emulator.backend = "minivmac".into();
+        plus.display.depth = 8;
+        assert_eq!(depth_warning(&plus), None);
+    }
+
+    #[test]
     fn an_hfs_plus_disc_is_started_from() {
         let g4 = machine(QemuMachine::Mac99);
         let executable = Executable {
@@ -761,7 +826,7 @@ pub(crate) mod tests {
             verbose: false,
         };
         let arguments = strings(&arguments(&request).unwrap()).join(" ");
-        assert!(arguments.contains(" -boot d "), "{arguments}");
+        assert!(arguments.contains(" -boot order=c,once=d "), "{arguments}");
         let tiger = arguments.find("tiger.img").unwrap();
         assert!(tiger < arguments.find("data.iso").unwrap(), "{arguments}");
     }
