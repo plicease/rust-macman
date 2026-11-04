@@ -39,7 +39,7 @@ The message is also printed to stderr, as `error: ...`, as it is without `--json
 
 These change things and report as they go, so they have no single result to give:
 `create`, `run`, `use`, `clone`, `remove`, `export`, `import` (except with `--dry-run`),
-`rom add`, `system add`, `system remove`, `media add`, `media remove`, `checkpoint
+`alias`, `unalias`, `rom add`, `system add`, `system remove`, `media add`, `media remove`, `checkpoint
 create`, `checkpoint delete`, `rollback`, `disk extract`, and
 `config edit`, which is interactive. Given `--json`, they do nothing, and fail with an error as above.
 
@@ -51,6 +51,7 @@ create`, `checkpoint delete`, `rollback`, `disk extract`, and
     {
       "name": "wombat-6",
       "current": true,
+      "aliases": ["plus", "wombat"],
       "backend": "minivmac",
       "model": "plus",
       "memory": "4M",
@@ -68,6 +69,7 @@ create`, `checkpoint delete`, `rollback`, `disk extract`, and
 |---|---|---|
 | `name` | string | |
 | `current` | boolean | Whether it's the machine `macman use` chose |
+| `aliases` | array of strings | The machine's other names, sorted; empty if none |
 | `backend` | string | `minivmac`, `basilisk2`, or `sheepshaver` |
 | `model` | string or null | The Mini vMac model, such as `plus` or `iix`; `null` for other backends |
 | `memory` | string | As configured, such as `4M` |
@@ -77,7 +79,8 @@ create`, `checkpoint delete`, `rollback`, `disk extract`, and
 | `system_disk_capacity_bytes` | number or null | The boot disk's capacity as the guest sees it: a Disk Copy image's data, otherwise the file's length, sparse or not; `null` if it's missing or there's none |
 | `host_disk_used_bytes` | number or null | Host storage allocated to all the machine's disks; `null` if any is missing or can't be measured. See [Disk usage](../README.md#disk-usage) |
 
-A machine whose definition can't be read has only `name`, `current`, and `error`, a string.
+A machine whose definition can't be read has only `name`, `current`, `aliases`, which is
+empty, and `error`, a string.
 
 ## `macman list --builds`
 

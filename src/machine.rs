@@ -233,8 +233,21 @@ fn publish_dir_checked(
     name: &str,
     before_rename: impl FnOnce(),
 ) -> Result<()> {
-    fs::create_dir_all(paths.locks()).context("cannot create lock directory")?;
     fs::create_dir_all(paths.machines()).context("cannot create the machines directory")?;
+    let _lock = lock_machines(paths)?;
+
+    if paths.machine(name).symlink_metadata().is_ok() {
+        bail!("machine {name:?} already exists");
+    }
+    crate::aliases::check_new_name(paths, name)?;
+    before_rename();
+    fs::rename(staged, paths.machine(name)).context("cannot publish machine")
+}
+
+/// Hold the lock on the machine namespace, waiting for it: machine names, as
+/// [`publish_dir`] makes them, and aliases, which share their names.
+pub fn lock_machines(paths: &Paths) -> Result<crate::fsutil::HeldLock> {
+    fs::create_dir_all(paths.locks()).context("cannot create lock directory")?;
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -242,12 +255,7 @@ fn publish_dir_checked(
         .open(paths.machines_lock())
         .context("cannot open the machine lock")?;
     lock.lock().context("cannot take the machine lock")?;
-
-    if paths.machine(name).symlink_metadata().is_ok() {
-        bail!("machine {name:?} already exists");
-    }
-    before_rename();
-    fs::rename(staged, paths.machine(name)).context("cannot publish machine")
+    Ok(crate::fsutil::HeldLock::new(lock))
 }
 
 pub fn new_id() -> String {

@@ -34,6 +34,8 @@ pub struct MachineList {
 pub struct MachineEntry {
     pub name: String,
     pub current: bool,
+    /// Its other names, sorted.
+    pub aliases: Vec<String>,
     #[serde(flatten)]
     pub details: MachineDetails,
 }

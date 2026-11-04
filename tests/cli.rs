@@ -191,7 +191,10 @@ fn use_current_and_list() {
         line.starts_with("* wombat-6  plus  4M  512x342x1  disk 800 KiB  used "),
         "{list}"
     );
-    assert!(line.ends_with("  persistent  system 6.0.8"), "{list}");
+    assert!(
+        line.ends_with("  persistent  system 6.0.8  aliases -"),
+        "{list}"
+    );
     assert!(list.contains("  wombat-7"), "{list}");
     assert!(env.ok(&["config", "show"]).contains("wombat-6"));
 }

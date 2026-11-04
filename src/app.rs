@@ -1,5 +1,6 @@
 //! Command implementations.
 
+use crate::aliases;
 use crate::archive::{self, Outcome, RomOutcome, SystemOutcome};
 use crate::backend::minivmac::{MANIFEST, Manifest};
 use crate::backend::{
@@ -104,7 +105,7 @@ impl App {
     }
 
     /// Run a command, returning the process exit code.
-    pub fn execute(&self, cli: Cli) -> Result<u8> {
+    pub fn execute(&self, mut cli: Cli) -> Result<u8> {
         let verbose = cli.verbose;
         let json = cli.json;
         if json && let Some(command) = without_json(&cli.command) {
@@ -118,6 +119,7 @@ impl App {
                  reporting them; leave it off{hint}"
             );
         }
+        self.canonicalize(&mut cli.command)?;
         match cli.command {
             Command::Doctor => return self.doctor(verbose, json),
             Command::List { builds: false } => self.list_machines(json)?,
@@ -219,6 +221,20 @@ impl App {
                 save,
                 yes,
             } => self.rollback(name, &checkpoint, save.as_deref(), yes)?,
+            Command::Alias { machine, alias } => {
+                match aliases::add(&self.paths, &machine, &alias)? {
+                    (machine, aliases::Added::Added) => {
+                        println!("{alias} is now an alias of machine {machine}")
+                    }
+                    (machine, aliases::Added::Already) => {
+                        println!("{alias} was already an alias of machine {machine}")
+                    }
+                }
+            }
+            Command::Unalias { alias } => {
+                let machine = aliases::remove(&self.paths, &alias)?;
+                println!("Removed alias {alias} of machine {machine}");
+            }
             Command::Clone { source, dest } => self.clone_machine(&source, &dest)?,
             Command::Export {
                 names,
@@ -386,7 +402,53 @@ impl App {
             None => self.current()?,
         };
         validate_name("machine", &name)?;
-        Ok(name)
+        aliases::resolve(&self.paths, &name)
+    }
+
+    /// Replace every existing machine named on the command line, wherever it
+    /// is, with the machine it names, so an alias works anywhere a machine's
+    /// name does. Each command is here, with no catch-all, so a new one has to
+    /// say which of its arguments name machines. Names for new machines aren't
+    /// touched.
+    fn canonicalize(&self, command: &mut Command) -> Result<()> {
+        let one = |name: &mut String| -> Result<()> {
+            *name = aliases::resolve(&self.paths, name)?;
+            Ok(())
+        };
+        let maybe = |name: &mut Option<String>| -> Result<()> { name.iter_mut().try_for_each(one) };
+        match command {
+            Command::Use { name } | Command::Remove { name, .. } => one(name),
+            Command::Run(args) => maybe(&mut args.name),
+            Command::Config(
+                ConfigCommand::Show { name }
+                | ConfigCommand::Edit { name }
+                | ConfigCommand::Keys { name },
+            ) => maybe(name),
+            // A machine among its words is resolved with them, in `config_set`.
+            Command::Config(ConfigCommand::Set { machine, .. }) => maybe(machine),
+            Command::Checkpoint(
+                CheckpointCommand::Create { name, .. }
+                | CheckpointCommand::List { name }
+                | CheckpointCommand::Delete { name, .. },
+            ) => maybe(name),
+            Command::Rollback { name, .. } => maybe(name),
+            Command::Alias { machine, .. } => one(machine),
+            Command::Clone { source, .. } => one(source),
+            Command::Export { names, .. } => names.iter_mut().try_for_each(one),
+            // None of these names a machine that exists already.
+            Command::Doctor
+            | Command::List { .. }
+            | Command::Rom(_)
+            | Command::System(_)
+            | Command::Media(_)
+            | Command::Disk(_)
+            | Command::Create(_)
+            | Command::Current
+            | Command::Unalias { .. }
+            | Command::Import { .. }
+            | Command::Du
+            | Command::Completions { .. } => Ok(()),
+        }
     }
 
     fn select(&self, name: &str) -> Result<()> {
@@ -403,7 +465,12 @@ impl App {
         let current = Config::load(&self.paths)?.current;
         let mut machines = Vec::new();
         for name in list_dir(&self.paths.machines())? {
-            let details = match Machine::load(&self.paths, &name) {
+            let loaded = Machine::load(&self.paths, &name);
+            let names = match &loaded {
+                Ok(m) => aliases::of(&self.paths, m)?,
+                Err(_) => Vec::new(),
+            };
+            let details = match loaded {
                 Ok(m) => MachineDetails::Readable {
                     backend: m.emulator.backend.clone(),
                     model: m.hardware.model.map(|model| model.to_string()),
@@ -427,6 +494,7 @@ impl App {
             machines.push(MachineEntry {
                 current: current.as_deref() == Some(&name),
                 name,
+                aliases: names,
                 details,
             });
         }
@@ -437,6 +505,11 @@ impl App {
         for machine in machines {
             let marker = if machine.current { '*' } else { ' ' };
             let label = format!("{marker} {}", machine.name);
+            let names = if machine.aliases.is_empty() {
+                "aliases -".to_string()
+            } else {
+                format!("aliases {}", machine.aliases.join(", "))
+            };
             rows.push(match machine.details {
                 MachineDetails::Readable {
                     backend,
@@ -456,6 +529,7 @@ impl App {
                     format!("used {}", usage::format_usage(host_disk_used_bytes)),
                     if ephemeral { "ephemeral" } else { "persistent" }.to_string(),
                     format!("system {}", system_version.as_deref().unwrap_or("-")),
+                    names,
                 ],
                 MachineDetails::Unreadable { error } => {
                     vec![label, format!("(unreadable: {error})")]
@@ -858,6 +932,7 @@ impl App {
         if self.paths.machine(&args.name).exists() {
             bail!("machine {:?} already exists", args.name);
         }
+        aliases::check_new_name(&self.paths, &args.name)?;
         let backend = match &args.backend {
             Some(name) => self.backends.get(name)?,
             None => self.backends.default_backend(),
@@ -1030,6 +1105,7 @@ impl App {
         if self.paths.machine(dest).exists() {
             bail!("machine {dest:?} already exists");
         }
+        aliases::check_new_name(&self.paths, dest)?;
         let original = Machine::load(&self.paths, source)?;
         let mut copy = original.clone();
         copy.name = dest.to_string();
@@ -1073,13 +1149,17 @@ impl App {
             }
         }
         let checkpoints = checkpoint::list(&self.paths, name)?.len();
+        let names = aliases::of(&self.paths, &machine)?;
         if !delete_disks && (!disks.is_empty() || checkpoints > 0) {
             let disks = disks.len();
-            let also = if checkpoints > 0 {
+            let mut also = if checkpoints > 0 {
                 format!(" and {checkpoints} checkpoint(s)")
             } else {
                 String::new()
             };
+            if !names.is_empty() {
+                also += &format!(", and its alias(es) {}", names.join(", "));
+            }
             confirm(
                 &format!("Delete machine {name:?} and its {disks} private disk(s){also}?"),
                 &format!(
@@ -1089,13 +1169,22 @@ impl App {
             )?;
         }
         fs::remove_dir_all(&dir).with_context(|| format!("cannot remove {}", dir.display()))?;
+        // Its aliases name nothing now, and could only mislead.
+        let names = aliases::forget(&self.paths, &machine)?;
 
         let mut config = Config::load(&self.paths)?;
         if config.current.as_deref() == Some(name) {
             config.current = None;
             config.save(&self.paths)?;
         }
-        println!("Removed machine {name}");
+        if names.is_empty() {
+            println!("Removed machine {name}");
+        } else {
+            println!(
+                "Removed machine {name} and its alias(es) {}",
+                names.join(", ")
+            );
+        }
         Ok(())
     }
 
@@ -1721,6 +1810,12 @@ impl App {
         self.check_registry(&mut checks)?;
         self.check_cache(&mut checks, verbose)?;
         self.check_machines(&mut checks)?;
+        for (alias, machine) in aliases::stale(&self.paths)? {
+            checks.push(Check::warn(
+                format!("alias {alias} names machine {machine}, which no longer exists"),
+                format!("remove it with `macman unalias {alias}`"),
+            ));
+        }
         for stale in disk::stale_sessions(&self.paths)? {
             checks.push(Check::warn(
                 format!(
@@ -2148,11 +2243,17 @@ pub fn print_names(paths: &Paths, kind: NameKind, words: &[String]) {
             .collect()
     };
     let mut names = match kind {
-        NameKind::Machines => list_dir(&paths.machines())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|name| paths.machine(name).join("machine.toml").is_file())
-            .collect(),
+        // An alias works wherever a machine's name does, so it's offered too.
+        NameKind::Machines => {
+            let mut names: Vec<String> = list_dir(&paths.machines())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|name| paths.machine(name).join("machine.toml").is_file())
+                .collect();
+            names.extend(aliases::all(paths));
+            names
+        }
+        NameKind::Aliases => aliases::all(paths),
         NameKind::Roms => registered(paths.roms()),
         NameKind::Systems => registered(paths.systems()),
         NameKind::Media => registered(paths.media()),
@@ -2163,6 +2264,7 @@ pub fn print_names(paths: &Paths, kind: NameKind, words: &[String]) {
                     machines.push(name);
                 }
             }
+            machines.extend(aliases::all(paths));
             machines.sort();
             let current = Config::load(paths).ok().and_then(|config| config.current);
             let Ok(backends) = crate::default_backends(paths) else {
@@ -2175,6 +2277,7 @@ pub fn print_names(paths: &Paths, kind: NameKind, words: &[String]) {
     };
     if kind != NameKind::Settings {
         names.sort();
+        names.dedup();
     }
     let mut stdout = std::io::stdout().lock();
     for name in names {
@@ -2211,6 +2314,8 @@ fn without_json(command: &Command) -> Option<&'static str> {
         Command::Use { .. } => "use",
         Command::Run(_) => "run",
         Command::Clone { .. } => "clone",
+        Command::Alias { .. } => "alias",
+        Command::Unalias { .. } => "unalias",
         Command::Export { .. } => "export",
         Command::Import { dry_run: true, .. } => return None,
         Command::Import { .. } => "import",

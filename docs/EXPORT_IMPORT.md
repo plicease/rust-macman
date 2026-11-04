@@ -105,7 +105,8 @@ the same bytes arrives under both, sharing one blob. A ROM that comes only becau
 machine uses it is, as in format 1, one entry for its contents, which import reuses where
 an identical ROM is already registered under another name.
 
-Archives leave out builds, source and build caches, logs, locks, session data, and
+Archives leave out builds, source and build caches, logs, locks, session data,
+[aliases](../README.md#aliases), which are names on one host, and
 [checkpoints](../README.md#checkpoints): a machine travels with its current disks only,
 and import, which never replaces a local machine, leaves the checkpoints of one that's
 already here as they are. Disk paths are
@@ -175,6 +176,7 @@ For each machine:
 | Same `id`, but anything else differs, whichever side changed | `conflict` |
 | Same `id` and the local disks are in use | `conflict`; they can't be compared |
 | Different machine with this name | `conflict` |
+| The name, or the `--rename` name, is an alias of a local machine | `conflict` |
 | The ROM's name is taken by a different ROM, or by an unclear partial registration | `conflict` |
 | Backend, hardware, or ROM unusable here, or a revision not known to be interchangeable with this host's | `failed` |
 
