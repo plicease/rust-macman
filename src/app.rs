@@ -173,6 +173,14 @@ impl App {
                         "no boot blocks"
                     }
                 );
+                if medium.source_sha256.is_some() {
+                    eprintln!(
+                        "note: {} is an HFS+ volume with nothing around it, so the copy \
+                         registered has a partition map in front of it, which Open Firmware \
+                         needs to start from it; the file itself is unchanged",
+                        file.display()
+                    );
+                }
                 if medium.format == MediaFormat::Unrecognized {
                     eprintln!(
                         "note: macman doesn't recognize what's on {name}, so only an emulator \
@@ -874,6 +882,9 @@ impl App {
         );
         if let Some(source) = &medium.source {
             println!("Registered from: {source}");
+        }
+        if let Some(digest) = &medium.source_sha256 {
+            println!("Registered from SHA-256: {digest}, with a partition map added in front");
         }
         println!("SHA-256: {}", medium.sha256);
         println!(

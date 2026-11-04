@@ -166,9 +166,10 @@ will boot on it. Mac OS 8.1, for one, crashes SheepShaver with a New World ROM.
 | `format` | string | `hfs`, `mfs`, `disk_copy42`, `partitioned`, `iso9660`, or `unrecognized` |
 | `bootable` | boolean | Whether some volume on it has boot blocks; it doesn't promise a machine starts from it |
 | `size` | number | |
-| `sha256` | string | Of the stored image, which is the whole file registered |
+| `sha256` | string | Of the stored image, which is the whole file registered, except for a bare HFS+ volume, stored with a partition map in front |
 | `version` | string or null | As given to `media add --version`; never guessed |
 | `source` | string or null | The name of the file it was registered from |
+| `source_sha256` | string or null | That file's digest, when it isn't the stored image's: a bare HFS+ volume, stored with a partition map in front; `null` otherwise |
 | `host_disk_used_bytes` | number or null | Host storage allocated to the stored image; `null` if it can't be measured |
 
 ## `macman media info NAME`

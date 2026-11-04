@@ -244,4 +244,7 @@ macman create g4 --backend qemu-ppc --disk-size 2G
 | `macman run g4 --disk "extra disk.dsk" --readonly` | Mounts the extra disk locked, and its hash stays the same. |
 | `macman run g4` with three `--disk`s and a `--cdrom` | Refused: QEMU has four drives. |
 | `macman export g4 -o g4.tar.gz`, then import it on another host's QEMU, and run it | Starts, though the QEMU version differs. |
-| A Mac OS X CD, on `mac99` and on `g3beige` | Note what starts. Nothing has been tried yet. |
+| `macman media add "Mac OS X 10.4.iso" --name osx-10.4 --version 10.4`, with a bare HFS+ image | Says it put a partition map in front. `media info` shows both digests, and verifies. |
+| `macman run tiger --cdrom "Mac OS X 10.4.iso"`, with that bare image | Refused, saying to register it. |
+| `macman create tiger --backend qemu-ppc --disk-size 10G --memory 1024M`, then `macman run tiger --media osx-10.4` | The installer starts to its language screen. Install, then start from the disk. |
+| A Mac OS X disc on `g3beige`, and other releases on `mac99` | Note what starts. Nothing has been tried yet. |

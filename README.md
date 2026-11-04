@@ -514,14 +514,15 @@ emulates two Power Macs, chosen with `--model`:
 | `mac99` (default) | A New World G4, with the PMU and USB keyboard and mouse | Mac OS 9.1 to 9.2.2, and PowerPC Mac OS X |
 | `g3beige` | An Old World beige G3, with ADB | PowerPC Mac OS X only |
 
-The wizard recommends `mac99` for Mac OS 9.1 to 9.2.2, and offers `g3beige` for
-nothing classic.
+The wizard recommends `mac99` for Mac OS 9.1 to 9.2.2 and Mac OS X 10.4, and offers
+`g3beige` for nothing classic.
 
 **This backend is new.** On Linux x86-64, with QEMU 10.2.1, a `mac99` machine has
-started the Mac OS 9.2.1 installer CD to the Finder. The Mac OS 9.0.4 CD didn't start
-on `mac99`, and a `g3beige` can't start classic Mac OS at all, as QEMU's Open Firmware
-has no Old World ROM. Mac OS X hasn't been tried, nor has any host but Linux. See
-[the smoke test](docs/SMOKE_TEST.md#qemu).
+installed Mac OS 9.2.1 from its CD and started from its own disk, and started the Mac OS
+X 10.4 installer from its DVD. The Mac OS 9.0.4 CD didn't start on `mac99`, and a
+`g3beige` can't start classic Mac OS at all, as QEMU's Open Firmware has no Old World
+ROM. Installing Mac OS X, other Mac OS X releases, Mac OS X on a `g3beige`, and hosts
+other than Linux haven't been tried. See [the smoke test](docs/SMOKE_TEST.md#qemu).
 
 On Debian or Ubuntu:
 
@@ -570,7 +571,15 @@ folder.
 Disks and CDs are IDE drives, and QEMU has four, so a run takes at most four disks and CDs
 together. Images are attached whole, as raw disks, so partitioned disks and CD images
 mount as they are. A Disk Copy 4.2 image is refused, since QEMU would see its header as
-part of the disk; take the volume out with `macman disk extract`. A system image makes a
+part of the disk; take the volume out with `macman disk extract`. A CD with HFS+ in a
+partition map, as Mac OS X discs have, starts the Mac as an HFS one does; register a bare
+HFS+ volume with `macman media add`, which adds the map Open Firmware needs:
+
+```sh
+macman media add "Mac OS X 10.4 Install DVD.iso" --name osx-10.4 --version 10.4
+macman create tiger --backend qemu-ppc --disk-size 10G --memory 1024M
+macman run tiger --media osx-10.4
+``` A system image makes a
 whole copy for the machine's boot disk.
 
 With a blank disk and no CD, QEMU stops at OpenBIOS's `0 >` prompt; close the window
@@ -654,17 +663,23 @@ because an installer may check its own disc, and nothing ever writes to it: macm
 stores a read-only copy, and the file you registered from is left as it is. Removing a
 medium with `macman media remove NAME` changes no machine.
 
+The one exception is a bare HFS+ volume, with no partition map around it, as some Mac OS
+X disc images are. QEMU's Open Firmware won't start from one, so the copy stored has a
+partition map put in front of the volume, whose bytes are as given. `media add` says when
+it does this, and `media info` shows the digest of the file you gave as well as the
+stored one's. `run --cdrom` refuses such an image, as it has nowhere to add the map.
+
 `media add` works out from the contents, never the file name, how each image is
 attached:
 
 | Kind | Found for | `run --media` attaches it |
 | --- | --- | --- |
-| `cdrom` | A partition map with an HFS volume, ISO 9660, or HFS larger than a floppy | As a CD, read-only, as `--cdrom` does |
+| `cdrom` | A partition map with an HFS or HFS+ volume, ISO 9660, HFS larger than a floppy, or a bare HFS+ volume | As a CD, read-only, as `--cdrom` does |
 | `floppy` | A raw MFS or HFS volume up to 1440K, or a Disk Copy 4.2 image | As a disk, from a read-only throwaway copy |
 | `disk` | Given with `--kind disk`, or an unrecognized image | As a floppy is |
 
 `--kind` overrides what's found, for instance `--kind disk` for a partitioned hard disk
-image, but a `cdrom` must still hold HFS or ISO 9660. An image macman doesn't recognize
+image, but a `cdrom` must still hold HFS, HFS+, or ISO 9660. An image macman doesn't recognize
 is refused unless you add `--any-format`. `media list` shows each one's kind, size,
 format, whether it has boot blocks, and the version you gave with `--version`, which is
 for display only and never guessed. `media info` also shows the partitions, and reads

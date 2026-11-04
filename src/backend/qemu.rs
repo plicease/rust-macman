@@ -286,7 +286,9 @@ pub fn arguments(request: &LaunchRequest<'_>) -> Result<Vec<OsString>> {
         QemuMachine::Mac99 => "mac99,via=pmu",
         QemuMachine::G3beige => "g3beige",
     };
-    let starts_from_cd = request.cdroms.iter().any(|cd| cd.volume == CdVolume::Hfs);
+    // Open Firmware starts from HFS, and from HFS+ in a partition map.
+    let starts_from = |cd: &CdImage| cd.volume != CdVolume::Iso9660;
+    let starts_from_cd = request.cdroms.iter().any(starts_from);
     let mut arguments: Vec<OsString> = vec![
         "-M".into(),
         model.into(),
@@ -306,7 +308,7 @@ pub fn arguments(request: &LaunchRequest<'_>) -> Result<Vec<OsString>> {
     }
     // Discs that can start the Mac first, as the first is the one it starts from.
     let mut cdroms: Vec<&CdImage> = request.cdroms.iter().collect();
-    cdroms.sort_by_key(|cd| cd.volume != CdVolume::Hfs);
+    cdroms.sort_by_key(|cd| !starts_from(cd));
     for cdrom in cdroms {
         arguments.extend(["-drive".into(), drive(&cdrom.path, "cdrom", false)]);
     }
@@ -706,6 +708,43 @@ pub(crate) mod tests {
             "-audio".into(),
             "none".into()
         ]));
+    }
+
+    #[test]
+    fn an_hfs_plus_disc_is_started_from() {
+        let g4 = machine(QemuMachine::Mac99);
+        let executable = Executable {
+            path: "qemu-system-ppc".into(),
+            build_key: String::new(),
+            built: false,
+        };
+        let disks = [ResolvedDisk {
+            path: "/m/g4/system.dsk".into(),
+            writable: true,
+        }];
+        let cdroms = [
+            CdImage {
+                path: "/cds/data.iso".into(),
+                volume: CdVolume::Iso9660,
+            },
+            CdImage {
+                path: "/cds/tiger.img".into(),
+                volume: CdVolume::HfsPlus,
+            },
+        ];
+        let request = LaunchRequest {
+            machine: &g4,
+            executable: &executable,
+            rom: Path::new(""),
+            disks: &disks,
+            cdroms: &cdroms,
+            workdir: Path::new("/tmp"),
+            verbose: false,
+        };
+        let arguments = strings(&arguments(&request).unwrap()).join(" ");
+        assert!(arguments.contains(" -boot d "), "{arguments}");
+        let tiger = arguments.find("tiger.img").unwrap();
+        assert!(tiger < arguments.find("data.iso").unwrap(), "{arguments}");
     }
 
     #[test]

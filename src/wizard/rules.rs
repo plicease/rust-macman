@@ -194,21 +194,26 @@ pub const MODEL_ORDER: [Model; 11] = [
 
 /// The systems each backend runs, as upstream documents them. For QEMU, the
 /// releases sharing Mac OS 9.2.1's New World support, which started, and not
-/// 9.0.4, which didn't.
+/// 9.0.4, which didn't, and Mac OS X 10.4, whose installer started.
 fn runs(backend: &str, variant: Option<Variant>, version: &Version) -> Result<(), String> {
+    let mac99 = matches!(variant, None | Some(Variant::Qemu(QemuMachine::Mac99)));
+    if backend == QEMU && mac99 && version.at_least(&[10, 4]) && version.at_most(&[10, 4]) {
+        return Ok(());
+    }
     let (low, high, what): (&[u32], &[u32], &str) = match (backend, variant) {
         (QEMU, Some(Variant::Qemu(QemuMachine::G3beige))) => {
             return Err(
                 "QEMU's g3beige starts from OpenBIOS, which can't start classic Mac OS: that \
-                 needs an Old World ROM. It's for PowerPC Mac OS X"
+                 needs an Old World ROM. It's for PowerPC Mac OS X, which hasn't been tried on it"
                     .to_string(),
             );
         }
         (QEMU, _) => (
             &[9, 1],
             &[9, 2, 2],
-            "QEMU's mac99 starts Mac OS 9.1 to 9.2.2 from OpenBIOS, and PowerPC Mac OS X; a Mac \
-             OS 9.0.4 CD didn't start on it when tried",
+            "QEMU's mac99 starts Mac OS 9.1 to 9.2.2 from OpenBIOS, and Mac OS X 10.4's \
+             installer; a Mac OS 9.0.4 CD didn't start on it when tried, and other Mac OS X \
+             releases haven't been",
         ),
         _ => (&[], &[], ""),
     };
@@ -782,6 +787,34 @@ mod tests {
         assert!(matches!(&g3beige.fit, Fit::Unlikely(why) if why.contains("Old World ROM")));
         let sheepshaver = routes.iter().find(|r| r.backend == SHEEPSHAVER).unwrap();
         assert!(matches!(&sheepshaver.fit, Fit::Unlikely(why) if why.contains("9.0.4")));
+    }
+
+    #[test]
+    fn mac_os_x_10_4_goes_to_qemus_mac99_alone() {
+        let observation = cd("Mac OS X Install DVD");
+        let tiger = guess("Mac OS X 10.4");
+        let found = routes(
+            Start::InstallerCd,
+            Some(&observation),
+            Some(&tiger),
+            &host(),
+        );
+        assert_eq!(
+            recommended(&found),
+            ["QEMU: mac99, a New World Power Mac G4"]
+        );
+        for route in found.iter().filter(|r| !r.recommended) {
+            assert!(!matches!(route.fit, Fit::Good), "{route:?}");
+        }
+        // Only 10.4 has been seen to start.
+        let panther = guess("Mac OS X 10.3");
+        let found = routes(
+            Start::InstallerCd,
+            Some(&observation),
+            Some(&panther),
+            &host(),
+        );
+        assert!(recommended(&found).is_empty());
     }
 
     #[test]

@@ -6,16 +6,22 @@
 //! it was given, and is never written: `run --media` attaches a CD read-only,
 //! and anything else as a throwaway copy. Each is the image, `NAME.img`, plus a
 //! TOML sidecar of what was found in it.
+//!
+//! The one exception is an HFS+ volume with nothing around it, as some Mac OS X
+//! disc images are. Open Firmware starts only from a disc with a partition map,
+//! so the stored copy has one in front of the volume, whose bytes are as given.
 
 use crate::disk::{self, Classification, DiskFormat, LockMode};
 use crate::fsutil::{
-    atomic_copy_range_checked, list_dir, read_toml, sha256_file, validate_name, write_toml_new,
+    atomic_copy_range_checked, hex_digest, list_dir, read_toml, sha256_file, validate_name,
+    write_toml_new,
 };
 use crate::paths::Paths;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// How a medium is attached, and so what the guest sees it as.
@@ -88,6 +94,10 @@ pub struct Media {
     /// What it holds, as given to `media add`; never guessed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// The digest of the file it was registered from, when that isn't the
+    /// stored image: a bare HFS+ volume, stored with a partition map in front.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_sha256: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -129,6 +139,17 @@ pub fn inspect(
     let size = fs::metadata(path)
         .with_context(|| format!("cannot read {}", path.display()))?
         .len();
+    // Registered with a partition map in front, which is what's described.
+    if let Some(blessed) = disk::bare_hfs_plus(path)? {
+        if kind.is_some_and(|kind| kind != MediaKind::Cdrom) {
+            bail!(
+                "{} is a bare HFS+ volume, which macman registers only as a CD, with a partition \
+                 map in front for Open Firmware; leave out --kind",
+                path.display()
+            );
+        }
+        return Ok((MediaKind::Cdrom, MediaFormat::Partitioned, blessed));
+    }
     let (found, format, bootable) = match disk::classify(path)? {
         Classification::Supported(DiskFormat::DiskCopy42) => (
             MediaKind::Floppy,
@@ -154,6 +175,8 @@ pub fn inspect(
                     bootable |= boot_blocks_at(path, partition.offset)?;
                 }
             }
+            // HFS+ has no boot blocks: Open Firmware starts from its blessed folder.
+            bootable |= disk::hfs_plus_in(path, &partitions)?.unwrap_or(false);
             // Media with a partition map are nearly always CDs; a hard disk
             // image among them says so with `--kind disk`. The driver map's
             // block size doesn't tell them apart: CDs say 512 as well as 2048.
@@ -184,11 +207,14 @@ pub fn inspect(
     let kind = kind.unwrap_or(found);
     if kind == MediaKind::Cdrom && !matches!(format, MediaFormat::Hfs | MediaFormat::Iso9660) {
         let holds_hfs = format == MediaFormat::Partitioned
-            && matches!(disk::check_cd_image(path), Ok(disk::CdVolume::Hfs));
+            && matches!(
+                disk::check_cd_image(path),
+                Ok(disk::CdVolume::Hfs | disk::CdVolume::HfsPlus)
+            );
         if !holds_hfs {
             bail!(
                 "{} is {}, which can't be attached as a CD; a CD holds HFS, alone or in a \
-                 partition map, or ISO 9660",
+                 partition map, HFS+, or ISO 9660",
                 path.display(),
                 format.describe()
             );
@@ -227,10 +253,10 @@ pub fn add_media(paths: &Paths, source: &Path, name: &str, options: &AddOptions)
     // the source, for cooperating processes.
     let _guard = disk::lock_image(paths, source, LockMode::Shared)?;
     let (kind, format, bootable) = inspect(source, options.kind, options.any_format)?;
-    let sha256 = sha256_file(source)?;
-    let media = Media {
+    let wrapped = disk::bare_hfs_plus(source)?.is_some();
+    let mut media = Media {
         name: name.to_string(),
-        sha256,
+        sha256: String::new(),
         size: fs::metadata(source)?.len(),
         kind,
         kind_given: options.kind.is_some(),
@@ -241,9 +267,100 @@ pub fn add_media(paths: &Paths, source: &Path, name: &str, options: &AddOptions)
             .map(|file| file.to_string_lossy().into_owned())
             .filter(|file| !file.chars().any(char::is_control)),
         version: options.version.map(str::to_string),
+        source_sha256: None,
     };
-    add_media_blob(paths, source, &media)?;
-    Ok(media)
+    if !wrapped {
+        media.sha256 = sha256_file(source)?;
+        add_media_blob(paths, source, &media)?;
+        return Ok(media);
+    }
+    // Built beside where it goes, under a name `media list` doesn't read.
+    fs::create_dir_all(paths.media())?;
+    let image = paths
+        .media()
+        .join(format!(".{name}.{}.wrapping", uuid::Uuid::new_v4()));
+    let result = write_wrapped(source, &image).and_then(|(source_sha256, sha256)| {
+        media.sha256 = sha256;
+        media.size = fs::metadata(&image)?.len();
+        media.source_sha256 = Some(source_sha256);
+        add_media_blob(paths, &image, &media)
+    });
+    let _ = fs::remove_file(&image);
+    result.map(|()| media)
+}
+
+/// 512-byte blocks before a wrapped volume: a driver descriptor, then a
+/// partition map of 63 blocks, as on Apple's own CDs.
+const WRAP_BLOCKS: u32 = 64;
+
+fn partition_entry(
+    count: u32,
+    start: u32,
+    blocks: u32,
+    name: &[u8],
+    kind: &[u8],
+    status: u32,
+) -> [u8; 512] {
+    let mut entry = [0u8; 512];
+    entry[..2].copy_from_slice(b"PM");
+    entry[4..8].copy_from_slice(&count.to_be_bytes());
+    entry[8..12].copy_from_slice(&start.to_be_bytes());
+    entry[12..16].copy_from_slice(&blocks.to_be_bytes());
+    entry[16..16 + name.len()].copy_from_slice(name);
+    entry[48..48 + kind.len()].copy_from_slice(kind);
+    // The data area: the whole partition.
+    entry[84..88].copy_from_slice(&blocks.to_be_bytes());
+    entry[88..92].copy_from_slice(&status.to_be_bytes());
+    entry
+}
+
+/// Write `source`, a bare HFS+ volume, to `dest`, behind an Apple partition map
+/// of the map itself and the volume, as `Apple_HFS`, which is what HFS+ is
+/// called in a map. Returns the digests of `source` and of `dest`, from one
+/// read of `source`.
+fn write_wrapped(source: &Path, dest: &Path) -> Result<(String, String)> {
+    let size = fs::metadata(source)?.len();
+    let blocks = u32::try_from(size / 512)
+        .ok()
+        .filter(|blocks| blocks.checked_add(WRAP_BLOCKS).is_some())
+        .with_context(|| format!("{} is too big for a partition map", source.display()))?;
+    let mut head = vec![0u8; WRAP_BLOCKS as usize * 512];
+    head[..2].copy_from_slice(b"ER");
+    head[2..4].copy_from_slice(&512u16.to_be_bytes());
+    head[4..8].copy_from_slice(&(WRAP_BLOCKS + blocks).to_be_bytes());
+    // Valid, allocated, in use, readable: as Apple's tools mark a map.
+    let map = partition_entry(2, 1, WRAP_BLOCKS - 1, b"Apple", b"Apple_partition_map", 0x3);
+    // Also writable, and bootable, which Open Firmware looks for.
+    let volume = partition_entry(2, WRAP_BLOCKS, blocks, b"Mac OS", b"Apple_HFS", 0x4000_0033);
+    head[512..1024].copy_from_slice(&map);
+    head[1024..1536].copy_from_slice(&volume);
+
+    let mut input =
+        File::open(source).with_context(|| format!("cannot read {}", source.display()))?;
+    let file =
+        File::create_new(dest).with_context(|| format!("cannot write {}", dest.display()))?;
+    let mut output = BufWriter::new(file);
+    let (mut source_hash, mut dest_hash) = (Sha256::new(), Sha256::new());
+    dest_hash.update(&head);
+    output.write_all(&head)?;
+    let mut buffer = vec![0u8; 1 << 20];
+    loop {
+        let count = input
+            .read(&mut buffer)
+            .with_context(|| format!("cannot read {}", source.display()))?;
+        if count == 0 {
+            break;
+        }
+        source_hash.update(&buffer[..count]);
+        dest_hash.update(&buffer[..count]);
+        output.write_all(&buffer[..count])?;
+    }
+    output
+        .into_inner()
+        .map_err(|error| error.into_error())?
+        .sync_all()
+        .with_context(|| format!("cannot write {}", dest.display()))?;
+    Ok((hex_digest(source_hash), hex_digest(dest_hash)))
 }
 
 /// Register `media` from the bytes at `blob`, which must match its digest. The
@@ -521,6 +638,74 @@ mod tests {
         assert!(!media_exists(&paths, "install"));
         assert!(source.exists());
         assert!(remove_media(&paths, "install").is_err());
+    }
+
+    /// A bare HFS+ volume, as some Mac OS X disc images are, blessed or not.
+    fn hfs_plus(size: usize, blessed: bool) -> Vec<u8> {
+        let mut bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        bytes[..1024].fill(0);
+        bytes[1024..1026].copy_from_slice(b"H+");
+        bytes[1024 + 80..1024 + 84].copy_from_slice(&u32::from(blessed).to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn a_bare_hfs_plus_volume_is_registered_behind_a_partition_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let bytes = hfs_plus(4 * 1024 * 1024, true);
+        let source = write(dir.path(), "Tiger.iso", &bytes);
+        assert_eq!(
+            inspect(&source, None, false).unwrap(),
+            (MediaKind::Cdrom, MediaFormat::Partitioned, true)
+        );
+        let error = inspect(&source, Some(MediaKind::Disk), false).unwrap_err();
+        assert!(error.to_string().contains("only as a CD"), "{error}");
+        let error = disk::check_cd_image(&source).unwrap_err().to_string();
+        assert!(error.contains("macman media add"), "{error}");
+
+        let media = add_media(&paths, &source, "tiger", &AddOptions::default()).unwrap();
+        assert_eq!(media.source_sha256, Some(sha256_file(&source).unwrap()));
+        assert_eq!(fs::read(&source).unwrap(), bytes, "source untouched");
+        let (loaded, file) = load_media(&paths, "tiger").unwrap();
+        assert_eq!(loaded, media);
+        assert_eq!(sha256_file(&file).unwrap(), media.sha256);
+        assert_eq!(media.size, bytes.len() as u64 + 64 * 512);
+        assert!(fs::metadata(&file).unwrap().permissions().readonly());
+
+        // The volume, byte for byte, as the map's second partition.
+        let stored = fs::read(&file).unwrap();
+        assert_eq!(&stored[64 * 512..], &bytes[..]);
+        match disk::classify(&file).unwrap() {
+            Classification::Partitioned(partitions) => {
+                let kinds: Vec<_> = partitions.iter().map(|p| p.kind.as_str()).collect();
+                assert_eq!(kinds, ["Apple_partition_map", "Apple_HFS"]);
+                assert_eq!(partitions[1].offset, 64 * 512);
+                assert_eq!(partitions[1].length, bytes.len() as u64);
+                assert!(partitions.iter().all(|p| p.in_bounds));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            disk::check_cd_image(&file).unwrap(),
+            disk::CdVolume::HfsPlus
+        );
+        // Nothing's left behind but the image and its sidecar.
+        assert_eq!(list_dir(&paths.media()).unwrap().len(), 2);
+        assert_eq!(local_media(&paths, &media).unwrap(), LocalMedia::Same);
+
+        // Registered again, the map is found and nothing is added.
+        let again = add_media(&paths, &file, "again", &AddOptions::default()).unwrap();
+        assert_eq!(again.source_sha256, None);
+        assert_eq!(again.sha256, media.sha256);
+        assert!(again.bootable);
+
+        let unblessed = write(dir.path(), "data.iso", &hfs_plus(4 * 1024 * 1024, false));
+        assert!(
+            !add_media(&paths, &unblessed, "data", &AddOptions::default())
+                .unwrap()
+                .bootable
+        );
     }
 
     #[test]

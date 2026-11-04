@@ -329,12 +329,17 @@ These parts of the smoke test have been seen to work on that host:
 - A machine made by the wizard from the 9.2.1 CD installed onto its blank disk, and then
   started from that disk with no CD.
 
+- Mac OS X 10.4's retail DVD, as a bare HFS+ volume, registered with `media add`, which
+  put a partition map in front, and `macman run --media` started its installer to the
+  language screen. OpenBIOS found no startup file on the volume without the map.
+
 What's been found about guests:
 
 - The Mac OS 9.0.4 CD didn't start on `mac99`, with or without `via=pmu`.
 - A `g3beige` can't start classic Mac OS: OpenBIOS has no Old World ROM, which it needs.
   It's offered for PowerPC Mac OS X.
-- Mac OS X hasn't been tried, on either machine, for want of media.
+- Mac OS X 10.4's installer starts on `mac99`. Installing it, other releases, and Mac OS X
+  on a `g3beige` haven't been tried.
 
 These haven't been tested: a read-only extra disk, and moving a machine to another host. The wizard
 recommends `mac99` only for Mac OS 9.1 to 9.2.2, from 9.2.1's start, and never `g3beige`

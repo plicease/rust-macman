@@ -23,7 +23,7 @@ byte 0, and the guest looks for boot blocks at block 0 and a volume at block 2.
 | Blank image | Refused | Attached | The guest can initialize it |
 | Disk Copy holding a partitioned disk | Refused | Refused | Would need both steps |
 | Old-style (`TS`) partition map | Refused | Refused | Can't be mounted |
-| HFS+ volume | Refused | Refused | Needs Mac OS 8.1 or later |
+| HFS+ volume | Refused | Refused | Needs Mac OS 8.1 or later; `media add` takes it as a CD for QEMU, below |
 | UDIF `.dmg` | Refused | Refused | Modern compressed container |
 | gzip, bzip2, zip, StuffIt, BinHex, MacBinary | Refused | Refused | Must be unpacked first |
 | Anything else | Refused | Refused unless `--any-format` | Unrecognized |
@@ -61,6 +61,23 @@ are dropped. A guest doesn't need them, because Mini vMac provides its own drive
 
 `run --disk` won't do this, because it attaches your actual file, and writes to an
 extracted copy would never reach it. Extract the volume first, or register the image.
+
+## HFS+ discs
+
+Mac OS X discs hold HFS+ with no HFS wrapper, in an Apple partition map. Only QEMU's
+Power Macs start from them: `run --cdrom` and `run --media` attach one as a CD, and QEMU
+starts from it as from an HFS disc. SheepShaver and Basilisk II get it as a data disc,
+which only Mac OS 8.1 and later can read.
+
+Some images of these discs are the HFS+ volume alone, with no map. QEMU's Open Firmware,
+OpenBIOS, won't start from one: it found no startup file on a bare Mac OS X 10.4 volume,
+and started the installer once a map was in front. So `media add` stores such a volume
+behind a two-entry map, of 64 blocks of 512 bytes, as Apple's CDs have: the map itself,
+then the volume as `Apple_HFS`, marked bootable. The volume's bytes are unchanged, and the
+file given isn't touched. The sidecar's `sha256` is the stored image's, and
+`source_sha256` the file's. `run --cdrom` refuses a bare volume, and says to register it.
+`bootable` is whether the volume has a blessed System Folder, which is what Open Firmware
+starts from, as HFS+ has no boot blocks.
 
 ## Disk Copy 4.2
 

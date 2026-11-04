@@ -98,6 +98,52 @@ fn volume_at(file: &mut File, offset: u64, end: u64) -> Result<Option<DiskFormat
     })
 }
 
+/// Whether an HFS+ volume starts at `offset`, with no HFS wrapper, and if so,
+/// whether it has a blessed System Folder, which Open Firmware starts from.
+/// Reads nothing at or past `end`.
+fn hfs_plus_at(file: &mut File, offset: u64, end: u64) -> Result<Option<bool>> {
+    // The volume header's signature, then its Finder info's blessed folder.
+    const BLESSED: u64 = MDB_OFFSET + 80;
+    if offset + BLESSED + 4 > end {
+        return Ok(None);
+    }
+    let mut signature = [0u8; 2];
+    read_at(file, offset + MDB_OFFSET, &mut signature)?;
+    if !matches!(&signature, b"H+" | b"HX") {
+        return Ok(None);
+    }
+    let mut blessed = [0u8; 4];
+    read_at(file, offset + BLESSED, &mut blessed)?;
+    Ok(Some(blessed != [0; 4]))
+}
+
+/// An HFS+ volume with nothing around it: whether `path` is one, and if so,
+/// whether it has a blessed System Folder.
+pub fn bare_hfs_plus(path: &Path) -> Result<Option<bool>> {
+    if classify(path)? != Classification::Unsupported(HFS_PLUS.into()) {
+        return Ok(None);
+    }
+    let mut file = File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let size = file.metadata()?.len();
+    hfs_plus_at(&mut file, 0, size)
+}
+
+/// Whether any HFS+ volume in `partitions` has a blessed System Folder, or
+/// `None` if none holds HFS+.
+pub fn hfs_plus_in(path: &Path, partitions: &[Partition]) -> Result<Option<bool>> {
+    let mut file = File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut found = None;
+    for partition in partitions.iter().filter(|p| p.in_bounds) {
+        let end = partition.offset + partition.length;
+        if let Some(blessed) = hfs_plus_at(&mut file, partition.offset, end)? {
+            found = Some(found.unwrap_or(false) || blessed);
+        }
+    }
+    Ok(found)
+}
+
+const HFS_PLUS: &str = "an HFS+ volume, which needs Mac OS 8.1 or later";
+
 /// The data range of a Disk Copy 4.2 image, by Mini vMac's own rules
 /// (`SONYEMDV.c`), so that macman and the emulator agree on what counts.
 fn disk_copy_data(header: &[u8], size: u64) -> Option<(u64, u64)> {
@@ -230,9 +276,7 @@ pub fn classify(path: &Path) -> Result<Classification> {
         return Ok(Supported(format));
     }
     match head.get(MDB_OFFSET as usize..MDB_OFFSET as usize + 2) {
-        Some(b"H+" | b"HX") => Ok(Unsupported(
-            "an HFS+ volume, which needs Mac OS 8.1 or later".into(),
-        )),
+        Some(b"H+" | b"HX") => Ok(Unsupported(HFS_PLUS.into())),
         _ if head.iter().all(|byte| *byte == 0) => Ok(Blank),
         _ => Ok(Unrecognized),
     }
@@ -245,6 +289,9 @@ pub enum CdVolume {
     Hfs,
     /// Only ISO 9660, which a Mac reads with ISO 9660 File Access.
     Iso9660,
+    /// HFS+ in a partition map, with no HFS volume, as on Mac OS X discs. Mac
+    /// OS 8.1 and later read it, and Open Firmware can start from it.
+    HfsPlus,
 }
 
 /// Refuse anything that `run --cdrom` can't present as a CD. It takes the whole
@@ -263,6 +310,11 @@ pub fn check_cd_image(path: &Path) -> Result<CdVolume> {
     if has_hfs {
         return Ok(CdVolume::Hfs);
     }
+    if let Partitioned(partitions) = &classification
+        && hfs_plus_in(path, partitions)?.is_some()
+    {
+        return Ok(CdVolume::HfsPlus);
+    }
     if is_iso9660(path)? {
         eprintln!(
             "note: {} has no HFS volume, so a Mac can't start from it, and can only read it \
@@ -271,17 +323,25 @@ pub fn check_cd_image(path: &Path) -> Result<CdVolume> {
         );
         return Ok(CdVolume::Iso9660);
     }
+    if classification == Unsupported(HFS_PLUS.into()) {
+        bail!(
+            "{} is an HFS+ volume with no partition map, which Open Firmware can't start from; \
+             register it with `macman media add`, which stores it with one, and attach it with \
+             --media",
+            path.display()
+        );
+    }
     let what = match classification {
         Supported(DiskFormat::DiskCopy42) => "a Disk Copy 4.2 image".to_string(),
         Supported(_) => "an MFS volume".to_string(),
-        Partitioned(_) => "a partitioned image with no HFS volume".to_string(),
+        Partitioned(_) => "a partitioned image with no HFS or HFS+ volume".to_string(),
         Blank => "blank".to_string(),
         Unsupported(what) => what,
         Unrecognized => "in a format macman doesn't know".to_string(),
     };
     bail!(
-        "{} is {what}, which can't be attached as a CD; --cdrom takes an HFS or ISO 9660 CD \
-         image, such as a .iso or .toast file",
+        "{} is {what}, which can't be attached as a CD; --cdrom takes an HFS, HFS+, or ISO \
+         9660 CD image, such as a .iso or .toast file",
         path.display()
     )
 }
@@ -874,7 +934,14 @@ mod tests {
         assert!(error.contains("an MFS volume"), "{error}");
         let no_hfs = write("no-hfs.iso", &partitioned_image(&[(96, b"XX")]));
         let error = check_cd_image(&no_hfs).unwrap_err().to_string();
-        assert!(error.contains("no HFS volume"), "{error}");
+        assert!(error.contains("no HFS or HFS+ volume"), "{error}");
+
+        // HFS+ in a map, as on Mac OS X discs, but not bare.
+        let hfs_plus = write("tiger.img", &partitioned_image(&[(96, b"H+")]));
+        assert_eq!(check_cd_image(&hfs_plus).unwrap(), CdVolume::HfsPlus);
+        let bare = write("bare.iso", &raw_image(b"H+"));
+        let error = check_cd_image(&bare).unwrap_err().to_string();
+        assert!(error.contains("no partition map"), "{error}");
     }
 
     /// An Iomega-style disk: map, driver, then one HFS partition.

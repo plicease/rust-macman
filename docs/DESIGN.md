@@ -289,6 +289,10 @@ these ways:
 - **Sound:** QEMU has neither Power Mac's sound chip, so with sound on a `mac99` gets
   `-device usb-audio`, which Mac OS 9 drives once it's chosen in the Sound control panel.
   A `g3beige` has no USB bus, so it gets `-audio none` either way.
+- **HFS+ discs:** a CD with HFS+ in a partition map starts the Mac, as an HFS one does.
+  OpenBIOS won't start a bare HFS+ volume, so `media add` stores one behind a two-entry
+  partition map, the map and an `Apple_HFS` partition, recording the source's digest.
+  SheepShaver and Basilisk II get HFS+ discs as they are, as data discs.
 - **Window:** on Linux, SDL's when `-display help` lists it. GTK's, QEMU's default, grabs
   the mouse by warping the pointer, which Wayland refuses, so the pointer escapes; SDL
   confines it. Elsewhere QEMU chooses. Mac OS 9 doesn't drive `usb-tablet`, so the mouse
@@ -328,7 +332,7 @@ Keep generic model and disk metadata separate from backend extensions. Avoid pre
 - Do not advertise an attachment as read-only unless the backend or an isolated copy *actually prevents writes*. If Mini vMac cannot enforce read-only attachment, use a throwaway copy and discard changes, with explicit CLI messaging.
 - Never delete registered source templates during machine removal; prompt or require an explicit destructive flag to delete private machine disks.
 
-Disk formats and capacity restrictions vary by emulated model and System version. Validate supported formats and reject unknown ones with actionable diagnostics. Avoid data conversion, except that registering a system image may store just the volume from a container Mini vMac cannot use writably, leaving the source untouched. See [DISK_FORMATS.md](DISK_FORMATS.md).
+Disk formats and capacity restrictions vary by emulated model and System version. Validate supported formats and reject unknown ones with actionable diagnostics. Avoid data conversion, except that registering a system image may store just the volume from a container Mini vMac cannot use writably, and registering a bare HFS+ volume as media stores it behind a partition map, which Open Firmware needs to start from it, leaving the source untouched both times. See [DISK_FORMATS.md](DISK_FORMATS.md).
 
 ## 9. Developer workflow
 
