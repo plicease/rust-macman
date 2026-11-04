@@ -232,7 +232,8 @@ macman create g4 --backend qemu-ppc --disk-size 2G
 |---|---|
 | `macman doctor` | Names the QEMU it found, and its version, and says it starts a `mac99` and a `g3beige`. Without `openbios-ppc`, it says QEMU can't start them, and names the package. |
 | `macman create g4x --backend qemu-ppc --rom ANY` | Refused: QEMU takes no Mac ROM. |
-| `macman run g4` | Notes the blank disk, and QEMU stops at OpenBIOS's `0 >` prompt. Close the window: exit code 0. |
+| `macman run g4` | Notes the blank disk, and QEMU stops at OpenBIOS's `0 >` prompt, in SDL's window on Linux. Close the window: exit code 0. |
+| Click in the window, then press Ctrl-Alt-G | The mouse stays in the window, even on Wayland, until Ctrl-Alt-G lets it go. |
 | `macman run g4 --media macos-9.2.1` | Starts from the CD, to the Finder, and offers to initialize the disk. Install onto it, then Shut Down. |
 | While it runs, in a second terminal: `macman run g4` | Refused, because the disk is in use. |
 | While it runs: `macman doctor` | The machine is still reported as runnable. |
