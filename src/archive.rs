@@ -9,8 +9,8 @@
 use crate::backend::Backends;
 use crate::disk::{self, ImageLock, LockMode};
 use crate::fsutil::{
-    HeldLock, atomic_copy_range_checked, hex_digest, list_dir, publish_new, sha256_file,
-    temp_sibling, validate_name, windows_can_name,
+    HeldLock, atomic_copy_range_checked, copy_sparse, hex_digest, list_dir, publish_new,
+    sha256_file, temp_sibling, validate_name, windows_can_name,
 };
 use crate::machine::{
     Basilisk2Settings, Disk, Display, Machine, SCHEMA_VERSION, SheepShaverSettings, SystemInfo,
@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
 /// The newest format this reads, and writes when an archive needs it: one
@@ -42,9 +42,10 @@ const MACHINES_ONLY_FORMAT: u32 = 1;
 const MANIFEST: &str = "manifest.toml";
 const BLOB_DIR: &str = "blobs/";
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
-/// Limits that bound what a hostile archive can make macman write.
-pub const MAX_BLOB_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-pub const MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+/// Limits that bound what a hostile archive can make macman write. A blob
+/// holds a whole disk, and Mac OS X wants several gigabytes of one.
+pub const MAX_BLOB_BYTES: u64 = 64 << 30;
+pub const MAX_TOTAL_BYTES: u64 = 256 << 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Manifest {
@@ -111,7 +112,9 @@ struct ArchivedDisk {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ArchivedMachine {
-    rom_sha256: String,
+    /// The ROM it starts from; none for a backend with its own firmware.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rom_sha256: Option<String>,
     contents: Vec<ArchivedDisk>,
     machine: Machine,
 }
@@ -243,7 +246,12 @@ pub fn export(paths: &Paths, selection: &Selection, output: &Path) -> Result<Exp
         if let Some(settings) = &mut machine.sheepshaver {
             settings.shared_folder = None;
         }
-        let rom_sha256 = add_rom(&mut manifest, &mut blobs, &machine.hardware.rom, false)?;
+        let rom_sha256 = machine
+            .hardware
+            .rom
+            .as_ref()
+            .map(|rom| add_rom(&mut manifest, &mut blobs, rom, false))
+            .transpose()?;
 
         let mut contents = Vec::new();
         for (path, disk) in machine.disk_paths(paths)? {
@@ -1006,7 +1014,9 @@ fn validate(manifest: &Manifest) -> Result<BTreeMap<String, u64>> {
         if !names.insert(machine.name.as_str()) || !ids.insert(id) {
             bail!("the manifest lists machine {:?} twice", machine.name);
         }
-        if !rom_digests.contains(entry.rom_sha256.as_str()) {
+        if let Some(rom_sha256) = &entry.rom_sha256
+            && !rom_digests.contains(rom_sha256.as_str())
+        {
             bail!(
                 "machine {:?} refers to a ROM not in the archive",
                 machine.name
@@ -1075,24 +1085,22 @@ fn unpack_blob<R: Read>(
         );
     }
 
-    let mut output: Box<dyn Write> = if keep(sha256) {
-        let target = blobs.join(sha256);
-        Box::new(
-            OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&target)
-                .with_context(|| format!("cannot stage {sha256}"))?,
-        )
-    } else {
-        Box::new(io::sink())
-    };
     let mut reader = HashingReader {
         inner: entry.take(size),
         hasher: Sha256::new(),
     };
-    let written = io::copy(&mut reader, &mut output).context("the archive is damaged")?;
-    output.flush()?;
+    // Disks are mostly empty, so they're staged sparse where they can be.
+    let written = if keep(sha256) {
+        let target = blobs.join(sha256);
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&target)
+            .with_context(|| format!("cannot stage {sha256}"))?;
+        copy_sparse(&mut reader, &mut output).context("the archive is damaged")?
+    } else {
+        io::copy(&mut reader, &mut io::sink()).context("the archive is damaged")?
+    };
     if written != size || hex_digest(reader.hasher) != sha256 {
         bail!("{sha256} doesn't match its digest; the archive is damaged");
     }
@@ -1180,30 +1188,47 @@ impl Importing<'_> {
         let backend = self.backends.get(&machine.emulator.backend)?;
         backend.validate(machine)?;
         backend.validate_disks(machine, machine.disks.len())?;
-        let Some(rom) = self
-            .manifest
-            .roms
-            .iter()
-            .filter(|rom| rom.sha256 == self.entry.rom_sha256)
-            .reduce(|best, rom| {
-                if rom.name == machine.hardware.rom {
-                    rom
+        if backend.uses_rom() != self.entry.rom_sha256.is_some() {
+            bail!(
+                "machine {:?} {} a ROM, which {} {}",
+                machine.name,
+                if backend.uses_rom() { "lacks" } else { "has" },
+                backend.name(),
+                if backend.uses_rom() {
+                    "needs"
                 } else {
-                    best
+                    "doesn't use"
                 }
-            })
-        else {
-            bail!("the ROM is not in the archive");
+            );
+        }
+        let rom = match &self.entry.rom_sha256 {
+            Some(rom_sha256) => Some(
+                self.manifest
+                    .roms
+                    .iter()
+                    .filter(|rom| &rom.sha256 == rom_sha256)
+                    .reduce(|best, rom| {
+                        if Some(&rom.name) == machine.hardware.rom.as_ref() {
+                            rom
+                        } else {
+                            best
+                        }
+                    })
+                    .context("the ROM is not in the archive")?,
+            ),
+            None => None,
         };
 
         if self.rename.is_none()
             && let Some(local) = self.find_by_id()?
         {
             let outcome = self.compare(&local)?;
-            if outcome == Outcome::Unchanged {
+            if outcome == Outcome::Unchanged
+                && let Some(rom) = rom
+            {
                 roms.entry(rom.name.clone())
                     .or_insert_with(|| RomOutcome::Unchanged {
-                        local: local.hardware.rom.clone(),
+                        local: local.hardware.rom.clone().unwrap_or_default(),
                     });
             }
             return Ok(outcome);
@@ -1223,6 +1248,23 @@ impl Importing<'_> {
             return Ok(Outcome::Conflict(reason));
         }
 
+        let Some(rom) = rom else {
+            if self.dry_run {
+                return Ok(Outcome::Imported);
+            }
+            let built = self.staging.join("machines").join(name);
+            let result = self.publish(name, None, &built);
+            let _ = fs::remove_dir_all(&built);
+            return match result {
+                Ok(_) => Ok(Outcome::Imported),
+                Err(_) if self.paths.machine(name).symlink_metadata().is_ok() => {
+                    Ok(Outcome::Conflict(format!(
+                        "machine {name:?} appeared during the import; nothing was changed"
+                    )))
+                }
+                Err(error) => Err(error),
+            };
+        };
         let blob = self.blob(&rom.sha256);
         let incoming = registry::rom_from_blob(&blob, &rom.name, &rom.sha256)?;
         backend.check_rom(machine, &incoming, &blob)?;
@@ -1259,11 +1301,13 @@ impl Importing<'_> {
         }
 
         let built = self.staging.join("machines").join(name);
-        let result = self.publish(name, incoming, existing, &built);
+        let result = self.publish(name, Some((incoming, existing)), &built);
         let _ = fs::remove_dir_all(&built);
         match result {
             Ok(line) => {
-                roms.entry(rom.name.clone()).or_insert(line);
+                if let Some(line) = line {
+                    roms.entry(rom.name.clone()).or_insert(line);
+                }
                 Ok(Outcome::Imported)
             }
             Err(_) if self.paths.machine(name).symlink_metadata().is_ok() => Ok(Outcome::Conflict(
@@ -1274,14 +1318,14 @@ impl Importing<'_> {
     }
 
     /// Build the machine in staging, then bring it in along with any new ROM,
-    /// returning what happened to the ROM.
+    /// returning what happened to the ROM. `rom` is the ROM in the archive
+    /// and any local one with its contents, if the machine has a ROM.
     fn publish(
         &self,
         name: &str,
-        incoming: registry::Rom,
-        existing: Option<registry::Rom>,
+        rom: Option<(registry::Rom, Option<registry::Rom>)>,
         built: &Path,
-    ) -> Result<RomOutcome> {
+    ) -> Result<Option<RomOutcome>> {
         let mut machine = self.entry.machine.clone();
         machine.name = name.to_string();
         if self.rename.is_some() {
@@ -1301,10 +1345,17 @@ impl Importing<'_> {
             atomic_copy_range_checked(&blob, 0, disk.size, &built.join(&disk.path), verify)?;
         }
 
-        machine.hardware.rom = existing
-            .as_ref()
-            .map_or(&incoming.name, |rom| &rom.name)
-            .clone();
+        let Some((incoming, existing)) = rom else {
+            machine.save_to(built)?;
+            publish_dir(self.paths, built, name)?;
+            return Ok(None);
+        };
+        machine.hardware.rom = Some(
+            existing
+                .as_ref()
+                .map_or(&incoming.name, |rom| &rom.name)
+                .clone(),
+        );
         machine.save_to(built)?;
 
         if existing.is_none() {
@@ -1317,7 +1368,7 @@ impl Importing<'_> {
             return Err(error);
         }
 
-        Ok(rom_outcome(&incoming, existing.as_ref()))
+        Ok(Some(rom_outcome(&incoming, existing.as_ref())))
     }
 
     fn find_by_id(&self) -> Result<Option<Machine>> {
@@ -1346,11 +1397,17 @@ impl Importing<'_> {
         {
             return Ok(diverged("configuration"));
         }
-        let Ok((rom, _)) = registry::load_rom(self.paths, &local.hardware.rom) else {
-            return Ok(diverged("ROM"));
-        };
-        if rom.sha256 != self.entry.rom_sha256 {
-            return Ok(diverged("ROM"));
+        match (&local.hardware.rom, &self.entry.rom_sha256) {
+            (None, None) => {}
+            (Some(local_rom), Some(rom_sha256)) => {
+                let Ok((rom, _)) = registry::load_rom(self.paths, local_rom) else {
+                    return Ok(diverged("ROM"));
+                };
+                if &rom.sha256 != rom_sha256 {
+                    return Ok(diverged("ROM"));
+                }
+            }
+            _ => return Ok(diverged("ROM")),
         }
 
         let mut locks = Vec::new();

@@ -296,6 +296,32 @@ fn with_manifest(
     entries
 }
 
+/// A mostly empty disk, as a big Mac OS X one is, isn't written out in full.
+#[cfg(unix)]
+#[test]
+fn an_imported_disk_stays_sparse() {
+    use std::os::unix::fs::MetadataExt;
+    let source = Host::with_two_machines();
+    let path = source.machine_dir("plus-a").join("system.dsk");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(64 << 20)
+        .unwrap();
+    let disk = digest(&path);
+    let archive = source.export(&["plus-a"], "plus.tar.gz");
+
+    let target = Host::new();
+    target.ok(&["import", &archive]);
+    let imported = target.machine_dir("plus-a").join("system.dsk");
+    assert_eq!(digest(&imported), disk);
+    let metadata = fs::metadata(&imported).unwrap();
+    assert_eq!(metadata.len(), 64 << 20);
+    // Where the filesystem has holes; the test's temporary one should.
+    assert!(metadata.blocks() * 512 < 8 << 20, "{}", metadata.blocks());
+}
+
 #[test]
 fn round_trip_keeps_private_disk_changes_and_identity() {
     let source = Host::with_two_machines();
@@ -1146,17 +1172,17 @@ fn refuses_blobs_that_do_not_match_the_manifest() {
 #[test]
 fn refuses_sizes_beyond_the_limits_before_reading_the_data() {
     let (_source, archive) = honest();
-    let edit = |text: String| text.replace("size = 131072", "size = 5000000000");
+    let edit = |text: String| text.replace("size = 131072", "size = 70000000000");
     assert_refused(
         &with_manifest(&archive, edit),
-        "too large to import (5000000000",
+        "too large to import (70000000000",
     );
 
     // Each one is allowed, but not all of them together.
     let edit = |mut text: String| {
-        for index in 0..17 {
+        for index in 0..5 {
             let sha256 = sha256_bytes(&[index]);
-            let size = 4u64 << 30;
+            let size = 64u64 << 30;
             text +=
                 &format!("\n[[roms]]\nname = \"r{index}\"\nsha256 = \"{sha256}\"\nsize = {size}\n");
         }

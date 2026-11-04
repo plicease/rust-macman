@@ -89,7 +89,7 @@ impl NameKind {
 
 /// The backends a machine can name, for completion. A test checks it against
 /// what this macman really has.
-pub const BACKEND_NAMES: [&str; 3] = ["minivmac", "basilisk2", "sheepshaver"];
+pub const BACKEND_NAMES: [&str; 4] = ["minivmac", "basilisk2", "sheepshaver", "qemu-ppc"];
 
 /// Accepts any string, as `String` does, so macman itself explains a bad
 /// value, but offers `choices` to shell completion and `--help`.
@@ -118,7 +118,13 @@ fn backends() -> Suggest {
 }
 
 fn models() -> Suggest {
-    Suggest(|| ALL_MODELS.iter().map(|model| model.name()).collect())
+    Suggest(|| {
+        ALL_MODELS
+            .iter()
+            .map(|model| model.name())
+            .chain(["mac99", "g3beige"])
+            .collect()
+    })
 }
 
 #[derive(Debug, Parser)]
@@ -445,12 +451,13 @@ pub struct CreateArgs {
     /// Emulator: minivmac (the default), basilisk2, or sheepshaver
     #[arg(long, value_parser = backends(), hide_possible_values = true)]
     pub backend: Option<String>,
-    /// Hardware model, such as plus, se, classic, ii, or iix (Mini vMac only)
+    /// Hardware model: for Mini vMac, such as plus, se, classic, ii, or iix; for QEMU,
+    /// mac99 (the default) or g3beige
     #[arg(long, value_parser = models(), hide_possible_values = true)]
     pub model: Option<String>,
-    /// Name of an imported ROM
+    /// Name of an imported ROM (not for QEMU, which has its own firmware)
     #[arg(long, value_name = "ROM", value_hint = ROM)]
-    pub rom: String,
+    pub rom: Option<String>,
     /// Name of a registered system image, cloned into the machine
     #[arg(
         long,
@@ -470,9 +477,9 @@ pub struct CreateArgs {
     /// Display as WIDTHxHEIGHTxDEPTH (default depends on the model)
     #[arg(long)]
     pub display: Option<String>,
-    /// Window magnification
-    #[arg(long, default_value_t = 2)]
-    pub scale: u32,
+    /// Window magnification (default 2, or 1 for QEMU, which has only 1)
+    #[arg(long)]
+    pub scale: Option<u32>,
     /// Start in full screen
     #[arg(long)]
     pub fullscreen: bool,

@@ -4,6 +4,7 @@ pub mod basilisk2;
 pub mod macemu;
 pub mod macemu_windows;
 pub mod minivmac;
+pub mod qemu;
 pub mod sheepshaver;
 pub mod sheepshaver_windows;
 pub mod source;
@@ -41,6 +42,7 @@ pub struct ResolvedDisk {
 pub struct LaunchRequest<'a> {
     pub machine: &'a Machine,
     pub executable: &'a Executable,
+    /// The ROM file, or empty for a backend that takes none.
     pub rom: &'a Path,
     /// Boot disk first.
     pub disks: &'a [ResolvedDisk],
@@ -114,6 +116,11 @@ pub trait EmulatorBackend {
     /// isn't part of importing, because a machine may just be passing through.
     fn check_host(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// Whether machines start from a registered ROM. QEMU has its own firmware.
+    fn uses_rom(&self) -> bool {
+        true
     }
 
     /// Reject a ROM that `machine` cannot start from. `file` is its contents.

@@ -222,7 +222,13 @@ fn quiet_cd_check(
             .any(|partition| partition.volume == Some(DiskFormat::RawHfs)),
         _ => false,
     };
-    if hfs || iso {
+    let hfs_plus = match classification {
+        Classification::Partitioned(partitions) => {
+            disk::hfs_plus_in(path, partitions).is_ok_and(|found| found.is_some())
+        }
+        _ => false,
+    };
+    if hfs || hfs_plus || iso {
         Ok(())
     } else {
         disk::check_cd_image(path)
@@ -337,6 +343,7 @@ impl std::fmt::Display for Version {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OsGuess {
     /// "System" or "Mac OS", as Apple named that version.
+    /// "System", "Mac OS", or "Mac OS X", as Apple named that version.
     pub family: &'static str,
     pub version: Version,
     /// Whether it looks like an installer rather than an installed system.
@@ -371,7 +378,12 @@ pub fn version_in_name(name: &str) -> Option<(&'static str, Version)> {
         } else if lower == "mac"
             && words.get(index + 1).map(|w| w.to_ascii_lowercase()) == Some("os".to_string())
         {
-            ("Mac OS", words.get(index + 2).unwrap_or(&"").to_string())
+            let after = words.get(index + 2).unwrap_or(&"");
+            if after.eq_ignore_ascii_case("x") {
+                ("Mac OS X", words.get(index + 3).unwrap_or(&"").to_string())
+            } else {
+                ("Mac OS", after.to_string())
+            }
         } else if lower == "system" {
             ("System", words.get(index + 1).unwrap_or(&"").to_string())
         } else {
@@ -391,6 +403,8 @@ pub fn version_in_name(name: &str) -> Option<(&'static str, Version)> {
         };
         let believed = match family {
             "System" => (1..=7).contains(&version.major()) && version.at_most(&[7, 5, 5]),
+            // The releases for PowerPC: 10.0 to 10.5.
+            "Mac OS X" => version.major() == 10 && version.at_most(&[10, 5]) && version.0.len() > 1,
             _ => {
                 (7..=9).contains(&version.major())
                     && (version.major() > 7 || version.at_least(&[7, 6]))
@@ -438,7 +452,9 @@ pub fn from_registered_version(version: &str, observation: &Observation) -> Opti
     // "Mac OS 9.0.4" as well as "9.0.4".
     let (family, version) = version_in_name(text).or_else(|| {
         let parsed = Version::parse(text)?;
-        let family = if parsed.at_least(&[7, 6]) {
+        let family = if parsed.major() == 10 {
+            "Mac OS X"
+        } else if parsed.at_least(&[7, 6]) {
             "Mac OS"
         } else {
             "System"
@@ -470,6 +486,9 @@ mod tests {
         // Not names any version had, or not versions at all.
         assert_eq!(found("System Tools"), None);
         assert_eq!(found("Mac OS X Install"), None);
+        assert_eq!(found("Mac OS X 10.4 Install"), Some("Mac OS X 10.4".into()));
+        assert_eq!(found("Mac OS X 10.6"), None);
+        assert_eq!(found("Mac OS X 10"), None);
         assert_eq!(found("Mac OS 10.2"), None);
         assert_eq!(found("System 8"), None);
         assert_eq!(found("Mac OS 7.5"), None);
@@ -506,7 +525,8 @@ mod tests {
         assert_eq!(label("Mac OS 9.0.4").as_deref(), Some("Mac OS 9.0.4"));
         assert_eq!(label("6.0.8").as_deref(), Some("System 6.0.8"));
         assert_eq!(label("my favourite"), None);
-        assert_eq!(label("10.4"), None);
+        assert_eq!(label("10.4").as_deref(), Some("Mac OS X 10.4"));
+        assert_eq!(label("10.6"), None);
     }
 
     #[test]

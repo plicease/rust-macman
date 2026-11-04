@@ -1019,7 +1019,7 @@ mod tests {
             },
             hardware: Hardware {
                 model: Some(model),
-                rom: "r".into(),
+                rom: Some("r".into()),
                 memory: memory.into(),
             },
             display: Display {
@@ -1032,6 +1032,7 @@ mod tests {
             system: Default::default(),
             basilisk2: None,
             sheepshaver: None,
+            qemu: None,
             disks: vec![],
         }
     }
@@ -1163,7 +1164,7 @@ mod tests {
 
         let mut other_disks = plus.clone();
         other_disks.name = "other".into();
-        other_disks.hardware.rom = "other-rom".into();
+        other_disks.hardware.rom = Some("other-rom".into());
         other_disks.disks.push(crate::machine::Disk {
             path: "x.dsk".into(),
             readonly: false,

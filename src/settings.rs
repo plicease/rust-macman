@@ -41,6 +41,7 @@ const fn key(
 
 const BASILISK2: Option<&str> = Some("basilisk2");
 const SHEEPSHAVER: Option<&str> = Some("sheepshaver");
+const QEMU: Option<&str> = Some(crate::backend::qemu::BACKEND_NAME);
 
 /// Every key, in the order `config edit` shows their fields.
 pub const KEYS: &[Key] = &[
@@ -75,6 +76,8 @@ pub const KEYS: &[Key] = &[
         SHEEPSHAVER,
         "path",
     ),
+    key("qemu.sound", FieldId::Sound, QEMU, "boolean"),
+    key("qemu.network", FieldId::Network, QEMU, "string"),
 ];
 
 /// Keys in `machine.toml` that are never set this way, and why.
@@ -94,6 +97,7 @@ pub const FIXED: &[(&str, &str)] = &[
         "It's the emulator source the machine was made with, which macman keeps.",
     ),
     ("hardware.model", edit::MODEL_FIXED),
+    ("qemu.machine", edit::MODEL_FIXED),
     (
         "system.version",
         "It records the system the machine was created from, and nothing uses it to run.",
@@ -539,7 +543,7 @@ pub fn complete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::edit::tests::{add_rom, clean_rom, make_basilisk, make_plus, make_sheep};
+    use crate::edit::tests::{add_rom, clean_rom, make_basilisk, make_plus, make_qemu, make_sheep};
     use std::fs;
 
     fn pairs(text: &str) -> Vec<(String, String)> {
@@ -730,6 +734,34 @@ mod tests {
             set_and_save(&paths, "ppc", "basilisk2.fpu off").unwrap_err()
         );
         assert!(error.contains("is a basilisk2 setting"), "{error}");
+    }
+
+    #[test]
+    fn qemu_has_its_own_keys_and_no_rom() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        make_qemu(&paths);
+        let backends = crate::default_backends(&paths).unwrap();
+        let editor = Editor::inspect(&paths, &backends, "g4").unwrap();
+        let names: Vec<_> = keys(&editor).iter().map(|key| key.name).collect();
+        assert!(names.contains(&"qemu.network"), "{names:?}");
+        assert!(names.contains(&"qemu.sound"), "{names:?}");
+        assert!(!names.contains(&"hardware.rom"), "{names:?}");
+
+        set_and_save(&paths, "g4", "qemu.network slirp qemu.sound off").unwrap();
+        let settings = Machine::load(&paths, "g4").unwrap().qemu.unwrap();
+        assert!(!settings.sound);
+        assert_eq!(settings.machine, crate::machine::QemuMachine::Mac99);
+        assert_eq!(settings.network, crate::machine::Network::Slirp);
+
+        for (text, expected) in [
+            ("qemu.machine g3beige", "can't be set"),
+            ("hardware.rom quadra", "doesn't apply"),
+            ("sheepshaver.sound off", "is a sheepshaver setting"),
+        ] {
+            let error = format!("{:#}", set_and_save(&paths, "g4", text).unwrap_err());
+            assert!(error.contains(expected), "{text}: {error}");
+        }
     }
 
     #[test]

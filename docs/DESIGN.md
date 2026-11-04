@@ -149,7 +149,7 @@ revision = "pinned-source-identifier"
 
 [hardware]
 model = "plus"
-rom = "plus-v3"
+rom = "plus-v3"  # absent for QEMU, which takes no Mac ROM
 memory = "4M"
 
 [display]
@@ -266,6 +266,43 @@ On Windows, `src/backend/sheepshaver_windows.rs` builds it as Basilisk II is bui
 - **Generated code:** `genexec.pl` lists the instruction handlers to instantiate. macman does the same in Rust, so Perl isn't needed, and refuses a decoder with templates, which the script would expand.
 - **Launch:** preferences, ROM, disks, and limits are as for Basilisk II on Windows, from shared code in `src/backend/macemu_windows.rs`.
 
+### QEMU
+
+Run with the host's own QEMU and real guests; see [PLATFORMS.md](PLATFORMS.md#qemu). The
+module comment in `src/backend/qemu.rs` has the details. It differs from the others in
+these ways:
+
+- **Emulator:** nothing is built. macman runs `qemu-system-ppc` from `PATH`, or the one
+  `[qemu-ppc] executable` names in `config.toml`. Its `--version` and `-machine help` say
+  what it is and which Power Macs it has.
+- **Revision:** the QEMU version a machine was made with. Any QEMU runs it, so it moves
+  between hosts as it is.
+- **Configuration:** a `[qemu]` table holds `machine` (`mac99` or `g3beige`), `sound`,
+  and `network`. There's no `[hardware] model`, and no `rom`.
+- **ROMs:** none. QEMU starts from OpenBIOS, its own Open Firmware, so `rom` is left out of
+  `[hardware]`, archives carry no ROM for the machine, and `--rom` is refused.
+- **Limits:** 640x480 to 3840x2160 at depth 8, 15, or 32, scale 1, and four IDE drives for
+  disks and CDs together. Memory is 32M to 2048M on a `mac99` and 2016M on a `g3beige`, in
+  steps of 32M: Mac OS X 10.4's kernel panicked, with `pmap_map_block: collision`, on
+  sizes such as 770M, 1023M, 1540M, and 2044M, and started on every multiple of 32M tried.
+- **Launch:** disks and CDs are given whole and raw, CDs read-only, with HFS discs first,
+  and `-boot d` when one can start the Mac. A read-only disk gets `snapshot=on`, as QEMU's
+  IDE hard disk refuses `readonly=on` ("Block node is read-only"). `mac99` gets `via=pmu`, for USB input.
+  `auto-boot?` is set, so OpenBIOS starts the guest without stopping.
+- **Sound:** QEMU has neither Power Mac's sound chip, so with sound on a `mac99` gets
+  `-device usb-audio`, which Mac OS 9 drives once it's chosen in the Sound control panel.
+  A `g3beige` has no USB bus, so it gets `-audio none` either way.
+- **HFS+ discs:** a CD with HFS+ in a partition map starts the Mac, as an HFS one does.
+  OpenBIOS won't start a bare HFS+ volume, so `media add` stores one behind a two-entry
+  partition map, the map and an `Apple_HFS` partition, recording the source's digest.
+  SheepShaver and Basilisk II get HFS+ discs as they are, as data discs.
+- **Window:** on Linux, SDL's when `-display help` lists it. GTK's, QEMU's default, grabs
+  the mouse by warping the pointer, which Wayland refuses, so the pointer escapes; SDL
+  confines it. Elsewhere QEMU chooses. Mac OS 9 doesn't drive `usb-tablet`, so the mouse
+  stays relative.
+- **Exit status:** QEMU reports problems on stderr and exits with a failure, so macman
+  shows its words. On Linux it stops with macman, as Basilisk II does.
+
 ### Shared code
 
 Fetching a pinned source and publishing a build are in `src/backend/source.rs`, for every backend. What the two macemu emulators have in common is in `src/backend/macemu.rs`: the pin, the `configure` build, `doctor` lines, and launching and watching the process. Nothing about CPUs, ROMs, or guests is shared.
@@ -298,7 +335,7 @@ Keep generic model and disk metadata separate from backend extensions. Avoid pre
 - Do not advertise an attachment as read-only unless the backend or an isolated copy *actually prevents writes*. If Mini vMac cannot enforce read-only attachment, use a throwaway copy and discard changes, with explicit CLI messaging.
 - Never delete registered source templates during machine removal; prompt or require an explicit destructive flag to delete private machine disks.
 
-Disk formats and capacity restrictions vary by emulated model and System version. Validate supported formats and reject unknown ones with actionable diagnostics. Avoid data conversion, except that registering a system image may store just the volume from a container Mini vMac cannot use writably, leaving the source untouched. See [DISK_FORMATS.md](DISK_FORMATS.md).
+Disk formats and capacity restrictions vary by emulated model and System version. Validate supported formats and reject unknown ones with actionable diagnostics. Avoid data conversion, except that registering a system image may store just the volume from a container Mini vMac cannot use writably, and registering a bare HFS+ volume as media stores it behind a partition map, which Open Firmware needs to start from it, leaving the source untouched both times. See [DISK_FORMATS.md](DISK_FORMATS.md).
 
 ## 9. Developer workflow
 

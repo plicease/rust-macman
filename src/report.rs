@@ -195,6 +195,9 @@ pub struct MediaEntry {
     pub version: Option<String>,
     /// The name of the file it was registered from.
     pub source: Option<String>,
+    /// That file's digest, when it isn't the stored image's: a bare HFS+
+    /// volume, stored with a partition map in front.
+    pub source_sha256: Option<String>,
     /// Host storage allocated to the stored image; null if unavailable.
     pub host_disk_used_bytes: Option<u64>,
 }
@@ -211,6 +214,7 @@ impl MediaEntry {
             sha256: media.sha256,
             version: media.version,
             source: media.source,
+            source_sha256: media.source_sha256,
             host_disk_used_bytes,
         }
     }
