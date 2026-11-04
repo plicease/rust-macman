@@ -310,7 +310,7 @@ pub enum Command {
     Du {
         /// Also show the unique physical storage everything takes, counting blocks shared by
         /// reflinks or deduplication once; reads every file's extents, and needs ext4, XFS, or
-        /// Btrfs on Linux
+        /// Btrfs on Linux, or NTFS or ReFS on Windows
         #[arg(long)]
         physical: bool,
     },

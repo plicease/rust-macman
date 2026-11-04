@@ -853,8 +853,8 @@ partial total would understate the whole.
 
 Usage is allocation as the platform reports it, `st_blocks` on Linux and macOS and the
 allocation size on Windows, which may round up to whole blocks or clusters. It can't see
-storage shared between files: a reflinked or deduplicated copy, as Btrfs, XFS, and APFS
-can make, is counted in full for each file that shares it, so totals can overstate what
+storage shared between files: a reflinked or deduplicated copy, as Btrfs, XFS, APFS, and
+ReFS can make, is counted in full for each file that shares it, so totals can overstate what
 removing something would free. Transparent compression may be
 reported either way, depending on the file system. Hard links to one file are counted
 once within a machine, checkpoints included, and once within `du`'s total, wherever the
@@ -906,7 +906,9 @@ an estimate, and a note on stderr says why. It's measured:
 | Linux | Btrfs | Measured, unless a file is compressed; reflinks between subvolumes count once |
 | Linux | ZFS, tmpfs, overlayfs, NFS, SMB, FUSE, and others | Unavailable |
 | macOS | APFS, HFS+ | Unavailable, not implemented yet |
-| Windows | NTFS, ReFS | Unavailable, not implemented yet |
+| Windows | NTFS | Measured, unless a file is compressed, deduplicated, or a cloud placeholder |
+| Windows | ReFS | Measured; block clones, as copies on a Dev Drive are, count once |
+| Windows | FAT, exFAT, network shares, and others | Unavailable |
 
 On Linux it reads where each file's data is with `FIEMAP`, and counts the physical block
 ranges, per file system. That's only trusted where the ranges identify blocks, so it's
@@ -914,13 +916,41 @@ unavailable, too, for a file that's missing or unreadable, that has data whose p
 known, or is stored in its metadata, or that kept changing while it was read. ZFS has
 block cloning and deduplication but doesn't say which of a file's blocks are shared.
 
+On Windows it reads each file's clusters with `FSCTL_GET_RETRIEVAL_POINTERS`, and counts
+the cluster ranges per volume, by the volume's GUID. A cluster number is an address in the
+volume's one cluster space, so a hard link's clusters, or a ReFS block clone's, are the same
+numbers as the original's. On their own, though, those numbers don't say what's really on
+disk, so it's unavailable for any file whose data isn't in the clusters it reports:
+
+- files compressed by NTFS, or by `compact /exe` or WIMBoot, whose clusters aren't their
+  size on disk;
+- reparse points, including files that Windows Server's Data Deduplication has moved into
+  its chunk store, and OneDrive and other cloud files, as well as anything offline;
+- a small file that NTFS keeps inside its file record, with no clusters of its own;
+- a file with data that isn't in its clusters yet. ReFS gives new and rewritten data its
+  clusters when it's flushed, so every writable file on ReFS is flushed before it's read;
+  until then, a rewritten part of a block clone would still show the clusters it shared.
+  A read-only file can't be written, and macman flushes its files, such as checkpoints,
+  before making them read-only, so those aren't flushed again. NTFS
+  does the same only for data written to a sparse file's holes, so there a file whose
+  clusters fall short is flushed once and read again. Those are the only times a file is
+  opened for writing, and only after it's known not to be compressed or compacted, because
+  opening a `compact /exe` file for writing decompresses it. A file that needs flushing but
+  can't be opened for writing, such as one an emulator holds, is unavailable.
+
+Unavailable, too, is a file on any file system but NTFS or ReFS, or on a network share,
+including one that reports NTFS, as well as one that's missing or unreadable, or that kept
+changing while it was read. Only a file's main data counts, not its alternate data streams,
+just as with its allocated size.
+
 What's counted is the blocks the files point at. Btrfs keeps a whole extent while any of
 it is used, so after a file's blocks are partly rewritten, space no file uses any more
 can remain allocated and isn't counted, and redundancy below the file system, such as
 Btrfs RAID1 or DUP, or a RAID device, isn't multiplied in.
 
-Reading every extent of every file is slower than `du` alone, and each file's pending
-writes are flushed first so its blocks are final. For a consistent figure, run it while no
+Reading every extent of every file is slower than `du` alone. On Linux each file's pending
+writes are flushed first so its blocks are final, and on Windows a writable ReFS
+file's are, as is an NTFS file's if they're not on disk yet. For a consistent figure, run it while no
 machine is running: a file that changes as it's read is tried again, then left
 unavailable, but changes between one file and the next aren't noticed.
 

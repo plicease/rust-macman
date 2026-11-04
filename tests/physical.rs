@@ -1,24 +1,31 @@
 //! `macman du --physical` and the unique physical usage behind it, on every
 //! file system the host offers for it. They're in the temporary directory,
-//! and any listed, colon-separated, in `MACMAN_TEST_FS_DIRS`, so CI can add
-//! Btrfs and XFS mounts. Where a file system can't be measured, its tests
-//! check that the figure is unavailable, with a reason, rather than guessed;
-//! where reflinks or deduplication aren't supported, those checks are skipped.
+//! and any listed in `MACMAN_TEST_FS_DIRS`, separated as in `PATH`, so CI can
+//! add Btrfs and XFS mounts, and a ReFS volume on Windows. Where a file system
+//! can't be measured, its tests check that the figure is unavailable, with a
+//! reason, rather than guessed; where reflinks, deduplication, or compression
+//! aren't supported, those checks are skipped.
 
 mod common;
 
 use common::{PLUS_ROM_CHECKSUM, write_disk, write_rom};
 use macman::physical::unique_physical;
 use std::fs;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use tempfile::TempDir;
 
+#[cfg(target_os = "linux")]
+use linux::reflink;
+#[cfg(windows)]
+use windows::reflink;
+
 /// A directory for each file system to test on.
 fn roots() -> Vec<TempDir> {
     let mut bases = vec![std::env::temp_dir()];
-    if let Ok(dirs) = std::env::var("MACMAN_TEST_FS_DIRS") {
-        bases.extend(dirs.split(':').filter(|d| !d.is_empty()).map(PathBuf::from));
+    if let Some(dirs) = std::env::var_os("MACMAN_TEST_FS_DIRS") {
+        bases.extend(std::env::split_paths(&dirs).filter(|d| !d.as_os_str().is_empty()));
     }
     bases
         .iter()
@@ -48,8 +55,169 @@ fn measurable(dir: &Path) -> Result<(), String> {
     result
 }
 
+/// CI names in `MACMAN_TEST_MEASURABLE_DIRS` the file systems it set up to be
+/// measured, so a change that leaves one unavailable fails rather than having
+/// every test skip it.
+#[test]
+fn file_systems_meant_to_be_measurable_are() {
+    let Some(dirs) = std::env::var_os("MACMAN_TEST_MEASURABLE_DIRS") else {
+        return;
+    };
+    for base in std::env::split_paths(&dirs).filter(|d| !d.as_os_str().is_empty()) {
+        let dir = TempDir::new_in(&base).unwrap();
+        if let Err(why) = measurable(dir.path()) {
+            panic!("{} isn't measurable: {why}", base.display());
+        }
+    }
+}
+
 fn physical(files: &[&Path]) -> u64 {
     unique_physical(files.iter().copied()).unwrap()
+}
+
+/// Overwrite part of `path` with `data` at `offset`.
+fn write_at(path: &Path, data: &[u8], offset: u64) {
+    let mut file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.write_all(data).unwrap();
+}
+
+/// A new file at `path` whose unwritten parts, on Windows too, are holes.
+fn sparse_file(path: &Path) -> fs::File {
+    let file = fs::File::create(path).unwrap();
+    #[cfg(windows)]
+    assert!(windows::set_sparse(&file), "{}", path.display());
+    file
+}
+
+#[cfg(windows)]
+mod windows {
+    use std::fs::File;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+    use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_COMPRESSED, GetDiskFreeSpaceW};
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    use windows_sys::Win32::System::Ioctl::{
+        DUPLICATE_EXTENTS_DATA, FSCTL_DUPLICATE_EXTENTS_TO_FILE, FSCTL_GET_EXTERNAL_BACKING,
+        FSCTL_SET_SPARSE,
+    };
+
+    /// Send `code` to `file`, with `input` if any, and whether it worked.
+    fn control<T>(file: &File, code: u32, input: Option<&T>) -> bool {
+        let (pointer, size) = match input {
+            Some(input) => (std::ptr::from_ref(input).cast(), size_of::<T>() as u32),
+            None => (std::ptr::null(), 0),
+        };
+        let mut returned = 0u32;
+        // SAFETY: the handle is open and the input, if any, is the size
+        // given, both live for the call, which has no output.
+        unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                code,
+                pointer,
+                size,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            ) != 0
+        }
+    }
+
+    pub fn set_sparse(file: &File) -> bool {
+        control::<()>(file, FSCTL_SET_SPARSE, None)
+    }
+
+    /// The cluster size of the volume `path` is on.
+    fn cluster_size(path: &Path) -> u64 {
+        let root = path.ancestors().last().unwrap();
+        let root: Vec<u16> = root.as_os_str().encode_wide().chain([0]).collect();
+        let (mut sectors, mut bytes) = (0u32, 0u32);
+        // SAFETY: `root` is terminated and the counts are writable.
+        let ok = unsafe {
+            GetDiskFreeSpaceW(
+                root.as_ptr(),
+                &mut sectors,
+                &mut bytes,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(ok, 0, "{}", path.display());
+        u64::from(sectors) * u64::from(bytes)
+    }
+
+    /// Make `to` a block clone of `from`, if the file system can, as ReFS can.
+    pub fn reflink(from: &Path, to: &Path) -> bool {
+        let source = File::open(from).unwrap();
+        let length = source.metadata().unwrap().len();
+        let _ = std::fs::remove_file(to);
+        let dest = File::create(to).unwrap();
+        // Cloning is of whole clusters, so the last one is taken whole and
+        // the copy cut back to length after.
+        let cluster = cluster_size(from);
+        let whole = length.div_ceil(cluster) * cluster;
+        dest.set_len(whole).unwrap();
+        let request = DUPLICATE_EXTENTS_DATA {
+            FileHandle: source.as_raw_handle(),
+            SourceFileOffset: 0,
+            TargetFileOffset: 0,
+            ByteCount: whole as i64,
+        };
+        let cloned = control(&dest, FSCTL_DUPLICATE_EXTENTS_TO_FILE, Some(&request));
+        dest.set_len(length).unwrap();
+        cloned
+    }
+
+    /// Run `compact /c` on `path` with `options`.
+    fn compact(path: &Path, options: &[&str]) {
+        let _ = Command::new("compact")
+            .arg("/c")
+            .args(options)
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    /// Compress `path` as NTFS does, if the file system can.
+    pub fn compress(path: &Path) -> bool {
+        compact(path, &[]);
+        std::fs::metadata(path).unwrap().file_attributes() & FILE_ATTRIBUTE_COMPRESSED != 0
+    }
+
+    /// Compress `path` as `compact /exe` does, into a stream the Windows
+    /// Overlay Filter keeps, if it can.
+    pub fn compact_exe(path: &Path) -> bool {
+        compact(path, &["/exe:xpress4k"]);
+        overlaid(path)
+    }
+
+    /// Whether the overlay filter keeps `path`'s data, which hides the reparse
+    /// point that says so from its attributes.
+    pub fn overlaid(path: &Path) -> bool {
+        let file = File::open(path).unwrap();
+        let mut info = [0u8; 64];
+        let mut returned = 0u32;
+        // SAFETY: the handle is open, there's no input, and the output is
+        // the size given.
+        unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                FSCTL_GET_EXTERNAL_BACKING,
+                std::ptr::null(),
+                0,
+                info.as_mut_ptr().cast(),
+                info.len() as u32,
+                &mut returned,
+                std::ptr::null_mut(),
+            ) != 0
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -127,11 +295,8 @@ mod linux {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn distinct_files_add_up_and_holes_take_nothing() {
-    use std::fs::File;
-    use std::os::unix::fs::FileExt;
     for root in roots() {
         let dir = root.path();
         if let Err(why) = measurable(dir) {
@@ -149,10 +314,8 @@ fn distinct_files_add_up_and_holes_take_nothing() {
 
         // A 1 GiB file with 64 KiB written in the middle.
         let sparse = dir.join("sparse.dsk");
-        let file = File::create(&sparse).unwrap();
-        file.set_len(1 << 30).unwrap();
-        file.write_all_at(&noise(3, 64 * 1024), 512 << 20).unwrap();
-        drop(file);
+        sparse_file(&sparse).set_len(1 << 30).unwrap();
+        write_at(&sparse, &noise(3, 64 * 1024), 512 << 20);
         let used = physical(&[&sparse]);
         assert!(
             (64 * 1024..1 << 20).contains(&used),
@@ -178,16 +341,13 @@ fn hard_links_reflinks_and_deduplication_count_once() {
         fs::hard_link(&a, &link).unwrap();
         assert_eq!(physical(&[&a, &link]), alone, "{}", dir.display());
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             let clone = dir.join("clone.dsk");
-            if linux::reflink(&a, &clone) {
+            if reflink(&a, &clone) {
                 assert_eq!(physical(&[&a, &clone]), alone, "{}", dir.display());
                 // Rewriting part of the clone gives it blocks of its own.
-                use std::os::unix::fs::FileExt;
-                let file = fs::OpenOptions::new().write(true).open(&clone).unwrap();
-                file.write_all_at(&noise(5, 4096), 128 * 1024).unwrap();
-                drop(file);
+                write_at(&clone, &noise(5, 4096), 128 * 1024);
                 let both = physical(&[&a, &clone]);
                 assert!(
                     both > alone && both < alone + (1 << 20),
@@ -197,7 +357,10 @@ fn hard_links_reflinks_and_deduplication_count_once() {
             } else {
                 eprintln!("no reflinks in {}", dir.display());
             }
+        }
 
+        #[cfg(target_os = "linux")]
+        {
             let twin = dir.join("twin.dsk");
             fs::write(&twin, noise(4, 512 * 1024)).unwrap();
             assert_eq!(physical(&[&a, &twin]), 2 * alone, "{}", dir.display());
@@ -210,9 +373,29 @@ fn hard_links_reflinks_and_deduplication_count_once() {
     }
 }
 
+/// `path`, filled with data that compresses well, compressed by the file
+/// system, if it can.
+#[cfg(any(target_os = "linux", windows))]
+fn compressed(path: &Path) -> bool {
+    let data = vec![0x5Au8; 1 << 20];
+    #[cfg(target_os = "linux")]
+    {
+        // Btrfs compresses what's written after the flag is set.
+        fs::write(path, b"").unwrap();
+        let set = linux::compress(path);
+        fs::write(path, data).unwrap();
+        set
+    }
+    #[cfg(windows)]
+    {
+        fs::write(path, data).unwrap();
+        windows::compress(path)
+    }
+}
+
 /// Compressed extents' sizes on disk aren't reported, so a compressed file
 /// leaves it unavailable rather than counted at its uncompressed length.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn a_compressed_file_leaves_it_unavailable() {
     for root in roots() {
@@ -221,17 +404,62 @@ fn a_compressed_file_leaves_it_unavailable() {
             continue;
         }
         let file = dir.join("packed.dsk");
-        fs::write(&file, b"").unwrap();
-        if !linux::compress(&file) {
+        if !compressed(&file) {
             eprintln!("no compression in {}", dir.display());
             continue;
         }
-        fs::write(&file, vec![0x5Au8; 1 << 20]).unwrap();
         match unique_physical([file.as_path()]) {
             Err(why) => assert!(why.contains("compressed"), "{why}"),
             // The file system may store it uncompressed after all.
             Ok(bytes) => assert!(bytes >= 1 << 20, "{bytes} in {}", dir.display()),
         }
+    }
+}
+
+/// An empty file takes nothing, and a small one either its blocks or, where
+/// it's kept in its metadata, as on NTFS or Btrfs, leaves it unavailable;
+/// it's never counted as taking nothing.
+#[test]
+fn small_files_are_counted_or_unavailable_and_empty_ones_take_nothing() {
+    for root in roots() {
+        let dir = root.path();
+        if measurable(dir).is_err() {
+            continue;
+        }
+        let empty = dir.join("empty.dsk");
+        fs::write(&empty, b"").unwrap();
+        assert_eq!(physical(&[&empty]), 0, "{}", dir.display());
+
+        let small = dir.join("small.dsk");
+        fs::write(&small, noise(7, 100)).unwrap();
+        match unique_physical([small.as_path()]) {
+            Ok(bytes) => assert!(bytes >= 100, "{bytes} in {}", dir.display()),
+            Err(why) => assert!(why.contains("alongside metadata"), "{why}"),
+        }
+    }
+}
+
+/// `compact /exe` moves a file's data into a stream the overlay filter keeps,
+/// with no clusters of the file's own, which leaves it unavailable rather
+/// than counted as taking nothing, or as its uncompressed size. Measuring
+/// doesn't open it to write, which would decompress it.
+#[cfg(windows)]
+#[test]
+fn a_compacted_file_leaves_it_unavailable_and_compacted() {
+    for root in roots() {
+        let dir = root.path();
+        if measurable(dir).is_err() {
+            continue;
+        }
+        let file = dir.join("compact.dsk");
+        fs::write(&file, vec![0x5Au8; 1 << 20]).unwrap();
+        if !windows::compact_exe(&file) {
+            eprintln!("no compact /exe in {}", dir.display());
+            continue;
+        }
+        let why = unique_physical([file.as_path()]).unwrap_err();
+        assert!(why.contains("compressed"), "{why}");
+        assert!(windows::overlaid(&file), "{}", file.display());
     }
 }
 
@@ -249,7 +477,7 @@ fn a_reflink_between_directories_counts_once() {
             let a = from.path().join("shared.dsk");
             fs::write(&a, noise(6, 256 * 1024)).unwrap();
             let clone = to.path().join("shared-clone.dsk");
-            if linux::reflink(&a, &clone) {
+            if reflink(&a, &clone) {
                 eprintln!("reflinked {} to {}", a.display(), clone.display());
                 assert_eq!(physical(&[&a, &clone]), physical(&[&a]));
             }
@@ -279,6 +507,20 @@ fn ok(root: &Path, args: &[&str]) -> String {
 
 fn du(root: &Path) -> serde_json::Value {
     serde_json::from_str(&ok(root, &["--json", "du", "--physical"])).unwrap()
+}
+
+/// Whether macman can keep its data in `root`: it needs hard links, which
+/// FAT and exFAT lack.
+fn holds_data(root: &Path) -> bool {
+    let probe = root.join("link-probe");
+    fs::write(&probe, b"probe").unwrap();
+    let linked = fs::hard_link(&probe, root.join("link-probe-2")).is_ok();
+    let _ = fs::remove_file(root.join("link-probe-2"));
+    fs::remove_file(&probe).unwrap();
+    if !linked {
+        eprintln!("macman can't keep its data in {}", root.display());
+    }
+    linked
 }
 
 /// A ROM, a system, a medium, and a machine with a checkpoint, registered in
@@ -316,6 +558,9 @@ fn registered(root: &Path) -> (PathBuf, PathBuf) {
 fn du_counts_storage_shared_across_entries_once() {
     for root in roots() {
         let root = root.path();
+        if !holds_data(root) {
+            continue;
+        }
         let (medium, checkpoint) = registered(root);
         let data = root.join("data/macman");
         let system = data.join("systems/sys.dsk");
@@ -361,11 +606,11 @@ fn du_counts_storage_shared_across_entries_once() {
         let before = du(root)["unique_physical_bytes"].as_u64().unwrap();
         let own = physical(&[&medium]) + physical(&[&checkpoint]);
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             // Reflinked to what they're copies of: a checkpoint of its
             // machine's disk, and a medium of a system, so across entries.
-            if !linux::reflink(&disk, &checkpoint) || !linux::reflink(&system, &medium) {
+            if !reflink(&disk, &checkpoint) || !reflink(&system, &medium) {
                 eprintln!("no reflinks in {}", root.display());
                 continue;
             }
@@ -389,7 +634,7 @@ fn du_counts_storage_shared_across_entries_once() {
                 "{text}"
             );
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         let _ = (before, own);
     }
 }
@@ -398,6 +643,9 @@ fn du_counts_storage_shared_across_entries_once() {
 fn a_missing_file_leaves_it_unavailable() {
     for root in roots() {
         let root = root.path();
+        if !holds_data(root) {
+            continue;
+        }
         let (medium, _) = registered(root);
         fs::remove_file(&medium).unwrap();
         let json = du(root);
@@ -411,7 +659,7 @@ fn a_missing_file_leaves_it_unavailable() {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 #[test]
 fn other_platforms_say_it_isnt_implemented() {
     let root = TempDir::new().unwrap();
