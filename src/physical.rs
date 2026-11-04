@@ -41,9 +41,10 @@
 //! On Linux, mapping a file first flushes its pending writes, so its extents
 //! are final, which costs time while an emulator is writing to it; that, and
 //! reading every extent of every file, is why it's asked for rather than
-//! shown by default. On Windows, only a file whose recent writes have no
-//! clusters yet is flushed, as that takes opening it to write, which an
-//! emulator holding it may not allow. Only a file's main data is counted: on
+//! shown by default. On Windows, every file on ReFS is flushed, as ReFS
+//! moves rewritten data to new clusters only then, but on NTFS only a file
+//! whose recent writes have no clusters yet, as flushing takes opening it to
+//! write, which an emulator holding it may not allow. Only a file's main data is counted: on
 //! Windows, its alternate data streams aren't, as they aren't in its
 //! allocation either.
 
@@ -617,6 +618,16 @@ mod imp {
             .then(|| File::open(path))
             .transpose()
             .map_err(|error| format!("can't read {shown}: {error}"))?;
+        // ReFS writes even a rewrite to new clusters, given only as it's
+        // flushed, so until then the map can show data where it no longer
+        // is, such as still in clusters a clone shares, and cover the file
+        // all the same. NTFS rewrites in place, so needs a flush only for
+        // what it hasn't placed at all, which falling short shows below.
+        if system == "ReFS" {
+            flush(path).map_err(|error| {
+                format!("can't flush {shown}'s writes so its clusters are final: {error}")
+            })?;
+        }
         let mut flushed = false;
         // One more for after a flush.
         for _ in 0..=ATTEMPTS {
