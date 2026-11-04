@@ -49,7 +49,7 @@ pub const DISKS_FIXED: &str = "The disk files and their order aren't edited here
 /// Why the same fields are fixed for a machine the wizard hasn't made yet.
 pub const CHOSEN_EARLIER: &str =
     "Chosen in an earlier step of the wizard; go back with b to change it.";
-const DEPTHS: &[u32] = &[1, 2, 4, 8, 16, 32];
+const DEPTHS: &[u32] = &[1, 2, 4, 8, 15, 16, 32];
 const SCALES: &[u32] = &[1, 2, 3, 4];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -957,13 +957,15 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn qemu_offers_memory_up_to_its_limit() {
+    fn qemu_offers_its_depths_and_memory_up_to_its_limit() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::under(root.path());
         make_qemu(&paths);
         let backends = crate::default_backends(&paths).unwrap();
         let editor = Editor::open(&paths, &backends, "g4").unwrap();
 
+        // OpenBIOS offers 15 bits, not 16.
+        assert_eq!(allowed(&editor, FieldId::Depth), vec!["8", "15", "32"]);
         let memory = allowed(&editor, FieldId::Memory);
         for size in ["1024M", "1536M", "2048M"] {
             assert!(memory.contains(&size.to_string()), "{size}: {memory:?}");
