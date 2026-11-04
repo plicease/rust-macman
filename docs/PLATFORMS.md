@@ -319,6 +319,12 @@ These parts of the smoke test have been seen to work on that host:
 the speed raised in the Mouse control panel, was usable, if less responsive than the
 host. The new speed took effect only once the control panel's window closed. Mac OS 9.2.1
 ignored QEMU's `usb-tablet`.
+- QEMU emulates no Power Mac sound chip, so Mac OS 9.2.1 had no sound. With
+  `-device usb-audio`, chosen as the output in the Sound control panel, it played. Until
+  then, the device only had silence from it.
+- `slirp` networking worked in Mac OS 9.2.1.
+- A machine made by the wizard from the 9.2.1 CD installed onto its blank disk, and then
+  started from that disk with no CD.
 
 What's been found about guests:
 
@@ -327,8 +333,7 @@ What's been found about guests:
   It's offered for PowerPC Mac OS X.
 - Mac OS X hasn't been tried, on either machine, for want of media.
 
-These haven't been tested: installing onto the disk and starting from it, `slirp`, sound,
-full screen, a read-only extra disk, and moving a machine to another host. The wizard
+These haven't been tested: a read-only extra disk, and moving a machine to another host. The wizard
 recommends `mac99` only for Mac OS 9.1 to 9.2.2, from 9.2.1's start, and never `g3beige`
 for classic Mac OS.
 

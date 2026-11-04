@@ -255,7 +255,7 @@ fn a_run_describes_the_machine_to_qemu() {
         runs[0],
         format!(
             "-M mac99,via=pmu -m 512 -g 1024x768x32 -name g4 -prom-env auto-boot?=true -boot c \
-             -drive file={},format=raw,media=disk -nic none{}",
+             -drive file={},format=raw,media=disk -nic none -device usb-audio{}",
             disk.display(),
             if cfg!(target_os = "linux") {
                 " -display sdl"

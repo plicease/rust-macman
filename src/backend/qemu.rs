@@ -18,6 +18,10 @@
 //!   32 bits. The window isn't magnified, so the scale is 1.
 //! - Networking is QEMU's user-mode NAT with a Sun GEM card, which Mac OS 9 and
 //!   Mac OS X drive as Apple's own.
+//! - QEMU has neither Power Mac's sound chip. With sound on, a mac99 gets a USB
+//!   audio device, which Mac OS 9 plays through once it's chosen in the Sound
+//!   control panel. A g3beige has no USB, so no sound.
+//! - On Linux the window is SDL's, as GTK's can't hold the mouse on Wayland.
 //!
 //! A machine records the QEMU version it was made with as its revision. That
 //! describes it, but doesn't bind it: another host's QEMU runs it too.
@@ -310,7 +314,11 @@ pub fn arguments(request: &LaunchRequest<'_>) -> Result<Vec<OsString>> {
         Network::None => ["-nic".into(), "none".into()],
         Network::Slirp => ["-nic".into(), "user,model=sungem".into()],
     });
-    if !settings.sound {
+    // Neither Power Mac has its sound chip in QEMU. Mac OS 9 drives a USB
+    // audio device, which a mac99 can have, chosen in the Sound control panel.
+    if settings.sound && settings.machine == QemuMachine::Mac99 {
+        arguments.extend(["-device".into(), "usb-audio".into()]);
+    } else {
         arguments.extend(["-audio".into(), "none".into()]);
     }
     if display.fullscreen {
@@ -668,7 +676,7 @@ pub(crate) mod tests {
              -drive file=/data/a,,b.img,format=raw,media=disk,readonly=on \
              -drive file=/cds/Mac OS 9.toast,format=raw,media=cdrom,readonly=on \
              -drive file=/cds/data.iso,format=raw,media=cdrom,readonly=on \
-             -nic user,model=sungem -full-screen"
+             -nic user,model=sungem -device usb-audio -full-screen"
         );
 
         // Without a disc that starts a Mac, it starts from the disk.
@@ -682,7 +690,8 @@ pub(crate) mod tests {
         let arguments = strings(&arguments(&request).unwrap()).join(" ");
         assert!(arguments.starts_with("-M g3beige -m 512"), "{arguments}");
         assert!(arguments.contains("-boot c"), "{arguments}");
-        assert!(arguments.ends_with("-nic none"), "{arguments}");
+        // A g3beige has no USB for a sound device.
+        assert!(arguments.ends_with("-nic none -audio none"), "{arguments}");
 
         let mut quiet = machine(QemuMachine::Mac99);
         quiet.qemu.as_mut().unwrap().sound = false;

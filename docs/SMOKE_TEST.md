@@ -239,7 +239,7 @@ macman create g4 --backend qemu-ppc --disk-size 2G
 | Kill `macman` with `kill -9` while QEMU runs | QEMU stops at once. The next `macman run g4` warns about the earlier run. |
 | `macman run g4` | Starts from its own disk. The CD image's hash is unchanged. |
 | `macman config set g4 qemu.network slirp`, then run it | The guest gets an address by DHCP. |
-| The same run, with speakers or headphones on | The startup chime plays. |
+| In the Sound control panel, choose the USB audio device under Output, then click an alert sound | It plays on the host. There's no startup chime: that's the Mac's ROM, which QEMU doesn't have. |
 | `macman run g4 --disk "extra disk.dsk" --readonly` | Mounts the extra disk locked, and its hash stays the same. |
 | `macman run g4` with three `--disk`s and a `--cdrom` | Refused: QEMU has four drives. |
 | `macman export g4 -o g4.tar.gz`, then import it on another host's QEMU, and run it | Starts, though the QEMU version differs. |

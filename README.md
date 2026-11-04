@@ -553,14 +553,18 @@ macman run g4 --media macos-9.2.1
 | Option | Values | Default |
 |---|---|---|
 | `--model` | `mac99`, `g3beige` | `mac99` |
-| `--no-sound` | | sound on |
+| `--no-sound` | | sound on, for a `mac99` |
 | `--network` | `none`, `slirp` | `none` |
 | `--memory` | `32M` to `2048M`, or `2047M` on a `g3beige`, in whole megabytes | `512M` |
 | `--display` | 640x480 to 3840x2160, at depth 8, 15, or 32 | `1024x768x32` |
 | `--scale` | 1 | 1 |
 
 `slirp` is QEMU's user-mode networking, with a Sun GEM card, which Mac OS drives as
-Apple's own. The window isn't magnified, so the scale is 1, and there's no shared
+Apple's own.
+
+QEMU has neither Power Mac's sound chip, so with sound on, a `mac99` gets a USB audio
+device instead. Mac OS 9 plays through it once you choose it under Output in the Sound
+control panel; until then it's silent. A `g3beige` has no USB, so it has no sound. The window isn't magnified, so the scale is 1, and there's no shared
 folder.
 
 Disks and CDs are IDE drives, and QEMU has four, so a run takes at most four disks and CDs

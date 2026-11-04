@@ -286,6 +286,9 @@ these ways:
 - **Launch:** disks and CDs are given whole and raw, CDs read-only, with HFS discs first,
   and `-boot d` when one can start the Mac. `mac99` gets `via=pmu`, for USB input.
   `auto-boot?` is set, so OpenBIOS starts the guest without stopping.
+- **Sound:** QEMU has neither Power Mac's sound chip, so with sound on a `mac99` gets
+  `-device usb-audio`, which Mac OS 9 drives once it's chosen in the Sound control panel.
+  A `g3beige` has no USB bus, so it gets `-audio none` either way.
 - **Window:** on Linux, SDL's when `-display help` lists it. GTK's, QEMU's default, grabs
   the mouse by warping the pointer, which Wayland refuses, so the pointer escapes; SDL
   confines it. Elsewhere QEMU chooses. Mac OS 9 doesn't drive `usb-tablet`, so the mouse
