@@ -295,11 +295,12 @@ For the same reason, the emulator forces SDL onto X11, so a Wayland desktop need
 | Host | Status |
 |---|---|
 | Linux x86-64 | Candidate: **starts the Mac OS 9.2.1 CD to the Finder** on `mac99`, smoke test unfinished |
+| macOS | A machine exported on Linux was imported and ran, with networking and sound; smoke test not run |
 | Others | Untried |
 
 macman runs the host's own `qemu-system-ppc`, so the backend is offered wherever one is
-found, but only Linux x86-64 has been tried: Ubuntu 26.04, with its QEMU 10.2.1 and
-OpenBIOS v1.1. No host counts as supported until [the smoke test](SMOKE_TEST.md#qemu)
+found. Linux x86-64 has been tried most: Ubuntu 26.04, with its QEMU 10.2.1 and OpenBIOS
+v1.1. On macOS, only a machine moved from there has been run. No host counts as supported until [the smoke test](SMOKE_TEST.md#qemu)
 has passed there, and release targets don't depend on this backend.
 
 These parts of the smoke test have been seen to work on that host:
@@ -379,9 +380,10 @@ smaller size typed in is taken, with a warning that it's below the requirement.
 The warning uses 4GB for 10.4, as the developer tools are on its DVD. Disks are sparse
 where the host allows, so a bigger one costs little until it fills.
 
-Moving a machine to another host hasn't been tested. The wizard recommends `mac99` for Mac
-OS 9.1 to 9.2.2, from 9.2.1's start, and Mac OS X 10.4, from its installer's start, and
-never `g3beige` for classic Mac OS.
+A machine exported on Linux, imported on macOS with its own QEMU, ran there, with
+networking and sound. The wizard recommends `mac99` for Mac OS 9.1 to 9.2.2, from 9.2.1's
+start, and Mac OS X 10.4, from its installer's start, and never `g3beige` for classic Mac
+OS.
 
 ## Release targets
 
