@@ -394,6 +394,7 @@ mod tests {
             arg(&["create"], option("rom"), NameKind::Roms),
             arg(&["create"], option("system"), NameKind::Systems),
             arg(&["create"], option("media"), NameKind::Media),
+            arg(&["wizard"], option("media"), NameKind::Media),
             arg(&["use"], at(0), NameKind::Machines),
             arg(&["run"], at(0), NameKind::Machines),
             arg(&["run"], option("media"), NameKind::Media),

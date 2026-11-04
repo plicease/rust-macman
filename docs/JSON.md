@@ -41,7 +41,7 @@ These change things and report as they go, so they have no single result to give
 `create`, `run`, `use`, `clone`, `remove`, `export`, `import` (except with `--dry-run`),
 `alias`, `unalias`, `rom add`, `system add`, `system remove`, `media add`, `media remove`, `checkpoint
 create`, `checkpoint delete`, `rollback`, `disk extract`, and
-`config edit`, which is interactive. Given `--json`, they do nothing, and fail with an error as above.
+`config edit` and `wizard`, which are interactive. Given `--json`, they do nothing, and fail with an error as above.
 
 ## `macman list`
 

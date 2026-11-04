@@ -774,6 +774,44 @@ fn config_edit_needs_a_terminal_and_writes_no_escapes() {
 }
 
 #[test]
+fn the_wizard_needs_a_terminal_and_makes_nothing_without_one() {
+    let env = Env::new();
+    env.register();
+    let (cd, _) = common::write_partitioned_disk(env.path(), "Mac OS 9.0.4.toast");
+    let before = std::fs::read(&cd).unwrap();
+    for args in [
+        vec!["wizard"],
+        vec!["wizard", cd.to_str().unwrap()],
+        vec!["wizard", "--image", cd.to_str().unwrap()],
+    ] {
+        let output = env.run(&args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(output.stdout.is_empty());
+        let error = stderr(&output);
+        assert!(error.contains("needs an interactive terminal"), "{error}");
+        assert!(error.contains("macman create"), "{error}");
+        assert!(!error.contains('\x1b'), "{error:?}");
+    }
+    let error = env.fails(&["--json", "wizard"]);
+    assert!(error.contains("macman wizard"), "{error}");
+    let error = env.fails(&["wizard", "no such.toast"]);
+    assert!(error.contains("isn't a file"), "{error}");
+    let error = env.fails(&["wizard", "--media", "no-such"]);
+    assert!(error.contains("no-such"), "{error}");
+    assert!(!error.contains("terminal"), "{error}");
+    let output = env.run(&["wizard", "a.toast", "--image", "b.toast"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("cannot be used with"));
+    assert_eq!(std::fs::read(&cd).unwrap(), before);
+    assert!(
+        std::fs::read_dir(env.path().join("data/macman/machines"))
+            .map(|dir| dir.count())
+            .unwrap_or(0)
+            == 0
+    );
+}
+
+#[test]
 fn media_are_registered_whole_listed_checked_and_removed() {
     let env = Env::new();
     let (cd, _) = common::write_partitioned_disk(env.path(), "Mac OS 9.0.4.toast");

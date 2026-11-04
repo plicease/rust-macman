@@ -315,6 +315,7 @@ fn bash_completes_names() {
         complete_line "macman run --media disk-1 --media "
         complete_line "macman create new --media "
         complete_line "macman export --media "
+        complete_line "macman wizard --media "
         complete_line "macman export --rom "
         complete_line "macman export --all-machines --rom p"
     "#;
@@ -338,6 +339,7 @@ macman run alpha --media -> disk-1
 macman run --media disk-1 --media -> disk-1
 macman create new --media -> disk-1
 macman export --media -> disk-1
+macman wizard --media -> disk-1
 macman export --rom -> plus-v3
 macman export --all-machines --rom p-> plus-v3
 ";
@@ -405,6 +407,7 @@ fn fish_completes_names() {
         r#"complete -c macman -n "__fish_macman_using_subcommand system; and __fish_seen_subcommand_from remove; and __fish_macman_at_positional 2 0" -f -a "(macman __complete-names systems)""#,
         r#"complete -c macman -n "__fish_macman_using_subcommand media; and __fish_seen_subcommand_from info; and __fish_macman_at_positional 2 0" -f -a "(macman __complete-names media)""#,
         r#"complete -c macman -n "__fish_macman_using_subcommand run" -l media -r -f -a "(macman __complete-names media)""#,
+        r#"complete -c macman -n "__fish_macman_using_subcommand wizard" -l media -r -f -a "(macman __complete-names media)""#,
         r#"complete -c macman -n "__fish_macman_using_subcommand export" -l rom -r -f -a "(macman __complete-names roms)""#,
     ] {
         assert!(text.contains(expected), "fish lacks {expected}");
