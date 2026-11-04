@@ -192,6 +192,13 @@ impl App {
             Command::Create(args) => {
                 self.create(args)?;
             }
+            Command::Wizard {
+                image,
+                image_option,
+                media,
+            } => {
+                return self.wizard(image.or(image_option).as_deref(), media.as_deref(), verbose);
+            }
             Command::Use { name } => self.select(&name)?,
             Command::Current if json => print_json(&Current {
                 current: self.current()?,
@@ -443,6 +450,7 @@ impl App {
             | Command::Media(_)
             | Command::Disk(_)
             | Command::Create(_)
+            | Command::Wizard { .. }
             | Command::Current
             | Command::Unalias { .. }
             | Command::Import { .. }
@@ -928,6 +936,42 @@ impl App {
     }
 
     fn create(&self, args: CreateArgs) -> Result<()> {
+        let prepared = self.prepare_create(&args, BootSource::Args)?;
+        for warning in &prepared.warnings {
+            eprintln!("warning: {warning}");
+        }
+        self.publish_prepared(&prepared)?;
+        let name = &args.name;
+        let run = if args.media.is_empty() {
+            format!("macman run {name} --cdrom FILE")
+        } else {
+            let media: Vec<String> = args.media.iter().map(|m| format!("--media {m}")).collect();
+            format!("macman run {name} {}", media.join(" "))
+        };
+        match prepared.boot_disk {
+            BootDisk::Template(_) | BootDisk::Extract(_) if args.media.is_empty() => {
+                println!("Created machine {name}")
+            }
+            BootDisk::Template(_) | BootDisk::Extract(_) => {
+                println!("Created machine {name}; attach its media with `{run}`")
+            }
+            BootDisk::Blank(size) => println!(
+                "Created machine {name} with a blank {size}-byte boot disk; install onto it \
+                 with `{run}`"
+            ),
+        }
+        if !args.media.is_empty() {
+            println!(
+                "The media aren't saved with the machine, so a plain `macman run {name}` starts \
+                 from its own disk; the installer itself is up to you"
+            );
+        }
+        Ok(())
+    }
+
+    /// Everything `create` checks, writing nothing: the machine it would make,
+    /// and where its boot disk comes from. The wizard plans with this too.
+    pub fn prepare_create(&self, args: &CreateArgs, source: BootSource<'_>) -> Result<Prepared> {
         validate_name("machine", &args.name)?;
         if self.paths.machine(&args.name).exists() {
             bail!("machine {:?} already exists", args.name);
@@ -940,7 +984,7 @@ impl App {
         let is_basilisk2 = backend.name() == basilisk2::BACKEND_NAME;
         let is_sheepshaver = backend.name() == sheepshaver::BACKEND_NAME;
         let (basilisk2_settings, sheepshaver_settings) =
-            backend_settings(&args, is_basilisk2, is_sheepshaver)?;
+            backend_settings(args, is_basilisk2, is_sheepshaver)?;
         let model: Option<Model> = match &args.model {
             Some(_) if is_basilisk2 => {
                 bail!("--model is for Mini vMac; Basilisk II has --cpu instead")
@@ -953,22 +997,43 @@ impl App {
             None => bail!("--model is required, such as --model plus"),
         };
         let (rom, rom_path) = registry::load_rom(&self.paths, &args.rom)?;
-        let (version, boot_disk) = match (&args.system, &args.disk_size) {
-            (Some(system), None) => {
+        let mut warnings = Vec::new();
+        let unreadable = |format: DiskFormat, what: &str| match model {
+            Some(model) if format == DiskFormat::RawHfs && !model.reads_hfs() => Some(format!(
+                "model {model} cannot read HFS, so {what} will not boot"
+            )),
+            _ => None,
+        };
+        let image = match source {
+            BootSource::Image(image) => Some(image),
+            _ => None,
+        };
+        let (version, boot_disk) = match (&args.system, &args.disk_size, image) {
+            _ if source == BootSource::Unchosen => (None, BootDisk::Blank(0)),
+            (Some(system), None, None) => {
                 let (system, template) = registry::load_system(&self.paths, system)?;
                 let format = disk::detect_format(&template)?;
-                if let Some(model) = model
-                    && format == disk::DiskFormat::RawHfs
-                    && !model.reads_hfs()
-                {
-                    eprintln!(
-                        "warning: model {model} cannot read HFS, so {} will not boot",
-                        system.name
-                    );
-                }
+                warnings.extend(unreadable(format, &system.name));
                 (system.version, BootDisk::Template(template))
             }
-            (None, Some(size)) => {
+            (None, None, Some(image)) => {
+                disk::plan_import(image, None, false)?;
+                let format = match disk::classify(image)? {
+                    Classification::Supported(DiskFormat::DiskCopy42) => {
+                        disk::disk_copy_contents(image)?.2
+                    }
+                    Classification::Supported(format) => Some(format),
+                    Classification::Partitioned(partitions) => {
+                        partitions.iter().find_map(|partition| partition.volume)
+                    }
+                    _ => None,
+                };
+                if let Some(format) = format {
+                    warnings.extend(unreadable(format, &image.display().to_string()));
+                }
+                (None, BootDisk::Extract(image.to_path_buf()))
+            }
+            (None, Some(size), None) => {
                 if !backend.installs_from_cd() {
                     bail!(
                         "--disk-size needs a backend that installs from a CD, which {} doesn't \
@@ -1001,7 +1066,7 @@ impl App {
             (None, None) if is_sheepshaver => sheepshaver::DEFAULT_DISPLAY,
             (None, None) => basilisk2::DEFAULT_DISPLAY,
         };
-        let memory = match (args.memory, model) {
+        let memory = match (&args.memory, model) {
             (Some(memory), _) => memory.to_ascii_uppercase(),
             (None, Some(model)) => model.default_memory().to_string(),
             (None, None) if is_sheepshaver => sheepshaver::DEFAULT_MEMORY.to_string(),
@@ -1040,40 +1105,37 @@ impl App {
         backend.check_host()?;
         backend.check_rom(&machine, &rom, &rom_path)?;
         backend.validate(&machine)?;
+        Ok(Prepared {
+            machine,
+            boot_disk,
+            warnings,
+        })
+    }
 
-        self.publish_machine(&machine, |dir| match &boot_disk {
+    /// Make the machine [`App::prepare_create`] planned, checking it again, as
+    /// it may have been edited since. It appears whole or not at all.
+    pub fn publish_prepared(&self, prepared: &Prepared) -> Result<()> {
+        let machine = &prepared.machine;
+        if self.paths.machine(&machine.name).exists() {
+            bail!("machine {:?} already exists", machine.name);
+        }
+        let backend = self.backends.get(&machine.emulator.backend)?;
+        let (rom, rom_path) = registry::load_rom(&self.paths, &machine.hardware.rom)?;
+        backend.check_host()?;
+        backend.check_rom(machine, &rom, &rom_path)?;
+        backend.validate(machine)?;
+        backend.validate_disks(machine, machine.disks.len())?;
+        self.publish_machine(machine, |dir| match &prepared.boot_disk {
             BootDisk::Template(template) => {
                 let _guard = disk::lock_image(&self.paths, template, LockMode::Shared)?;
                 atomic_copy(template, &dir.join(SYSTEM_DISK))
             }
+            BootDisk::Extract(image) => {
+                let _guard = disk::lock_image(&self.paths, image, LockMode::Shared)?;
+                disk::extract_volume(image, &dir.join(SYSTEM_DISK), None, false).map(drop)
+            }
             BootDisk::Blank(size) => create_blank_disk(&dir.join(SYSTEM_DISK), *size),
-        })?;
-        let name = &args.name;
-        let run = if args.media.is_empty() {
-            format!("macman run {name} --cdrom FILE")
-        } else {
-            let media: Vec<String> = args.media.iter().map(|m| format!("--media {m}")).collect();
-            format!("macman run {name} {}", media.join(" "))
-        };
-        match boot_disk {
-            BootDisk::Template(_) if args.media.is_empty() => {
-                println!("Created machine {name}")
-            }
-            BootDisk::Template(_) => {
-                println!("Created machine {name}; attach its media with `{run}`")
-            }
-            BootDisk::Blank(size) => println!(
-                "Created machine {name} with a blank {size}-byte boot disk; install onto it \
-                 with `{run}`"
-            ),
-        }
-        if !args.media.is_empty() {
-            println!(
-                "The media aren't saved with the machine, so a plain `macman run {name}` starts \
-                 from its own disk; the installer itself is up to you"
-            );
-        }
-        Ok(())
+        })
     }
 
     /// Fill a hidden directory, then rename it into place, so that a failure
@@ -1334,6 +1396,68 @@ impl App {
             crate::tui::Ending::Cancelled => println!("Nothing was changed"),
         }
         Ok(())
+    }
+
+    fn wizard(&self, image: Option<&Path>, media: Option<&str>, verbose: bool) -> Result<u8> {
+        if let Some(image) = image
+            && !image.is_file()
+        {
+            bail!("{} isn't a file to start from", image.display());
+        }
+        if let Some(name) = media {
+            media::load_media(&self.paths, name)?;
+        }
+        // Refuse before drawing anything, so redirected output gets no escapes.
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            bail!(
+                "`macman wizard` needs an interactive terminal; without one, make a machine with \
+                 `macman create`, as `macman create NAME --backend sheepshaver --rom ROM \
+                 --disk-size 1G`, then install with `macman run NAME --cdrom FILE`"
+            );
+        }
+        let wizard = crate::wizard::Wizard::new(self, image, media);
+        let (created, launch) = match crate::wizard::ui::run(wizard)? {
+            crate::wizard::Outcome::Cancelled => {
+                println!("Nothing was made or changed");
+                return Ok(0);
+            }
+            crate::wizard::Outcome::Created { created, launch } => (created, launch),
+        };
+        let name = &created.name;
+        println!("Created machine {name}");
+        if let Some(media) = &created.registered {
+            println!("Registered the image as media {media}");
+        }
+        for line in &created.after {
+            println!("  {line}");
+        }
+        if !created.guidance.is_empty() {
+            println!("Good to know:");
+            for line in &created.guidance {
+                println!("  {line}");
+            }
+        }
+        if !launch {
+            return Ok(0);
+        }
+        let installing = created.install.is_some();
+        let (cdroms, media) = match created.install {
+            Some(crate::wizard::rules::Install::Cd(path)) => (vec![path], Vec::new()),
+            Some(crate::wizard::rules::Install::Media(name)) => (Vec::new(), vec![name]),
+            None => (Vec::new(), Vec::new()),
+        };
+        let args = RunArgs {
+            name: Some(name.clone()),
+            disks: Vec::new(),
+            readonly: false,
+            any_format: false,
+            cdroms,
+            media,
+            ephemeral: false,
+            // An installation has to land on the saved disk.
+            no_ephemeral: installing,
+        };
+        self.run(&args, verbose)
     }
 
     fn config_set(&self, machine: Option<&str>, words: &[String], json: bool) -> Result<()> {
@@ -1963,11 +2087,35 @@ impl App {
 }
 
 /// What a new machine's boot disk comes from.
-enum BootDisk {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootDisk {
     /// A registered system image, to copy.
     Template(PathBuf),
+    /// The volume in an image file, taken out as `system add` takes it.
+    Extract(PathBuf),
     /// Zeros, of this many bytes.
     Blank(u64),
+}
+
+/// Where [`App::prepare_create`] takes a boot disk from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootSource<'a> {
+    /// `--system` or `--disk-size`, as `create` is given.
+    Args,
+    /// The volume in this file, as `system add` would take it.
+    Image(&'a Path),
+    /// Not chosen yet: everything else is checked, to see what could be made.
+    /// The result says a blank disk of no size, and isn't to be made.
+    Unchosen,
+}
+
+/// A machine `create` would make, checked, with nothing written yet.
+#[derive(Debug, Clone)]
+pub struct Prepared {
+    pub machine: Machine,
+    pub boot_disk: BootDisk,
+    /// What may stop it working, though it can be made.
+    pub warnings: Vec<String>,
 }
 
 /// A sparse file where the filesystem allows, and all zeros to whoever reads it.
@@ -2311,6 +2459,7 @@ fn without_json(command: &Command) -> Option<&'static str> {
         Command::System(SystemCommand::Remove { .. }) => "system remove",
         Command::Disk(DiskCommand::Extract { .. }) => "disk extract",
         Command::Create(_) => "create",
+        Command::Wizard { .. } => "wizard",
         Command::Use { .. } => "use",
         Command::Run(_) => "run",
         Command::Clone { .. } => "clone",

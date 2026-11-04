@@ -19,6 +19,7 @@ pub mod report;
 pub mod settings;
 pub mod tui;
 pub mod usage;
+pub mod wizard;
 
 use anyhow::Result;
 use backend::Backends;

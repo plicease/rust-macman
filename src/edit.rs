@@ -46,6 +46,9 @@ pub const MODEL_FIXED: &str =
     "The model decides the ROM, disks, and build; create a new machine for another.";
 pub const DISKS_FIXED: &str = "The disk files and their order aren't edited here, so nothing \
      can lose track of an installed system. Attach others for one run with `run --disk`.";
+/// Why the same fields are fixed for a machine the wizard hasn't made yet.
+pub const CHOSEN_EARLIER: &str =
+    "Chosen in an earlier step of the wizard; go back with b to change it.";
 const DEPTHS: &[u32] = &[1, 2, 4, 8, 16, 32];
 const SCALES: &[u32] = &[1, 2, 3, 4];
 
@@ -119,6 +122,9 @@ pub struct Editor<'a> {
     roms: Vec<String>,
     /// The machine's definition lock, when it's held for the whole edit.
     held: Option<HeldLock>,
+    /// Whether this is a machine not made yet, as the wizard plans it, which
+    /// has nothing to save to.
+    unsaved: bool,
 }
 
 /// Hold `name`'s definition lock, waiting for anyone else holding it. Every
@@ -176,6 +182,29 @@ impl<'a> Editor<'a> {
             loaded,
             roms,
             held: None,
+            unsaved: false,
+        })
+    }
+
+    /// Edit `machine` before it's made, as the wizard does, with the same
+    /// choices and checks. It can't be saved; it's made with the rest of the
+    /// wizard's plan.
+    pub fn for_new(paths: &'a Paths, backends: &'a Backends, machine: Machine) -> Result<Self> {
+        backends.get(&machine.emulator.backend)?;
+        let mut roms: Vec<String> = registry::list_roms(paths)?
+            .into_iter()
+            .map(|rom| rom.name)
+            .collect();
+        roms.sort();
+        Ok(Self {
+            paths,
+            backends,
+            draft: machine.clone(),
+            original: machine,
+            loaded: String::new(),
+            roms,
+            held: None,
+            unsaved: true,
         })
     }
 
@@ -266,17 +295,18 @@ impl<'a> Editor<'a> {
         let machine = &self.draft;
         let backend = machine.emulator.backend.as_str();
         let macemu = matches!(backend, "basilisk2" | "sheepshaver");
+        let why = |reason: &'static str| if self.unsaved { CHOSEN_EARLIER } else { reason };
         let mut fields = vec![
-            self.fixed("Machine", "Name", machine.name.clone(), RENAME),
+            self.fixed("Machine", "Name", machine.name.clone(), why(RENAME)),
             self.fixed(
                 "Machine",
                 "Backend",
                 machine.emulator.backend.clone(),
-                BACKEND_FIXED,
+                why(BACKEND_FIXED),
             ),
         ];
         if let Some(model) = machine.hardware.model {
-            fields.push(self.fixed("Machine", "Model", model.to_string(), MODEL_FIXED));
+            fields.push(self.fixed("Machine", "Model", model.to_string(), why(MODEL_FIXED)));
         }
         fields.push(self.field(
             FieldId::Ephemeral,
@@ -301,7 +331,7 @@ impl<'a> Editor<'a> {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        fields.push(self.fixed("Machine", "Disks", disks, DISKS_FIXED));
+        fields.push(self.fixed("Machine", "Disks", disks, why(DISKS_FIXED)));
 
         let roms = self.choices(FieldId::Rom, self.roms.iter().cloned());
         fields.push(self.field(
@@ -420,7 +450,12 @@ impl<'a> Editor<'a> {
             // on Windows, say so rather than offer one. Any folder will do to
             // ask, and the machine's own always exists. One already set stays
             // editable, so it can be cleared.
-            let probe = self.paths.machine(&self.draft.name);
+            // A machine not made yet has no folder of its own; any other will do.
+            let probe = if self.unsaved {
+                std::env::temp_dir()
+            } else {
+                self.paths.machine(&self.draft.name)
+            };
             let refused = shared_folder(&self.draft)
                 .is_none()
                 .then(|| self.problem_with(FieldId::SharedFolder, &probe.to_string_lossy()))
@@ -564,6 +599,12 @@ impl<'a> Editor<'a> {
     /// else changed it meanwhile. The write is atomic, and made holding the
     /// definition lock and the disks', so nothing starts or saves meanwhile.
     pub fn save(&self) -> Result<()> {
+        if self.unsaved {
+            bail!(
+                "machine {:?} hasn't been made yet, so there's nothing to save",
+                self.original.name
+            );
+        }
         self.check(&self.draft)
             .context("this configuration can't be saved")?;
         let _definition = match self.held {
@@ -766,7 +807,7 @@ pub(crate) mod tests {
     const PLUS_ROM_CHECKSUM: u32 = 0x4D1F_8172;
 
     /// A synthetic Plus ROM that passes the real checksum test, with no Apple code.
-    fn plus_rom(path: &Path) {
+    pub(crate) fn plus_rom(path: &Path) {
         let mut bytes = vec![0u8; 128 * 1024];
         bytes[..4].copy_from_slice(&PLUS_ROM_CHECKSUM.to_be_bytes());
         let mut remaining = PLUS_ROM_CHECKSUM;
@@ -786,7 +827,7 @@ pub(crate) mod tests {
     }
 
     /// A synthetic old-world PowerPC ROM, for SheepShaver.
-    fn powerpc_rom(path: &Path) {
+    pub(crate) fn powerpc_rom(path: &Path) {
         let mut bytes = vec![0u8; 0x40_0000];
         bytes[0x30_D064..0x30_D064 + 8].copy_from_slice(b"Boot TNT");
         fs::write(path, bytes).unwrap();
