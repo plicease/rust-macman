@@ -506,12 +506,12 @@ impl EmulatorBackend for Qemu {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::backend::ResolvedDisk;
     use crate::machine::{Disk, EmulatorConfig, Hardware, SCHEMA_VERSION, SystemInfo};
 
-    fn machine(kind: QemuMachine) -> Machine {
+    pub(crate) fn machine(kind: QemuMachine) -> Machine {
         Machine {
             schema_version: SCHEMA_VERSION,
             name: "g4".into(),

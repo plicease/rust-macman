@@ -956,21 +956,13 @@ pub(crate) mod tests {
         );
     }
 
+    /// A QEMU machine, saved directly, as `create` would need a real QEMU.
     pub(crate) fn make_qemu(paths: &Paths) {
-        add_system(paths);
-        macman(
-            paths,
-            &[
-                "create",
-                "g4",
-                "--system",
-                "sys",
-                "--backend",
-                "qemu-ppc",
-                "--model",
-                "mac99",
-            ],
-        );
+        let machine = crate::backend::qemu::tests::machine(crate::machine::QemuMachine::Mac99);
+        let dir = paths.machine(&machine.name);
+        fs::create_dir_all(&dir).unwrap();
+        machine.save_to(&dir).unwrap();
+        fs::write(dir.join("system.dsk"), vec![0u8; 1 << 20]).unwrap();
     }
 
     fn choices(editor: &Editor, id: FieldId) -> Vec<(String, bool)> {
