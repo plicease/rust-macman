@@ -316,12 +316,14 @@ These parts of the smoke test have been seen to work on that host:
   in full screen, and SDL's held it, which is why macman asks for SDL on Linux. With the
   Mac's relative mouse, the pointer is slower in full screen than in a window, as full
   screen magnifies the Mac's display. Full screen at 1440x960 on a 2880x1920 panel, with
-the speed raised in the Mouse control panel, was usable, if less responsive than the
-host. The new speed took effect only once the control panel's window closed. Mac OS 9.2.1
-ignored QEMU's `usb-tablet`.
+  the speed raised in the Mouse control panel, was usable, if less responsive than the
+  host. The new speed took effect only once the control panel's window closed. Mac OS
+  9.2.1 ignored QEMU's `usb-tablet`.
 - QEMU emulates no Power Mac sound chip, so Mac OS 9.2.1 had no sound. With
   `-device usb-audio`, chosen as the output in the Sound control panel, it played. Until
-  then, the device only had silence from it.
+  then, the device only had silence from it. It was tried first through a wrapper, then
+  as macman adds it for a `mac99` with sound on, where the Sound control panel's choice,
+  saved on the Mac's disk, carried over to the next run.
 - `slirp` networking worked in Mac OS 9.2.1.
 - A machine made by the wizard from the 9.2.1 CD installed onto its blank disk, and then
   started from that disk with no CD.
