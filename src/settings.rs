@@ -508,7 +508,8 @@ pub fn complete(
             None => return Vec::new(),
         },
     };
-    let Ok(mut editor) = Editor::inspect(paths, backends, machine) else {
+    let machine = crate::aliases::resolve(paths, machine).unwrap_or_else(|_| machine.to_string());
+    let Ok(mut editor) = Editor::inspect(paths, backends, &machine) else {
         return Vec::new();
     };
     let complete_pairs = rest.len() / 2;

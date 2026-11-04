@@ -108,6 +108,7 @@ Use XDG paths on Linux and macOS, respecting `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
   media/
     macos-9.0.4.img     # read-only, the whole image as registered
     macos-9.0.4.toml
+  aliases.toml          # other names for machines, each with its machine's name and id
   machines/
     wombat-6/
       machine.toml

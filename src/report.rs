@@ -34,6 +34,8 @@ pub struct MachineList {
 pub struct MachineEntry {
     pub name: String,
     pub current: bool,
+    /// Its other names, sorted.
+    pub aliases: Vec<String>,
     #[serde(flatten)]
     pub details: MachineDetails,
 }
@@ -238,6 +240,10 @@ pub struct CheckpointEntry {
 #[derive(Debug, Serialize)]
 pub struct DiskUsage {
     pub entries: Vec<UsageEntry>,
+    /// What the entries' files take together, counting a file reached from
+    /// more than one, by a hard link, once; `None` if any is unavailable, as a
+    /// partial total would understate the whole.
+    pub total_host_disk_used_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -1208,6 +1208,9 @@ impl Importing<'_> {
             }
             return Ok(outcome);
         }
+        if let Err(error) = crate::aliases::check_new_name(self.paths, name) {
+            return Ok(Outcome::Conflict(format!("{error:#}")));
+        }
         if self.paths.machine(name).symlink_metadata().is_ok() {
             let reason = if self.rename.is_some() {
                 format!("machine {name:?} already exists; pick another name")

@@ -8,7 +8,7 @@
 //! about extents shared with other files, by reflinks or deduplication, nor
 //! about compression the file system does underneath, so usage can overstate
 //! what removing a file would free. Hard links to one file are counted once
-//! within a total.
+//! within a total, be it a machine's or `du`'s of everything.
 
 use crate::checkpoint;
 use crate::disk::{self, Classification, DiskFormat};
@@ -169,6 +169,12 @@ pub fn format_usage(bytes: Option<u64>) -> String {
 /// written, which has no metadata yet. `None` if any of it can't be measured,
 /// including a checkpoint whose image is missing.
 pub fn machine_used(paths: &Paths, machine: &Machine) -> Option<u64> {
+    allocated_total(machine_files(paths, machine)?.iter().map(PathBuf::as_path))
+}
+
+/// The files [`machine_used`] measures, or `None` if they can't all be
+/// found out, so a wider total can count each file once.
+pub fn machine_files(paths: &Paths, machine: &Machine) -> Option<Vec<PathBuf>> {
     let mut files: Vec<PathBuf> = machine
         .disk_paths(paths)
         .ok()?
@@ -182,7 +188,7 @@ pub fn machine_used(paths: &Paths, machine: &Machine) -> Option<u64> {
             &checkpoint.name,
         ));
     }
-    allocated_total(files.iter().map(PathBuf::as_path))
+    Some(files)
 }
 
 /// The capacity of a machine's boot disk as the guest sees it: the data of a

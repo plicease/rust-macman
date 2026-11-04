@@ -660,3 +660,68 @@ macman config set ephemeral true --machine alpha display.d-> display.depth
         assert_eq!(parts[3].trim(), "1", "{output}");
     }
 }
+
+#[test]
+fn aliases_complete_as_machines_and_alone_for_unalias() {
+    let root = registered();
+    let output = macman(root.path(), &["alias", "alpha", "al"]);
+    assert!(output.status.success(), "{output:?}");
+    let zsh = script("zsh");
+    assert!(zsh.contains(":alias:_macman_names aliases'"), "zsh unalias");
+    let fish = script("fish");
+    assert!(
+        fish.contains(r#"complete -c macman -n "__fish_macman_using_subcommand unalias; and __fish_macman_at_positional 1 0" -f -a "(macman __complete-names aliases)""#),
+        "fish unalias"
+    );
+    assert!(
+        fish.contains(r#"complete -c macman -n "__fish_macman_using_subcommand alias; and __fish_macman_at_positional 1 0" -f -a "(macman __complete-names machines)""#),
+        "fish alias"
+    );
+
+    if have("bash") {
+        let file = root.path().join("macman.bash");
+        std::fs::write(&file, script("bash")).unwrap();
+        let check = r#"
+            source "$1"
+            complete_line() {
+                read -ra COMP_WORDS <<< "$1"
+                [[ $1 == *" " ]] && COMP_WORDS+=("")
+                COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 ))
+                COMPREPLY=()
+                _macman_with_names macman "${COMP_WORDS[COMP_CWORD]}" "${COMP_WORDS[COMP_CWORD-1]}"
+                echo "$1-> ${COMPREPLY[*]}"
+            }
+            complete_line "macman run "
+            complete_line "macman run a"
+            complete_line "macman unalias "
+            complete_line "macman alias "
+            complete_line "macman alias alpha "
+            complete_line "macman clone al "
+            complete_line "macman config set al display.d"
+        "#;
+        let output = in_shell(root.path(), "bash", &[], check, &[&file]);
+        let expected = "\
+macman run -> al alpha beta
+macman run a-> al alpha
+macman unalias -> al
+macman alias -> al alpha beta
+macman alias alpha -> -v -h --verbose --json --help
+macman clone al -> -v -h --verbose --json --help
+macman config set al display.d-> display.depth
+";
+        assert_eq!(output, expected);
+    }
+    if have("zsh") {
+        let file = root.path().join("_macman");
+        std::fs::write(&file, &zsh).unwrap();
+        let check = r#"
+            compdef() { }
+            compadd() { print -rl -- "${(@P)${@[-1]}}" }
+            source "$1"
+            _macman_names -J -default- machines
+            _macman_names -J -default- aliases
+        "#;
+        let output = in_shell(root.path(), "zsh", &["-f"], check, &[&file]);
+        assert_eq!(output, "al\nalpha\nbeta\nal\n");
+    }
+}

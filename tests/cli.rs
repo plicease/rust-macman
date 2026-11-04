@@ -191,7 +191,10 @@ fn use_current_and_list() {
         line.starts_with("* wombat-6  plus  4M  512x342x1  disk 800 KiB  used "),
         "{list}"
     );
-    assert!(line.ends_with("  persistent  system 6.0.8"), "{list}");
+    assert!(
+        line.ends_with("  persistent  system 6.0.8  aliases -"),
+        "{list}"
+    );
     assert!(list.contains("  wombat-7"), "{list}");
     assert!(env.ok(&["config", "show"]).contains("wombat-6"));
 }
@@ -968,7 +971,11 @@ fn disk_usage_is_allocated_space_listed_smallest_first() {
         lines[0].starts_with("NAME") && lines[0].ends_with("DISK USED"),
         "{du}"
     );
-    let names: Vec<_> = lines[1..]
+    // The last line is the total, unavailable as one entry is.
+    let (total, lines_entries) = lines[1..].split_last().unwrap();
+    let cells: Vec<_> = total.split_whitespace().collect();
+    assert_eq!(cells, ["total", "-", "-"], "{du}");
+    let names: Vec<_> = lines_entries
         .iter()
         .map(|l| l.split_whitespace().take(2).collect::<Vec<_>>().join(" "))
         .collect();
@@ -986,7 +993,7 @@ fn disk_usage_is_allocated_space_listed_smallest_first() {
         "wombat-6 machine",
         "unavailable last: {du}"
     );
-    assert!(lines.last().unwrap().ends_with(" -"), "{du}");
+    assert!(lines_entries.last().unwrap().ends_with(" -"), "{du}");
     // Every row's value ends in the same column.
     let width = lines[0].len();
     assert!(lines.iter().all(|l| l.len() == width), "{du}");
@@ -1004,11 +1011,30 @@ fn disk_usage_is_allocated_space_listed_smallest_first() {
     assert_eq!(entries[4]["type"], "machine");
     assert!(entries[4]["host_disk_used_bytes"].is_null());
     let order: Vec<_> = entries.iter().map(|e| e["name"].clone()).collect();
-    let text_order: Vec<_> = lines[1..]
+    let text_order: Vec<_> = lines_entries
         .iter()
         .map(|l| serde_json::Value::from(l.split_whitespace().next().unwrap()))
         .collect();
     assert_eq!(order, text_order, "the same order as the text");
+    assert!(json["total_host_disk_used_bytes"].is_null(), "{json}");
+
+    // With nothing unavailable, the total is the sum of the entries.
+    env.ok(&["remove", "wombat-6", "--delete-disks"]);
+    let json: serde_json::Value = serde_json::from_str(&env.ok(&["--json", "du"])).unwrap();
+    let sum: u64 = json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["host_disk_used_bytes"].as_u64().unwrap())
+        .sum();
+    assert_eq!(json["total_host_disk_used_bytes"], sum, "{json}");
+    let du = env.ok(&["du"]);
+    let total = du.lines().last().unwrap();
+    assert!(total.starts_with("total") && total.contains(" - "), "{du}");
+    assert!(
+        total.ends_with(&macman::usage::format_bytes(sum)) && !total.ends_with(" -"),
+        "{du}"
+    );
 }
 
 #[test]
@@ -1106,6 +1132,45 @@ fn checkpoints_count_toward_a_machine_but_not_its_capacity() {
 
     let error = env.fails(&["--json", "checkpoint", "create", "wombat-6"]);
     assert!(error.contains("--json isn't supported"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn du_counts_a_file_shared_by_two_entries_once_in_its_total() {
+    let env = Env::new();
+    env.register();
+    env.create("wombat-6");
+    // The machine's disk replaced by a link to the system it was made from.
+    let system = env.path().join("data/macman/systems/system-6.0.8.dsk");
+    let disk = env.machine_disk("wombat-6");
+    std::fs::remove_file(&disk).unwrap();
+    std::fs::hard_link(&system, &disk).unwrap();
+
+    let json: serde_json::Value = serde_json::from_str(&env.ok(&["--json", "du"])).unwrap();
+    let used = |name: &str| {
+        json["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap()["host_disk_used_bytes"]
+            .as_u64()
+            .unwrap()
+    };
+    let (machine, system, rom) = (used("wombat-6"), used("system-6.0.8"), used("plus-v3"));
+    assert_eq!(machine, system, "each entry still counts the file: {json}");
+    assert!(system > 0);
+    assert_eq!(
+        json["total_host_disk_used_bytes"],
+        rom + system,
+        "the shared file once: {json}"
+    );
+    let du = env.ok(&["du"]);
+    let total = du.lines().last().unwrap();
+    assert!(
+        total.ends_with(&macman::usage::format_bytes(rom + system)),
+        "{du}"
+    );
 }
 
 #[cfg(unix)]
