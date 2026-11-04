@@ -359,7 +359,10 @@ These parts of the smoke test have been seen to work on that host:
   menu. A clone given more memory felt less slow.
 - Under Mac OS X 10.4, full screen and `slirp` networking worked. It installed at
   1024x768x32, and ran at 1440x960x32 once `config edit` changed it. At depth 8 it started,
-  but showed only dithered grays, as if its palette never reached QEMU's display. Sound played through
+  but showed only dithered grays, as if its palette never reached QEMU's display. At depth
+  15, the gray Apple was drawn at half width in the left half of the window, in wrong
+  colors, as if the loader wrote 2 bytes a pixel and the display read 4. Only depth 32
+  worked. Sound played through
   `usb-audio` once it was chosen under Output in System Preferences' Sound pane and the
   Mac restarted. Until then, though chosen, it was silent. A trace of QEMU's USB
   controller then showed isochronous transfers flowing to it, with a few overruns.
