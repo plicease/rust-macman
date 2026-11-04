@@ -58,8 +58,9 @@ size = 819200
 correctly, and they refuse it and ask to be upgraded. Format 2 adds `systems` and
 `register`, which format 1 readers would quietly drop, and format 3 adds `media`. Each
 archive is written in the oldest format that holds it: one without media is format 2,
-and one of machines alone is format 1, so older versions of macman import them as
-before. This version reads all three.
+and one of machines alone, with only the ROMs they use, is format 1, so older versions of
+macman import them as before. That includes `--all-machines`; a ROM registered for its
+own sake, by `--rom`, `--all-roms`, or `--all`, needs format 2. This version reads all three.
 
 ## What an archive holds
 
@@ -70,22 +71,39 @@ so no system image comes with it. Those are chosen separately:
 | Command | Machines | ROMs | System images | Media |
 | --- | --- | --- | --- | --- |
 | `export NAME...` | Those named | The ones they use | None | None |
+| `export --all-machines` | All | The ones they use | None | None |
+| `export --rom ROM...` | None | Those named | None | None |
+| `export --all-roms` | None | All, used or not | None | None |
+| `export --all-machines --all-roms` | All | All, used or not | None | None |
+| `export NAME... --rom ROM...` | Those named | The ones they use, and those named | None | None |
 | `export NAME... --system SYS...` | Those named | The ones they use | Those named | None |
+| `export --all-machines --system SYS...` | All | The ones they use | Those named | None |
 | `export --system SYS...` | None | None | Those named | None |
 | `export [NAME...] --all-systems` | Those named, if any | The ones they use | All | None |
+| `export --all-roms --all-systems` | None | All, used or not | All | None |
 | `export --media MEDIA...` | None | None | None | Those named |
 | `export [NAME...] --all-media` | Those named, if any | The ones they use | None | All |
 | `export --all` | All | All, used or not | All | All |
 
-`--system` and `--media` mix with machine names and each other, so one archive can hold
-a machine and the CD it was installed from. Neither brings in anything else: a
-media-only archive holds just those media, and imports with no machines in it. A name
-that isn't registered stops the export. `--all` works with no machines, and is refused
-only when there's nothing at all to export. It can't be combined with names, `--system`,
-`--all-systems`, `--media`, or `--all-media`. With `--all`,
-every registered name has its own entry, so a ROM registered twice under different
-names arrives under both, sharing one blob. Without it, a machine's ROM has one entry
-for its contents, as in format 1.
+The selectors are additive: an archive holds what any of them selects, and a file
+selected more than once, such as a ROM two machines use, is stored once. Machine names
+and `--all-machines`, `--rom` and `--all-roms`, `--system` and `--all-systems`, and
+`--media` and `--all-media` select from the same four registries, so the rows above
+combine freely. Only these combinations are refused: machine names with
+`--all-machines`, `--system` with `--all-systems`, `--media` with `--all-media`, and
+`--all` with anything, since it already takes everything. `--rom` with `--all-roms` is
+allowed, and is every ROM.
+
+A name that isn't registered stops the export, and so does a selection with nothing in
+it, such as `--all-machines` on a host with no machines. `--all-machines` with no
+machines is fine alongside a selector that does find something.
+
+A ROM named with `--rom`, or taken by `--all-roms` or `--all`, is registered for its own
+sake: it has an entry of its own under its registered name, and import registers it
+under that name whether or not a machine uses it. A ROM registered under two names from
+the same bytes arrives under both, sharing one blob. A ROM that comes only because a
+machine uses it is, as in format 1, one entry for its contents, which import reuses where
+an identical ROM is already registered under another name.
 
 Archives leave out builds, source and build caches, logs, locks, session data, and
 [checkpoints](../README.md#checkpoints): a machine travels with its current disks only,

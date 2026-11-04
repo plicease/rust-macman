@@ -2218,3 +2218,185 @@ fn export_all_takes_media_no_machine_uses() {
     plain.ok(&["export", "--all", "-o", &archive]);
     assert!(plain.manifest(&archive).starts_with("format_version = 2\n"));
 }
+
+/// The names in `roms/` on `host`, as registered.
+fn rom_names(host: &Host) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(host.data().join("roms"))
+        .map(|dir| {
+            dir.filter_map(|entry| {
+                let name = entry.ok()?.file_name().into_string().ok()?;
+                name.strip_suffix(".toml").map(str::to_string)
+            })
+            .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// `plus-a` and `plus-b` on `plus-v3`, an unused Mac II ROM `maciix`, and
+/// `plus-copy`, registered from the same bytes as `plus-v3`.
+fn with_spare_roms() -> Host {
+    let host = Host::with_two_machines();
+    host.add_ii_rom("maciix");
+    host.add_plus_rom("plus-copy");
+    host
+}
+
+#[test]
+fn roms_alone_export_and_import_under_their_names() {
+    let source = with_spare_roms();
+    let archive = source.export(&["--rom", "maciix"], "one.tar.gz");
+    let manifest = source.manifest(&archive);
+    assert!(manifest.starts_with("format_version = 2\n"), "{manifest}");
+    assert_eq!(manifest.matches("[[roms]]").count(), 1, "{manifest}");
+    assert!(!manifest.contains("[[machines]]"), "{manifest}");
+    let target = Host::new();
+    let preview = assert_preview_matches(&target, &[&archive]);
+    assert!(preview.contains("would import rom maciix"), "{preview}");
+    assert_eq!(rom_names(&target), ["maciix"]);
+
+    // Repeated, and each name registered even where the bytes are the same.
+    let archive = source.export(
+        &[
+            "--rom",
+            "plus-v3",
+            "--rom",
+            "plus-copy",
+            "--rom",
+            "maciix",
+            "--rom",
+            "maciix",
+        ],
+        "three.tar.gz",
+    );
+    let manifest = source.manifest(&archive);
+    assert_eq!(manifest.matches("[[roms]]").count(), 3, "{manifest}");
+    // The manifest and two blobs: plus-v3 and plus-copy share one.
+    assert_eq!(read_entries(&archive).len(), 3);
+    let target = Host::new();
+    target.ok(&["import", &archive]);
+    assert_eq!(rom_names(&target), ["maciix", "plus-copy", "plus-v3"]);
+
+    // --all-roms is every registered name, the same way.
+    let archive = source.export(&["--all-roms"], "roms.tar.gz");
+    let manifest = source.manifest(&archive);
+    assert_eq!(manifest.matches("[[roms]]").count(), 3, "{manifest}");
+    assert!(!manifest.contains("[[machines]]") && !manifest.contains("[[systems]]"));
+    assert_eq!(read_entries(&archive).len(), 3);
+    let target = Host::new();
+    target.ok(&["import", &archive]);
+    assert_eq!(rom_names(&target), ["maciix", "plus-copy", "plus-v3"]);
+    // --rom and --all-roms together are still every name, once each.
+    let archive = source.export(&["--all-roms", "--rom", "maciix"], "both.tar.gz");
+    assert_eq!(source.manifest(&archive).matches("[[roms]]").count(), 3);
+}
+
+#[test]
+fn all_machines_brings_only_the_roms_they_use() {
+    let source = with_spare_roms();
+    let archive = source.export(&["--all-machines"], "machines.tar.gz");
+    let manifest = source.manifest(&archive);
+    // Nothing a format-1 macman can't read.
+    assert!(manifest.starts_with("format_version = 1\n"), "{manifest}");
+    assert_eq!(manifest.matches("[[machines]]").count(), 2, "{manifest}");
+    assert_eq!(manifest.matches("[[roms]]").count(), 1, "{manifest}");
+    assert!(
+        !manifest.contains("maciix") && !manifest.contains("plus-copy"),
+        "{manifest}"
+    );
+    let target = Host::new();
+    assert_preview_matches(&target, &[&archive]);
+    assert_eq!(rom_names(&target), ["plus-v3"]);
+    assert!(target.machine_dir("plus-a").join("machine.toml").exists());
+    assert!(target.machine_dir("plus-b").join("machine.toml").exists());
+
+    let archive = source.export(&["--all-machines", "--all-roms"], "plus-roms.tar.gz");
+    let manifest = source.manifest(&archive);
+    assert!(manifest.starts_with("format_version = 2\n"), "{manifest}");
+    assert_eq!(manifest.matches("[[machines]]").count(), 2);
+    assert_eq!(manifest.matches("[[roms]]").count(), 3, "{manifest}");
+    let target = Host::new();
+    target.ok(&["import", &archive]);
+    assert_eq!(rom_names(&target), ["maciix", "plus-copy", "plus-v3"]);
+
+    let archive = source.export(&["--all-machines", "--system", "sys"], "template.tar.gz");
+    let manifest = source.manifest(&archive);
+    assert_eq!(manifest.matches("[[systems]]").count(), 1, "{manifest}");
+    assert_eq!(manifest.matches("[[roms]]").count(), 1, "{manifest}");
+    let archive = source.export(&["--all-roms", "--all-systems"], "registries.tar.gz");
+    let manifest = source.manifest(&archive);
+    assert!(!manifest.contains("[[machines]]"), "{manifest}");
+    assert_eq!(manifest.matches("[[systems]]").count(), 1, "{manifest}");
+    assert_eq!(manifest.matches("[[roms]]").count(), 3, "{manifest}");
+}
+
+#[test]
+fn a_named_rom_joins_named_machines() {
+    let source = with_spare_roms();
+    // The machine's ROM comes as it always does, and the alias by its name.
+    let archive = source.export(
+        &["plus-a", "--rom", "plus-copy", "--rom", "maciix"],
+        "x.tar.gz",
+    );
+    let manifest = source.manifest(&archive);
+    assert!(manifest.starts_with("format_version = 2\n"), "{manifest}");
+    assert_eq!(manifest.matches("[[machines]]").count(), 1);
+    assert_eq!(manifest.matches("[[roms]]").count(), 3, "{manifest}");
+    let target = Host::new();
+    let preview = assert_preview_matches(&target, &[&archive]);
+    assert!(preview.contains("would import rom plus-copy"), "{preview}");
+    assert_eq!(rom_names(&target), ["maciix", "plus-copy", "plus-v3"]);
+    assert!(target.definition("plus-a").contains("rom = \"plus-v3\""));
+
+    // The machine's own ROM named too is one entry, registered.
+    let archive = source.export(&["plus-a", "--rom", "plus-v3"], "own.tar.gz");
+    let manifest = source.manifest(&archive);
+    assert_eq!(manifest.matches("[[roms]]").count(), 1, "{manifest}");
+    assert!(manifest.contains("register = true"), "{manifest}");
+}
+
+#[test]
+fn new_selectors_refuse_conflicts_missing_names_and_nothing() {
+    let source = with_spare_roms();
+    let archive = source.archive("never.tar.gz");
+    for args in [
+        &["--all", "--rom", "maciix"][..],
+        &["--all", "--all-roms"],
+        &["--all", "--all-machines"],
+        &["plus-a", "--all-machines"],
+    ] {
+        let mut all = vec!["export"];
+        all.extend_from_slice(args);
+        all.extend(["-o", &archive]);
+        let output = source.run(&all);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert!(
+            stderr(&output).contains("cannot be used with"),
+            "{args:?}: {output:?}"
+        );
+    }
+    let error = source.fails(&["export", "--rom", "nosuch", "-o", &archive]);
+    assert!(error.contains("nosuch"), "{error}");
+    let error = source.fails(&["export", "--rom", "../x", "-o", &archive]);
+    assert!(error.contains("ROM"), "{error}");
+    assert!(!Path::new(&archive).exists());
+
+    // With no machines, --all-machines alone has nothing to export, but it
+    // can come along with something that does.
+    let empty = Host::new();
+    empty.add_ii_rom("maciix");
+    let error = empty.fails(&["export", "--all-machines", "-o", &archive]);
+    assert!(
+        error.contains("nothing") || error.contains("there are no"),
+        "{error}"
+    );
+    let empty_roms = Host::new();
+    let error = empty_roms.fails(&["export", "--all-roms", "-o", &archive]);
+    assert!(error.contains("there are no"), "{error}");
+    assert!(!Path::new(&archive).exists());
+    let archive = empty.export(&["--all-machines", "--rom", "maciix"], "rom.tar.gz");
+    let manifest = empty.manifest(&archive);
+    assert!(!manifest.contains("[[machines]]"), "{manifest}");
+    assert_eq!(manifest.matches("[[roms]]").count(), 1);
+}

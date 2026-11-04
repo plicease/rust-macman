@@ -369,6 +369,7 @@ mod tests {
                 },
                 NameKind::Machines,
             ),
+            arg(&["export"], option("rom"), NameKind::Roms),
             arg(&["export"], option("system"), NameKind::Systems),
             arg(&["export"], option("media"), NameKind::Media),
             arg(&["remove"], at(0), NameKind::Machines),

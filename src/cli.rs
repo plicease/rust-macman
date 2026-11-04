@@ -192,17 +192,35 @@ pub enum Command {
         source: String,
         dest: String,
     },
-    /// Write machines, ROMs, and system images to an archive for another host
+    /// Write machines, ROMs, system images, and media to an archive for another host
     Export {
         #[arg(
-            required_unless_present_any = ["all", "systems", "all_systems", "media", "all_media"],
+            required_unless_present_any = [
+                "all", "all_machines", "roms", "all_roms", "systems", "all_systems", "media",
+                "all_media",
+            ],
             value_name = "MACHINE",
             value_hint = MACHINE
         )]
         names: Vec<String>,
         /// Export every machine, ROM, system image, and medium, used or not
-        #[arg(long, conflicts_with_all = ["names", "systems", "all_systems", "media", "all_media"])]
+        #[arg(
+            long,
+            conflicts_with_all = [
+                "names", "all_machines", "roms", "all_roms", "systems", "all_systems", "media",
+                "all_media",
+            ]
+        )]
         all: bool,
+        /// Export every machine, with the ROMs they use, and no other ROMs
+        #[arg(long, conflicts_with = "names")]
+        all_machines: bool,
+        /// Also export this registered ROM, used or not, to register under its name (repeatable)
+        #[arg(long = "rom", value_name = "ROM", value_hint = ROM)]
+        roms: Vec<String>,
+        /// Also export every registered ROM, used or not, each under its name
+        #[arg(long)]
+        all_roms: bool,
         /// Also export this registered system image (repeatable)
         #[arg(long = "system", value_name = "SYSTEM", value_hint = SYSTEM)]
         systems: Vec<String>,
