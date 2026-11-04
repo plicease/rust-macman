@@ -216,6 +216,41 @@ edit` open meanwhile refuses to save over one. With `--json` it prints the chang
 [docs/JSON.md](docs/JSON.md). In zsh, bash, and fish, completion offers the machine's keys,
 and the values each can take, as for `config keys`.
 
+### Aliases
+
+A machine can have other names, which work wherever its own name does: `run`, `use`,
+`config`, `checkpoint`, `rollback`, `clone`'s source, `export`, `remove`, and every
+other command that takes an existing machine.
+
+```sh
+macman alias wombat-6 wombat       # wombat now names wombat-6
+macman alias wombat plus           # and so does plus; aliases name the machine itself
+macman run wombat                  # the same as macman run wombat-6
+macman unalias wombat              # just the alias; the machine is untouched
+```
+
+`macman list` shows each machine's aliases, alphabetically, as `aliases plus, wombat`, or
+`aliases -` for none, and `list --json` gives them as an `aliases` array. An alias names
+the machine itself, never another alias, so `alias` given an alias for its machine makes
+the new one name the machine; there are no chains. The machine keeps its own name and id,
+and `use` with an alias makes the machine current, so `current` and the `*` in `list` show
+the machine's name.
+
+Machine names and aliases are one set of names: an alias can't be a machine's name or
+another machine's alias, and `create`, `clone`, and `import`, with or without `--rename`,
+refuse a name an alias has. Giving a machine an alias it already has does nothing, and
+succeeds. `unalias` refuses a machine's name, so it can't be mistaken for `remove`.
+Aliases are names on this host: `clone` doesn't copy them, and `export` doesn't carry
+them, so an imported machine arrives with none. `remove` deletes a machine's aliases with
+it, and names them when it asks. An alias follows its machine's id, so it still finds a
+machine whose directory was renamed by hand; one whose machine is gone says so when used,
+and `doctor` lists it, until `unalias` removes it.
+
+Aliases are kept in `aliases.toml` in the data directory, replaced whole on each change,
+and changed under the same lock that creating a machine takes, so simultaneous changes
+each take effect and a new machine and a new alias can't take the same name. Completion
+offers aliases wherever it offers machine names, and only aliases after `unalias`.
+
 ## Shell completion
 
 `macman completions SHELL` prints a completion script for `zsh`, `bash`, `fish`,

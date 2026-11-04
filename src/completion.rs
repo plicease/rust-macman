@@ -102,6 +102,7 @@ fn zsh(generated: &str) -> String {
         (NameKind::Systems, "_email_addresses"),
         (NameKind::Media, "_urls"),
         (NameKind::Settings, "_command_names -e"),
+        (NameKind::Aliases, "_absolute_command_paths"),
     ] {
         script = splice(
             &script,
@@ -360,6 +361,8 @@ mod tests {
             arg(&["checkpoint", "list"], at(0), NameKind::Machines),
             arg(&["checkpoint", "delete"], at(0), NameKind::Machines),
             arg(&["rollback"], at(0), NameKind::Machines),
+            arg(&["alias"], at(0), NameKind::Machines),
+            arg(&["unalias"], at(0), NameKind::Aliases),
             arg(&["clone"], at(0), NameKind::Machines),
             arg(
                 &["export"],

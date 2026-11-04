@@ -18,6 +18,7 @@ pub(crate) const SYSTEM: ValueHint = ValueHint::EmailAddress;
 pub(crate) const MEDIA: ValueHint = ValueHint::Url;
 /// `config set`'s words, which are completed knowing the words before them.
 pub(crate) const SETTINGS: ValueHint = ValueHint::CommandName;
+pub(crate) const ALIAS: ValueHint = ValueHint::ExecutablePath;
 
 /// The command completion scripts run for names. It isn't a subcommand,
 /// because every shell's script would then offer it.
@@ -32,15 +33,18 @@ pub enum NameKind {
     Media,
     /// The next word of `config set`: a machine, a key, or a value.
     Settings,
+    /// Aliases alone, not machine names.
+    Aliases,
 }
 
 impl NameKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Machines,
         Self::Roms,
         Self::Systems,
         Self::Media,
         Self::Settings,
+        Self::Aliases,
     ];
 
     /// The kind an argument marked with `hint` takes, if any.
@@ -55,6 +59,7 @@ impl NameKind {
             Self::Systems => SYSTEM,
             Self::Media => MEDIA,
             Self::Settings => SETTINGS,
+            Self::Aliases => ALIAS,
         }
     }
 
@@ -65,6 +70,7 @@ impl NameKind {
             Self::Systems => "systems",
             Self::Media => "media",
             Self::Settings => "config-set",
+            Self::Aliases => "aliases",
         }
     }
 
@@ -75,6 +81,7 @@ impl NameKind {
             "systems" => Some(Self::Systems),
             "media" => Some(Self::Media),
             "config-set" => Some(Self::Settings),
+            "aliases" => Some(Self::Aliases),
             _ => None,
         }
     }
@@ -185,6 +192,20 @@ pub enum Command {
         /// Replace the boot disk without prompting
         #[arg(long)]
         yes: bool,
+    },
+    /// Give a machine another name, usable wherever its name is, as `alias wombat-6 wombat`
+    Alias {
+        /// The machine, by its name or another alias of it
+        #[arg(value_name = "MACHINE", value_hint = MACHINE)]
+        machine: String,
+        /// The new name for it, which no machine or other alias may have
+        #[arg(value_name = "ALIAS")]
+        alias: String,
+    },
+    /// Remove an alias, leaving its machine as it is
+    Unalias {
+        #[arg(value_name = "ALIAS", value_hint = ALIAS)]
+        alias: String,
     },
     /// Copy a machine and its private disks
     Clone {
