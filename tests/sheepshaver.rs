@@ -492,6 +492,74 @@ fn a_missing_rom_is_reported_by_doctor() {
     assert!(failed.is_some(), "{checks:?}");
 }
 
+/// The check `doctor` makes of machine `name`, which has to be there.
+fn machine_check(h: &Harness, name: &str) -> macman::backend::Check {
+    h.app
+        .doctor_checks(false)
+        .unwrap()
+        .into_iter()
+        .find(|check| check.message.contains(&format!("machine {name} ")))
+        .unwrap_or_else(|| panic!("doctor says nothing of machine {name}"))
+}
+
+/// Rewrite machine `name`'s definition, as someone editing it by hand would.
+fn edit_definition(h: &Harness, name: &str, from: &str, to: &str) {
+    let file = h.paths.machine(name).join("machine.toml");
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(text.contains(from), "{text}");
+    fs::write(&file, text.replacen(from, to, 1)).unwrap();
+}
+
+#[test]
+fn an_incompatible_rom_is_reported_by_doctor() {
+    let h = harness!();
+    h.create("a");
+    assert_eq!(machine_check(&h, "a").level, CheckLevel::Ok);
+    // A 68k ROM, registered for another machine, put in by hand.
+    let quadra = h.root.path().join("quadra.bin");
+    let mut bytes = vec![0u8; 1024 * 1024];
+    bytes[8..10].copy_from_slice(&[0x06, 0x7C]);
+    fs::write(&quadra, bytes).unwrap();
+    h.cmd(&["rom", "add", quadra.to_str().unwrap(), "--name", "quadra"])
+        .unwrap();
+    edit_definition(&h, "a", "rom = \"beige\"", "rom = \"quadra\"");
+
+    let check = machine_check(&h, "a");
+    assert_eq!(check.level, CheckLevel::Fail, "{check:?}");
+    assert!(check.message.contains("machine a cannot run"), "{check:?}");
+    let fix = check.fix.clone().unwrap_or_default();
+    assert!(fix.contains("Mac OS ROM"), "{check:?}");
+    // And `run` refuses it for the same reason, building nothing.
+    let error = h.cmd(&["run", "a"]).unwrap_err();
+    assert!(error.to_string().contains("Mac OS ROM"), "{error}");
+    assert_eq!(h.count("build"), 0);
+}
+
+#[test]
+fn an_unsupported_configuration_is_reported_by_doctor() {
+    let h = harness!();
+    h.create("a");
+    h.create("b");
+    // Each a value the emulator would quietly change, which create refuses.
+    for (from, to, says) in [
+        ("depth = 32", "depth = 8", "can't be chosen"),
+        ("memory = \"64M\"", "memory = \"2048M\"", "16M to 1024M"),
+        ("scale = 2", "scale = 5", "scale 5"),
+    ] {
+        let file = h.paths.machine("a").join("machine.toml");
+        let saved = fs::read_to_string(&file).unwrap();
+        edit_definition(&h, "a", from, to);
+        let check = machine_check(&h, "a");
+        assert_eq!(check.level, CheckLevel::Fail, "{to}: {check:?}");
+        let fix = check.fix.clone().unwrap_or_default();
+        assert!(fix.contains(says), "{to}: {check:?}");
+        // One machine's fault isn't another's.
+        assert_eq!(machine_check(&h, "b").level, CheckLevel::Ok, "{to}");
+        fs::write(&file, saved).unwrap();
+    }
+    assert_eq!(machine_check(&h, "a").level, CheckLevel::Ok);
+}
+
 #[test]
 fn an_imported_machine_builds_on_its_first_run_without_the_host_s_folder() {
     let h = harness!();
