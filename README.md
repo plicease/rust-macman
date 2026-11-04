@@ -519,7 +519,7 @@ The wizard recommends `mac99` for Mac OS 9.1 to 9.2.2 and Mac OS X 10.4, and off
 
 **This backend is new.** On Linux x86-64, with QEMU 10.2.1, a `mac99` machine has
 installed Mac OS 9.2.1 from its CD and started from its own disk, and done the same with
-Mac OS X 10.4 from its DVD, where full screen and networking worked and sound didn't.
+Mac OS X 10.4 from its DVD, where full screen, networking, and sound worked.
 Tiger's first start from its disk takes several minutes at the gray Apple, so run it
 without `--ephemeral` and shut down from the Apple menu, keeping what it builds. The Mac OS 9.0.4 CD didn't start on `mac99`, and a
 `g3beige` can't start classic Mac OS at all, as QEMU's Open Firmware has no Old World
@@ -568,7 +568,8 @@ Apple's own.
 
 QEMU has neither Power Mac's sound chip, so with sound on, a `mac99` gets a USB audio
 device instead. Mac OS 9 plays through it once you choose it under Output in the Sound
-control panel; until then it's silent. Mac OS X 10.4 played nothing through it. A `g3beige` has no USB, so it has no sound. The window isn't magnified, so the scale is 1, and there's no shared
+control panel; until then it's silent. Mac OS X 10.4 plays through it once it's chosen
+under Output in System Preferences' Sound pane and the Mac restarts. A `g3beige` has no USB, so it has no sound. The window isn't magnified, so the scale is 1, and there's no shared
 folder.
 
 Disks and CDs are IDE drives, and QEMU has four, so a run takes at most four disks and CDs

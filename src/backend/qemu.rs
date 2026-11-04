@@ -20,8 +20,8 @@
 //!   Mac OS X drive as Apple's own.
 //! - QEMU has neither Power Mac's sound chip. With sound on, a mac99 gets a USB
 //!   audio device, which Mac OS 9 plays through once it's chosen in the Sound
-//!   control panel. Mac OS X 10.4 plays nothing through it. A g3beige has no
-//!   USB, so no sound.
+//!   control panel, and Mac OS X 10.4 once it's chosen in System Preferences
+//!   and the Mac restarts. A g3beige has no USB, so no sound.
 //! - On Linux the window is SDL's, as GTK's can't hold the mouse on Wayland.
 //!
 //! A machine records the QEMU version it was made with as its revision. That

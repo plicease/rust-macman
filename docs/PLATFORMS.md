@@ -352,8 +352,10 @@ These parts of the smoke test have been seen to work on that host:
   does before it has a kernel extension cache. A run with `--ephemeral` throws that work
   away, so the next start is as slow; run it on its own disk and shut down from the Apple
   menu. A clone given more memory felt less slow.
-- Under Mac OS X 10.4, full screen and `slirp` networking worked. Sound didn't: nothing
-  played through `usb-audio`.
+- Under Mac OS X 10.4, full screen and `slirp` networking worked. Sound played through
+  `usb-audio` once it was chosen under Output in System Preferences' Sound pane and the
+  Mac restarted. Until then, though chosen, it was silent. A trace of QEMU's USB
+  controller then showed isochronous transfers flowing to it, with a few overruns.
 
 - A machine set to full screen started in a window: `-display` replaces every display
   option before it, `-full-screen` among them, as `query-display-options` over QMP showed.
@@ -376,7 +378,7 @@ What's been found about guests:
   770M, 1001M, 1014M, 1018M, 1022M, 1023M, 1540M, and 2044M did, and 260M, 510M, 516M,
   772M, 896M, 960M, 992M, 1000M, 1008M, 1012M, 1016M, 1020M, 1024M, 1056M, 1152M, 1280M, 1536M, and
   2048M didn't. No rule fits both but multiples of 32M, which macman requires.
-- Mac OS X 10.4 installs on `mac99` and starts from its own disk, without sound. Other
+- Mac OS X 10.4 installs on `mac99` and starts from its own disk. Other
   releases, and Mac OS X on a `g3beige`, haven't been tried.
 
 A blank disk for Mac OS X, from the wizard, is bigger than the 1G it suggests for classic

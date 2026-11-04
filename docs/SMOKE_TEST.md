@@ -249,5 +249,6 @@ macman create g4 --backend qemu-ppc --disk-size 2G
 | `macman wizard --media osx-10.4` | Recommends QEMU's `mac99`, and suggests a 10G blank disk. A size under 4G is taken with a warning. |
 | `macman create tiger --backend qemu-ppc --disk-size 10G --memory 1024M`, then `macman run tiger --media osx-10.4` | The installer starts to its language screen. Install, then Restart. |
 | `macman run tiger` | Starts from its disk, with no DVD. The first start sits at the gray Apple for several minutes, then a blue screen with a beach ball, before Setup Assistant. Shut down from the Apple menu; the next start is quicker. |
-| Under Mac OS X 10.4: full screen, `qemu.network slirp`, and an alert sound in System Preferences' Sound pane | Full screen and networking work. No sound plays, through `usb-audio`. |
+| Under Mac OS X 10.4: full screen, and `qemu.network slirp` | Both work. |
+| In System Preferences' Sound pane, choose the USB audio device under Output, restart, then click an alert sound | It plays on the host. Before the restart it's silent. |
 | A Mac OS X disc on `g3beige`, and other releases on `mac99` | Note what starts. Nothing has been tried yet. |
