@@ -362,7 +362,8 @@ These parts of the smoke test have been seen to work on that host:
   but showed only dithered grays, as if its palette never reached QEMU's display. At depth
   15, the gray Apple was drawn at half width in the left half of the window, in wrong
   colors, as if the loader wrote 2 bytes a pixel and the display read 4. Only depth 32
-  worked. Sound played through
+  worked, and macman warns about a lower one unless the machine records a classic Mac OS
+  version. Sound played through
   `usb-audio` once it was chosen under Output in System Preferences' Sound pane and the
   Mac restarted. Until then, though chosen, it was silent. A trace of QEMU's USB
   controller then showed isochronous transfers flowing to it, with a few overruns.

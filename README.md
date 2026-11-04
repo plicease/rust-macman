@@ -563,6 +563,10 @@ macman run g4 --media macos-9.2.1
 | `--display` | 640x480 to 3840x2160, at depth 8, 15, or 32 | `1024x768x32` |
 | `--scale` | 1 | 1 |
 
+Mac OS X 10.4 displays properly only at depth 32: at 8 it shows only grays, and at 15 it
+draws wrongly. `create`, `config set`, and `config edit` warn about a lower depth, unless
+the machine's `system.version` is classic Mac OS.
+
 `slirp` is QEMU's user-mode networking, with a Sun GEM card, which Mac OS drives as
 Apple's own.
 

@@ -237,6 +237,31 @@ fn validate_memory(kind: QemuMachine, memory: &str) -> Result<()> {
     }
 }
 
+/// A warning for a QEMU machine below depth 32, unless it's known to hold
+/// classic Mac OS. Mac OS X 10.4 showed only dithered grays at 8 bits, and drew
+/// its startup screen at half width in wrong colors at 15. Classic Mac OS
+/// hasn't been tried at either, so it isn't warned about.
+pub fn depth_warning(machine: &Machine) -> Option<String> {
+    let depth = machine.display.depth;
+    if machine.emulator.backend != BACKEND_NAME || depth == 32 {
+        return None;
+    }
+    let major = |version: &str| version.split('.').next()?.parse::<u32>().ok();
+    if machine
+        .system
+        .version
+        .as_deref()
+        .and_then(major)
+        .is_some_and(|major| major < 10)
+    {
+        return None;
+    }
+    Some(format!(
+        "depth {depth} doesn't display Mac OS X properly under QEMU: Mac OS X 10.4 showed only \
+         grays at depth 8, and drew wrongly at 15; use depth 32 for Mac OS X"
+    ))
+}
+
 fn validate_display(display: &Display) -> Result<()> {
     let Display {
         width,
@@ -736,6 +761,37 @@ pub(crate) mod tests {
             "-audio".into(),
             "none".into()
         ]));
+    }
+
+    #[test]
+    fn depths_below_32_warn_unless_the_system_is_classic() {
+        let warns = |depth: u32, version: Option<&str>| {
+            let mut g4 = machine(QemuMachine::Mac99);
+            g4.display.depth = depth;
+            g4.system.version = version.map(str::to_string);
+            depth_warning(&g4)
+        };
+        assert_eq!(warns(32, None), None);
+        assert_eq!(warns(32, Some("10.4")), None);
+        for (depth, version) in [
+            (8, None),
+            (15, None),
+            (15, Some("10.4")),
+            (8, Some("10.4.11")),
+        ] {
+            let warning = warns(depth, version).unwrap();
+            assert!(warning.contains(&format!("depth {depth}")), "{warning}");
+            assert!(warning.contains("use depth 32"), "{warning}");
+        }
+        // Classic Mac OS hasn't been tried at these depths.
+        assert_eq!(warns(8, Some("9.2.1")), None);
+        assert_eq!(warns(15, Some("9")), None);
+
+        // Other backends have their own depths.
+        let mut plus = machine(QemuMachine::Mac99);
+        plus.emulator.backend = "minivmac".into();
+        plus.display.depth = 8;
+        assert_eq!(depth_warning(&plus), None);
     }
 
     #[test]

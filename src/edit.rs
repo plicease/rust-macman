@@ -597,6 +597,13 @@ impl<'a> Editor<'a> {
                     .to_string(),
             );
         }
+        if before.display.depth != after.display.depth
+            && let Some(warning) = crate::backend::qemu::depth_warning(after)
+        {
+            let mut sentence = warning[..1].to_uppercase() + &warning[1..];
+            sentence.push('.');
+            notes.push(sentence);
+        }
         if !before.ephemeral && after.ephemeral {
             notes.push(
                 "A plain `run` will discard the guest's changes to the boot disk; use `run \
@@ -972,6 +979,26 @@ pub(crate) mod tests {
         }
         // Mac OS X panics on sizes that aren't a multiple of 32M.
         assert!(!memory.contains(&"1023M".to_string()), "{memory:?}");
+    }
+
+    #[test]
+    fn qemu_warns_below_depth_32() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        make_qemu(&paths);
+        let backends = crate::default_backends(&paths).unwrap();
+        let mut editor = Editor::open(&paths, &backends, "g4").unwrap();
+        let warned = |editor: &Editor| {
+            editor
+                .notes()
+                .iter()
+                .any(|note| note.starts_with("Depth 15 doesn't display Mac OS X"))
+        };
+
+        editor.set(FieldId::Depth, "15").unwrap();
+        assert!(warned(&editor), "{:?}", editor.notes());
+        editor.set(FieldId::Depth, "32").unwrap();
+        assert!(editor.notes().is_empty(), "{:?}", editor.notes());
     }
 
     /// A QEMU machine, saved directly, as `create` would need a real QEMU.
