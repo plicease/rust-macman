@@ -18,6 +18,14 @@ pub enum Ending {
     Cancelled,
 }
 
+/// How the editor was left where the wizard shows it as one of its steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leave {
+    Next,
+    Back,
+    Quit,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Mode {
     Browse,
@@ -42,6 +50,8 @@ pub struct Ui<'a> {
     mode: Mode,
     /// The last thing to report, and whether it's a problem.
     message: Option<(String, bool)>,
+    /// Shown as a step of the wizard, which saves nothing itself.
+    embedded: bool,
 }
 
 impl<'a> Ui<'a> {
@@ -51,6 +61,7 @@ impl<'a> Ui<'a> {
             selected: 0,
             mode: Mode::Browse,
             message: None,
+            embedded: false,
         };
         // Start on the first field that can change.
         ui.selected = ui
@@ -60,6 +71,46 @@ impl<'a> Ui<'a> {
             .position(|field| field.id.is_some())
             .unwrap_or(0);
         ui
+    }
+
+    /// The editor as a step of the wizard, for a machine it hasn't made: n and
+    /// b leave it forward and back, and nothing saves.
+    pub fn embedded(editor: Editor<'a>) -> Self {
+        let mut ui = Self::new(editor);
+        ui.embedded = true;
+        ui
+    }
+
+    pub fn editor(&self) -> &Editor<'a> {
+        &self.editor
+    }
+
+    /// [`Ui::handle`], for the wizard: keys that would save or leave the
+    /// editor leave the step instead.
+    pub fn handle_embedded(&mut self, key: KeyEvent) -> Option<Leave> {
+        if key.kind == KeyEventKind::Release {
+            return None;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            return Some(Leave::Quit);
+        }
+        if self.mode == Mode::Browse {
+            match key.code {
+                KeyCode::Char('n') => return Some(Leave::Next),
+                KeyCode::Char('b') | KeyCode::Esc => return Some(Leave::Back),
+                KeyCode::Char('q') => return Some(Leave::Quit),
+                KeyCode::Char('s') => {
+                    self.tell(
+                        "Nothing is made until the wizard's last step; n goes on.",
+                        false,
+                    );
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        self.handle(key);
+        None
     }
 
     fn field(&self) -> Field {
@@ -315,6 +366,12 @@ impl<'a> Ui<'a> {
             ]),
             header,
         );
+        self.draw_body(frame, body, footer);
+    }
+
+    /// The fields, the selected one's detail in `body`, and the keys and any
+    /// message in `footer`, as the wizard shows them too.
+    pub fn draw_body(&self, frame: &mut Frame, body: Rect, footer: Rect) {
         let [list, detail] =
             Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .areas(body);
@@ -418,6 +475,9 @@ impl<'a> Ui<'a> {
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
         let keys = match self.mode {
+            Mode::Browse if self.embedded => {
+                "↑/↓ move  Enter change  ←/→ previous/next  e type  u undo  n next  b back  q quit"
+            }
             Mode::Browse => {
                 "↑/↓ move  Enter change  ←/→ previous/next  e type  u undo field  s save  q quit"
             }

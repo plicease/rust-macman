@@ -157,6 +157,29 @@ pub enum Command {
     Disk(DiskCommand),
     /// Create a machine from a ROM and a private copy of a system image
     Create(CreateArgs),
+    /// Make a machine step by step in an interactive terminal, from a system disk, an
+    /// installer CD or floppy image, or by hand
+    Wizard {
+        /// A disk, CD, or floppy image to start from; it's only read
+        #[arg(value_name = "IMAGE", value_hint = ValueHint::FilePath)]
+        image: Option<PathBuf>,
+        /// The same, as an option
+        #[arg(
+            long = "image",
+            value_name = "IMAGE",
+            value_hint = ValueHint::FilePath,
+            conflicts_with = "image"
+        )]
+        image_option: Option<PathBuf>,
+        /// Registered media to start from, as `macman media add` named it
+        #[arg(
+            long = "media",
+            value_name = "MEDIA",
+            value_hint = MEDIA,
+            conflicts_with_all = ["image", "image_option"]
+        )]
+        media: Option<String>,
+    },
     /// Set the default machine
     Use {
         #[arg(value_name = "MACHINE", value_hint = MACHINE)]

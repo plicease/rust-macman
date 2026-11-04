@@ -59,6 +59,9 @@ disk and the registered image stays untouched. The first `run` of a hardware
 configuration compiles Mini vMac; later runs, and other machines with the same
 configuration, reuse that build.
 
+Or let `macman wizard` walk you through it, starting from a disk or CD image: see
+[Making a machine with the wizard](#making-a-machine-with-the-wizard).
+
 To try a freshly built disk image without saving anything to the machine:
 
 ```sh
@@ -94,7 +97,7 @@ takes no room at first; elsewhere it's a full copy. It lives in the run's sessio
 directory, and if macman is killed, the next `run` removes it.
 
 Other commands: `list [--builds]`, `current`, `rom list`, `system list`, `system remove`,
-`media list`, `media info`, `media remove`, `config show`, `config edit`, `clone`, `export`,
+`media list`, `media info`, `media remove`, `config show`, `config edit`, `wizard`, `clone`, `export`,
 `import`, `remove`, `du`, and `doctor`. Add `--verbose` for build and launch logs. Add `--json` to
 `list`, `doctor`, `rom list`, `system list`, `media list`, `media info`, `disk info`,
 `config show`, `current`, or `du` for output that scripts can read; [docs/JSON.md](docs/JSON.md) has the fields.
@@ -551,11 +554,74 @@ a plain `run` afterwards starts from its own disk, and installing the system is 
 you in the guest.
 
 Media names and paths never mix: `--media` takes only registered names, and `--cdrom` and
-`--disk` only paths. Shell completion offers registered media names after `--media`, and
-`media info` and `media remove`.
+`--disk` only paths. Shell completion offers registered media names after `--media`,
+including `wizard --media`, and `media info` and `media remove`.
+
+`macman wizard` lists registered media beside a new image file, and can register a new
+installer image for you once it has made the machine; see below.
 
 Installation CDs and floppies are copyrighted like ROMs and System Software; register
 your own, and don't redistribute them.
+
+## Making a machine with the wizard
+
+`macman wizard` makes a machine step by step in the terminal, from an image you already
+have:
+
+```sh
+macman wizard                                 # pick an image, or set up by hand
+macman wizard "Mac OS 9.0.4.toast"            # start from an installer CD image
+macman wizard --image ~/images/MacHD.img      # the same, as an option
+macman wizard --media macos-9.0.4             # start from registered media
+```
+
+It goes through these steps, and n, b, and q move forward, back, and out at any of
+them. Going back to change the image, the emulator, or the boot disk works out the rest
+again, keeping the name and settings you chose where they still apply.
+
+1. **Start from**: an image file, typed in (spaces and quotes are fine), or one of your
+   registered media. Then what it is: a disk with a system installed, an installer CD, an
+   installer or startup floppy, or nothing, to set a machine up by hand. The wizard
+   suggests one from what's on the image, and you can pick another.
+2. **What the image holds**: what macman read, kept apart from what it infers. *Observed*
+   is the layout, partition map, volumes, their names, boot blocks, and blessed System
+   Folder. *Inferred* is the system it probably holds, from a volume name such as "Mac OS
+   9.0.4" or the version given to `media add`, and how sure that is. File names are
+   never used, and when nothing says which system it is, none is assumed.
+3. **Emulator**: every backend, and Mini vMac model, ranked for that system and this
+   host. When a system runs on more than one, as Mac OS 8.1 does on SheepShaver and
+   Basilisk II, both are recommended, and you pick. Ones that can't be had here say why:
+   no CD installs on this host, no registered ROM that fits (register one with `macman
+   rom add`, then press r), or a host the backend doesn't run on. One the guess says won't
+   work stays available, marked unlikely, since the guess may be wrong.
+4. **Boot disk and name**: a copy of the image's volume, as `system add` takes it, or a
+   blank disk of a size you choose to install onto from the CD. A whole CD is attached
+   read-only as a CD, partition map and all, and never turned into a hard disk. A new
+   installer image can also be registered as media here, to attach by name later.
+5. **Settings**: the same editor as `config edit`, with the same choices and checks, and
+   a ROM can be chosen among the registered ones that fit.
+6. **Review the plan**: everything that will be made and where, what's only read, the
+   emulator build the first start needs, and anything to know before starting. Enter
+   makes it.
+7. **Made**: l starts the machine now, with the installer CD attached if it installs from
+   one, and Enter finishes. Either way, what to do next is printed when the wizard
+   closes, so you can read it again.
+
+Nothing is written until you confirm the plan: leaving at any step, with q or Ctrl-C,
+leaves no machine, and nothing registered. The machine is made the way `macman create`
+makes it, all at once or not at all, and the images you start from are only read. When
+you ask to register an image, it's registered after the machine is made.
+
+The wizard prepares the machine; installing the system is yours to do, in the guest.
+Along the way it gives advice for what you chose. For example, a Mac OS installer on
+SheepShaver or Basilisk II may hang updating hard disk drivers, which the installer's
+Options can turn off. Mini vMac can't yet install from a series of floppies (#28), so a
+floppy is only offered as a boot disk to copy, when it can start a Mac.
+
+It needs an interactive terminal, and works over SSH. Without one, as when output is
+redirected, it stops with an error and draws nothing: use `macman create` instead, such
+as `macman create NAME --backend sheepshaver --rom ROM --disk-size 1G`, then `macman run
+NAME --cdrom FILE`. `--json` isn't accepted.
 
 ## Checkpoints
 
