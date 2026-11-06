@@ -81,3 +81,22 @@ jobs:
         env:
           MACMAN_TEST_FS_DIRS: 'R:\;X:\'
           MACMAN_TEST_MEASURABLE_DIRS: '${{ runner.temp }};R:\'
+
+  # And on macOS: APFS is the runner's own, with clones and compression, HFS+
+  # shares blocks only by hard links, and FAT can't be measured.
+  macos-filesystems:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mount HFS+ and FAT
+        run: |
+          for fs in HFS+ MS-DOS; do
+            hdiutil create -quiet -size 256m -fs "$fs" -volname MACMAN "$RUNNER_TEMP/$fs.dmg"
+            mkdir -p "$RUNNER_TEMP/mnt-$fs"
+            hdiutil attach -quiet -nobrowse -mountpoint "$RUNNER_TEMP/mnt-$fs" "$RUNNER_TEMP/$fs.dmg"
+          done
+          mount | grep "$RUNNER_TEMP"
+      - run: cargo test --locked --test physical -- --nocapture
+        env:
+          MACMAN_TEST_FS_DIRS: ${{ runner.temp }}/mnt-HFS+:${{ runner.temp }}/mnt-MS-DOS
+          MACMAN_TEST_MEASURABLE_DIRS: ${{ runner.temp }}:${{ runner.temp }}/mnt-HFS+

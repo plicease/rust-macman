@@ -6,17 +6,19 @@
 //!
 //! It's measured only where the file system says where each file's data is
 //! and those places identify the blocks: on Linux, through `FIEMAP`, on ext4,
-//! XFS, and Btrfs, and on Windows, through `FSCTL_GET_RETRIEVAL_POINTERS`, on
-//! local NTFS and ReFS volumes, whose cluster numbers are addresses in the
-//! volume's one cluster space, so a block-cloned cluster on ReFS has the same
-//! number in every file that shares it. Anything else, or anything those
-//! can't account for, makes the whole figure unavailable, with the reason,
-//! never a guess:
+//! XFS, and Btrfs; on macOS, through `F_LOG2PHYS_EXT`, on APFS and HFS+,
+//! where an APFS clone's blocks are at the same place on the device in
+//! every file that shares them; and on Windows, through
+//! `FSCTL_GET_RETRIEVAL_POINTERS`, on local NTFS and ReFS volumes, whose
+//! cluster numbers are addresses in the volume's one cluster space, so a
+//! block-cloned cluster on ReFS has the same number in every file that
+//! shares it. Anything else, or anything those can't account for, makes the
+//! whole figure unavailable, with the reason, never a guess:
 //!
 //! - other file systems, including ZFS, whose block cloning and deduplication
 //!   aren't visible per file, stacked ones such as overlayfs, whose extents
 //!   belong to the file systems underneath, and network shares;
-//! - compressed data, as on Btrfs or NTFS, whose length is the data's and not
+//! - compressed data, as on Btrfs, NTFS, or APFS, whose length is the data's and not
 //!   what it takes on disk, and extents whose place isn't known yet, or is
 //!   shared with metadata (inline or tail-packed data, or a small file kept
 //!   in its NTFS file record);
@@ -27,8 +29,9 @@
 //!   of them, any file whose clusters don't cover all of its data;
 //! - files on an XFS realtime device, whose addresses aren't the data
 //!   device's;
-//! - a file that's missing or unreadable, or changes while it's mapped;
-//! - macOS, for now.
+//! - macOS files evicted to iCloud, or whose data is otherwise not in blocks
+//!   of their own;
+//! - a file that's missing or unreadable, or changes while it's mapped.
 //!
 //! What's counted is the blocks the files reference. Two caveats remain, and
 //! are documented rather than measured: Btrfs keeps a whole extent while any
@@ -38,7 +41,7 @@
 //! files would free, which depends on references macman doesn't know about,
 //! such as snapshots or files outside its directories.
 //!
-//! On Linux, mapping a file first flushes its pending writes, so its extents
+//! On Linux and macOS, mapping a file first flushes its pending writes, so its extents
 //! are final, which costs time while an emulator is writing to it; that, and
 //! reading every extent of every file, is why it's asked for rather than
 //! shown by default. On Windows, every writable file on ReFS is flushed,
@@ -888,7 +891,203 @@ mod imp {
     }
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(target_os = "macos")]
+mod imp {
+    use super::{Extent, Volume};
+    use std::ffi::CStr;
+    use std::fs::File;
+    use std::io;
+    use std::os::fd::AsRawFd;
+    use std::path::Path;
+
+    /// A file whose data is somewhere else, to be fetched when it's read,
+    /// as iCloud Drive leaves an evicted file; from sys/stat.h.
+    const SF_DATALESS: u32 = 0x4000_0000;
+    /// Times a file that changes while it's mapped is tried.
+    const ATTEMPTS: usize = 3;
+
+    fn fstat(file: &File) -> io::Result<libc::stat> {
+        // SAFETY: zero is a valid stat, and it's only read after success.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: the descriptor is open, and `stat` is writable.
+        if unsafe { libc::fstat(file.as_raw_fd(), &mut stat) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(stat)
+    }
+
+    /// What changes when a file's data or allocation does.
+    fn version(stat: &libc::stat) -> (i64, i64, i64, i64, i64, i64) {
+        (
+            stat.st_size,
+            stat.st_blocks,
+            stat.st_mtime,
+            stat.st_mtime_nsec,
+            stat.st_ctime,
+            stat.st_ctime_nsec,
+        )
+    }
+
+    /// Where `file`'s data is, and on which volume, or why that can't be
+    /// trusted to identify its blocks.
+    pub fn map(path: &Path) -> Result<(Volume, Vec<Extent>), String> {
+        let shown = path.display();
+        let file = File::open(path).map_err(|error| format!("can't read {shown}: {error}"))?;
+        let stat = fstat(&file).map_err(|error| format!("can't read {shown}: {error}"))?;
+        if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(format!("{shown} isn't a regular file"));
+        }
+        // Compressed data is kept in the file's resource fork or attributes,
+        // with no blocks of the file's own to say what it takes on disk.
+        if stat.st_flags & libc::UF_COMPRESSED != 0 {
+            return Err(format!(
+                "{shown} is compressed, and its blocks aren't counted as its size on disk"
+            ));
+        }
+        if stat.st_flags & SF_DATALESS != 0 {
+            return Err(format!("{shown} isn't all stored on this host"));
+        }
+        // SAFETY: zero is a valid statfs, and it's only read after success.
+        let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: the descriptor is open, and `fs` is writable.
+        if unsafe { libc::fstatfs(file.as_raw_fd(), &mut fs) } < 0 {
+            let error = io::Error::last_os_error();
+            return Err(format!(
+                "can't tell what file system {shown} is on: {error}"
+            ));
+        }
+        // SAFETY: the kernel terminates the name within the array.
+        let name = unsafe { CStr::from_ptr(fs.f_fstypename.as_ptr()) }.to_string_lossy();
+        // APFS clones share blocks within a volume, never between volumes,
+        // so a volume's device number is enough to tell its blocks apart;
+        // HFS+ shares none but by hard links, which are one file.
+        let holes = match &*name {
+            "apfs" => true,
+            // HFS+ has no sparse files, nor a way to seek past holes.
+            "hfs" => false,
+            other => {
+                return Err(format!(
+                    "{shown} is on {other}, where macman can't tell which blocks files \
+                     share; it can on APFS and HFS+"
+                ));
+            }
+        };
+        let block = u64::from(fs.f_bsize).max(1);
+        // Pending writes are flushed so the blocks they go to are final, as
+        // a rewrite of a clone's data moves it to blocks of its own.
+        file.sync_all()
+            .map_err(|error| format!("can't flush {shown}'s writes: {error}"))?;
+        for _ in 0..ATTEMPTS {
+            let before = fstat(&file).map_err(|error| format!("{shown}: {error}"))?;
+            let extents = extents(&file, before.st_size as u64, holes, block)
+                .map_err(|error| format!("can't map where {shown}'s data is on disk: {error}"))?;
+            let after = fstat(&file).map_err(|error| format!("{shown}: {error}"))?;
+            if version(&before) != version(&after) {
+                continue;
+            }
+            // Allocated but nowhere to be found, its data is kept some other
+            // way, as compressed data is, whatever its flags say.
+            if extents.is_empty() && before.st_size > 0 && before.st_blocks > 0 {
+                return Err(format!(
+                    "{shown} keeps its data somewhere other than blocks of its own"
+                ));
+            }
+            #[allow(clippy::unnecessary_cast)]
+            return Ok((Volume::Device(stat.st_dev as u64), extents));
+        }
+        Err(format!("{shown} kept changing while it was being measured"))
+    }
+
+    /// Seek `file` to the next data, or hole, from `offset`, as `whence`
+    /// says, or `None` if there's no more data.
+    fn seek(file: &File, offset: u64, whence: libc::c_int) -> io::Result<Option<u64>> {
+        // SAFETY: the descriptor is open.
+        let found = unsafe { libc::lseek(file.as_raw_fd(), offset as libc::off_t, whence) };
+        if found < 0 {
+            let error = io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::ENXIO) => Ok(None),
+                _ => Err(error),
+            };
+        }
+        Ok(Some(found as u64))
+    }
+
+    /// The byte ranges of `file`, `size` long, that hold data, as `(start,
+    /// end)`: past its holes if it may have them, or all of it.
+    fn data_ranges(file: &File, size: u64, holes: bool) -> io::Result<Vec<(u64, u64)>> {
+        if !holes {
+            return Ok(if size > 0 {
+                vec![(0, size)]
+            } else {
+                Vec::new()
+            });
+        }
+        let mut found = Vec::new();
+        let mut offset = 0;
+        while offset < size {
+            let Some(start) = seek(file, offset, libc::SEEK_DATA)? else {
+                break;
+            };
+            // The end of the file counts as a hole.
+            let end = seek(file, start, libc::SEEK_HOLE)?
+                .unwrap_or(size)
+                .min(size);
+            if end <= start {
+                return Err(io::Error::other("the data ranges didn't advance"));
+            }
+            found.push((start, end));
+            offset = end;
+        }
+        Ok(found)
+    }
+
+    /// Every extent of `file`'s data, in whole blocks of `block` bytes.
+    fn extents(file: &File, size: u64, holes: bool, block: u64) -> io::Result<Vec<Extent>> {
+        let mut found = Vec::new();
+        for (start, end) in data_ranges(file, size, holes)? {
+            let mut at = start;
+            while at < end {
+                let mut place = libc::log2phys {
+                    l2p_flags: 0,
+                    l2p_contigbytes: (end - at) as libc::off_t,
+                    l2p_devoffset: at as libc::off_t,
+                };
+                // SAFETY: the descriptor is open, and `place` is the struct
+                // the command reads and writes, live for the call.
+                if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_LOG2PHYS_EXT, &mut place) } < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let (Ok(physical), Ok(length)) = (
+                    u64::try_from(place.l2p_devoffset),
+                    u64::try_from(place.l2p_contigbytes),
+                ) else {
+                    return Err(io::Error::other("a place on disk was negative"));
+                };
+                let length = length.min(end - at);
+                if length == 0 {
+                    return Err(io::Error::other("the extents didn't advance"));
+                }
+                // A block is taken whole, however little of it is the file's,
+                // as a small file's or the last part of a larger one's is.
+                let from = physical / block * block;
+                let to = physical
+                    .saturating_add(length)
+                    .div_ceil(block)
+                    .saturating_mul(block);
+                found.push(Extent {
+                    physical: from,
+                    length: to - from,
+                    flags: 0,
+                });
+                at += length;
+            }
+        }
+        Ok(found)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod imp {
     use super::{Extent, Volume};
     use std::path::Path;
@@ -896,10 +1095,7 @@ mod imp {
     pub fn map(_path: &Path) -> Result<(Volume, Vec<Extent>), String> {
         Err(format!(
             "unique physical usage isn't implemented on {} yet",
-            match std::env::consts::OS {
-                "macos" => "macOS",
-                other => other,
-            }
+            std::env::consts::OS
         ))
     }
 }
@@ -971,7 +1167,7 @@ mod tests {
         let missing = dir.path().join("missing.dsk");
         let error = unique_physical([missing.as_path()]).unwrap_err();
         // Elsewhere nothing is mapped yet, so the reason is the platform.
-        if cfg!(any(target_os = "linux", windows)) {
+        if cfg!(any(target_os = "linux", target_os = "macos", windows)) {
             assert!(error.contains("missing.dsk"), "{error}");
         } else {
             assert!(error.contains("isn't implemented"), "{error}");
