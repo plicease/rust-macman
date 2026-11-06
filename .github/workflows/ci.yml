@@ -24,7 +24,7 @@ jobs:
       - run: cargo test --locked
 
   macos-arm64:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - run: cargo test --locked
@@ -85,7 +85,7 @@ jobs:
   # And on macOS: APFS is the runner's own, with clones and compression, HFS+
   # shares blocks only by hard links, and FAT can't be measured.
   macos-filesystems:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Mount HFS+ and FAT
