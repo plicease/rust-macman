@@ -18,8 +18,16 @@ use tempfile::TempDir;
 
 #[cfg(target_os = "linux")]
 use linux::reflink;
+#[cfg(target_os = "macos")]
+use macos::reflink;
 #[cfg(windows)]
 use windows::reflink;
+
+/// Elsewhere there's no way to make a reflink.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn reflink(_from: &Path, _to: &Path) -> bool {
+    false
+}
 
 /// A directory for each file system to test on.
 fn roots() -> Vec<TempDir> {
@@ -80,6 +88,23 @@ fn write_at(path: &Path, data: &[u8], offset: u64) {
     let mut file = fs::OpenOptions::new().write(true).open(path).unwrap();
     file.seek(SeekFrom::Start(offset)).unwrap();
     file.write_all(data).unwrap();
+}
+
+/// Whether `path`, extended without being written, was left a hole rather
+/// than allocated, by its allocation as the platform reports it.
+fn has_holes(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path).unwrap();
+        metadata.blocks() * 512 < metadata.len()
+    }
+    // Windows files are made sparse, and NTFS and ReFS both have holes.
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        true
+    }
 }
 
 /// A new file at `path` whose unwritten parts, on Windows too, are holes.
@@ -220,6 +245,46 @@ mod windows {
     }
 }
 
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::ffi::CString;
+    use std::os::macos::fs::MetadataExt;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+
+    fn c_path(path: &Path) -> CString {
+        CString::new(path.as_os_str().as_bytes()).unwrap()
+    }
+
+    /// Make `to` an APFS clone of `from`, if the file system can.
+    pub fn reflink(from: &Path, to: &Path) -> bool {
+        let _ = std::fs::remove_file(to);
+        let (from, to) = (c_path(from), c_path(to));
+        // SAFETY: both paths are terminated and live for the call.
+        unsafe { libc::clonefile(from.as_ptr(), to.as_ptr(), 0) == 0 }
+    }
+
+    /// Replace `path` with a copy compressed as `ditto --hfsCompression`
+    /// compresses it, if the file system can.
+    pub fn compress(path: &Path) -> bool {
+        let packed = path.with_extension("packed");
+        let copied = Command::new("ditto")
+            .arg("--hfsCompression")
+            .arg(path)
+            .arg(&packed)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !copied {
+            return false;
+        }
+        std::fs::rename(&packed, path).unwrap();
+        std::fs::metadata(path).unwrap().st_flags() & libc::UF_COMPRESSED != 0
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::fs::{File, OpenOptions};
@@ -312,9 +377,13 @@ fn distinct_files_add_up_and_holes_take_nothing() {
         assert_eq!(physical(&[&a, &b]), one + two, "{}", dir.display());
         assert_eq!(physical(&[&a, &a]), one, "a file listed twice");
 
-        // A 1 GiB file with 64 KiB written in the middle.
+        // A 1 GiB file with 64 KiB written in the middle, where the file
+        // system has holes; HFS+ allocates it all, if it has room.
         let sparse = dir.join("sparse.dsk");
-        sparse_file(&sparse).set_len(1 << 30).unwrap();
+        if sparse_file(&sparse).set_len(1 << 30).is_err() || !has_holes(&sparse) {
+            eprintln!("no sparse files in {}", dir.display());
+            continue;
+        }
         write_at(&sparse, &noise(3, 64 * 1024), 512 << 20);
         let used = physical(&[&sparse]);
         assert!(
@@ -341,7 +410,6 @@ fn hard_links_reflinks_and_deduplication_count_once() {
         fs::hard_link(&a, &link).unwrap();
         assert_eq!(physical(&[&a, &link]), alone, "{}", dir.display());
 
-        #[cfg(any(target_os = "linux", windows))]
         {
             let clone = dir.join("clone.dsk");
             if reflink(&a, &clone) {
@@ -375,7 +443,6 @@ fn hard_links_reflinks_and_deduplication_count_once() {
 
 /// `path`, filled with data that compresses well, compressed by the file
 /// system, if it can.
-#[cfg(any(target_os = "linux", windows))]
 fn compressed(path: &Path) -> bool {
     let data = vec![0x5Au8; 1 << 20];
     #[cfg(target_os = "linux")]
@@ -386,16 +453,25 @@ fn compressed(path: &Path) -> bool {
         fs::write(path, data).unwrap();
         set
     }
+    #[cfg(target_os = "macos")]
+    {
+        fs::write(path, data).unwrap();
+        macos::compress(path)
+    }
     #[cfg(windows)]
     {
         fs::write(path, data).unwrap();
         windows::compress(path)
     }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = (path, data);
+        false
+    }
 }
 
 /// Compressed extents' sizes on disk aren't reported, so a compressed file
 /// leaves it unavailable rather than counted at its uncompressed length.
-#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn a_compressed_file_leaves_it_unavailable() {
     for root in roots() {
@@ -606,7 +682,6 @@ fn du_counts_storage_shared_across_entries_once() {
         let before = du(root)["unique_physical_bytes"].as_u64().unwrap();
         let own = physical(&[&medium]) + physical(&[&checkpoint]);
 
-        #[cfg(any(target_os = "linux", windows))]
         {
             // Reflinked to what they're copies of: a checkpoint of its
             // machine's disk, and a medium of a system, so across entries.
@@ -634,8 +709,6 @@ fn du_counts_storage_shared_across_entries_once() {
                 "{text}"
             );
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
-        let _ = (before, own);
     }
 }
 
@@ -659,7 +732,7 @@ fn a_missing_file_leaves_it_unavailable() {
     }
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 #[test]
 fn other_platforms_say_it_isnt_implemented() {
     let root = TempDir::new().unwrap();

@@ -911,7 +911,9 @@ an estimate, and a note on stderr says why. It's measured:
 | Linux | XFS | Measured, unless a file is on a realtime device |
 | Linux | Btrfs | Measured, unless a file is compressed; reflinks between subvolumes count once |
 | Linux | ZFS, tmpfs, overlayfs, NFS, SMB, FUSE, and others | Unavailable |
-| macOS | APFS, HFS+ | Unavailable, not implemented yet |
+| macOS | APFS | Measured, unless a file is compressed or evicted to iCloud; clones count once |
+| macOS | HFS+ | Measured, unless a file is compressed |
+| macOS | FAT, exFAT, SMB, NFS, and others | Unavailable |
 | Windows | NTFS | Measured, unless a file is compressed, deduplicated, or a cloud placeholder |
 | Windows | ReFS | Measured; block clones, as copies on a Dev Drive are, count once |
 | Windows | FAT, exFAT, network shares, and others | Unavailable |
@@ -949,12 +951,28 @@ including one that reports NTFS, as well as one that's missing or unreadable, or
 changing while it was read. Only a file's main data counts, not its alternate data streams,
 just as with its allocated size.
 
+On macOS it finds each file's data with `SEEK_DATA` and `SEEK_HOLE`, so a sparse file's
+holes take nothing, then reads where each part of it is on the device with `fcntl`'s
+`F_LOG2PHYS_EXT`, and counts those ranges, in whole blocks, per volume. An APFS clone, as
+`cp -c` and the Finder's Duplicate make, has its shared blocks at the same place as the
+original's, and a part rewritten since gets blocks of its own; clones are only ever within
+one volume. HFS+ has no clones or holes, so there only hard links share. It's unavailable for:
+
+- a file compressed by the file system, as `ditto --hfsCompression` leaves it, whose data
+  is kept in its resource fork or attributes rather than blocks of its own;
+- a file evicted to iCloud, which isn't on the host at all, or any file with data
+  allocated that isn't anywhere `F_LOG2PHYS_EXT` can say;
+- a file on any other file system, or that's missing or unreadable, or that kept changing
+  while it was read.
+
+APFS on a Fusion Drive, which spans two devices, hasn't been tried.
+
 What's counted is the blocks the files point at. Btrfs keeps a whole extent while any of
 it is used, so after a file's blocks are partly rewritten, space no file uses any more
 can remain allocated and isn't counted, and redundancy below the file system, such as
 Btrfs RAID1 or DUP, or a RAID device, isn't multiplied in.
 
-Reading every extent of every file is slower than `du` alone. On Linux each file's pending
+Reading every extent of every file is slower than `du` alone. On Linux and macOS each file's pending
 writes are flushed first so its blocks are final, and on Windows a writable ReFS
 file's are, as is an NTFS file's if they're not on disk yet. For a consistent figure, run it while no
 machine is running: a file that changes as it's read is tried again, then left
